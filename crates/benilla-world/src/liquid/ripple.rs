@@ -249,6 +249,11 @@ pub(super) fn pack_sky_rows(
     {
         *row = stop.to_array();
     }
+    // fork: the dome's dawn/dusk warp rides the two top rows' spare `w` lanes (the shader reads only
+    // the stops' rgb): `sky[0].w` its strength, `sky[1].w` the sun's azimuth.
+    let warp = crate::sky::dome_warp(&light);
+    data.0.sky[0][3] = warp.x;
+    data.0.sky[1][3] = warp.y;
 }
 
 /// The per-frame blob, extracted to the render world for upload.

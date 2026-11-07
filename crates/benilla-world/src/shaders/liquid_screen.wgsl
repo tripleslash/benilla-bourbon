@@ -109,6 +109,21 @@ fn fs_blur_reflect(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     return sum * 0.25;
 }
 
+/// fork: **Pass 5 — the blurred mirror's mip chain.** Each level of the blurred mirror below its
+/// first, from the level above (`blur_src`, a one-level view of it): four bilinear taps at ±0.75 of a
+/// source texel, a [1 3 3 1] tent on each axis, so level `k` is blurred about `1.2 · 2^k` of its
+/// level-0 texels — the `σ` the water's rough mirror read picks its level by
+/// (`liquid_cata.wgsl`'s `MIRROR_CHAIN_SIGMA0`). An explicit level, so no derivative is asked for.
+@fragment
+fn fs_mip_down(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
+    let o = 0.75 / vec2<f32>(textureDimensions(blur_src));
+    var sum = textureSampleLevel(blur_src, src_samp, in.uv + vec2<f32>(-o.x, -o.y), 0.0);
+    sum += textureSampleLevel(blur_src, src_samp, in.uv + vec2<f32>(o.x, -o.y), 0.0);
+    sum += textureSampleLevel(blur_src, src_samp, in.uv + vec2<f32>(-o.x, o.y), 0.0);
+    sum += textureSampleLevel(blur_src, src_samp, in.uv + vec2<f32>(o.x, o.y), 0.0);
+    return sum * 0.25;
+}
+
 /// **Pass 3 — linear view depth.** The main depth buffer, reconstructed into yards along the view
 /// axis and written to `R32Float`.
 ///

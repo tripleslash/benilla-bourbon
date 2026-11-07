@@ -95,6 +95,13 @@ const BLUR_SHIFT: u32 = 2;
 /// renders at a quarter because the water only ever reads it through a quarter-resolution blur.
 const REFLECT_SHIFT: u32 = 2;
 
+/// fork: the blurred mirror's mip levels ([`LiquidScreenTargets::reflect_blur`]), level 0 included:
+/// the Modern (Experimental) water reads a rough surface's reflection off the level its blur needs
+/// (`liquid_cata.wgsl`'s `mirror_read_rough`, whose `MIRROR_MIPS` a test holds to this) and grades it
+/// toward the last one's local mean. Five reach a blur of ~19 mirror texels, past which the
+/// reflection of anything is its mean.
+pub(crate) const REFLECT_MIPS: u32 = 5;
+
 /// The three pictures of the frame the cata water shader reads.
 ///
 /// Handles rather than render-world `CachedTexture`s, because the consumer is a `Material`: it
@@ -149,10 +156,11 @@ impl LiquidScreenTargets {
                 reflect_size,
                 TextureFormat::Rgba16Float,
             )),
-            reflect_blur: images.add(target_image(
+            reflect_blur: images.add(target_image_mips(
                 "liquid_reflection_blur",
                 reflect_size,
                 TextureFormat::Rgba16Float,
+                REFLECT_MIPS.min(reflect_size.max_element().ilog2() + 1),
             )),
             size,
         }
@@ -165,6 +173,15 @@ impl LiquidScreenTargets {
 /// shader's refraction and reflection offsets both push that UV off the edge on purpose — under
 /// `Repeat` a wave at the left margin would refract the right-hand side of the screen.
 fn target_image(label: &'static str, size: UVec2, format: TextureFormat) -> Image {
+    target_image_mips(label, size, format, 1)
+}
+
+/// [`target_image`] with `mips` levels, each rendered by a pass of its own.
+///
+/// fork: the colour targets filter LINEARLY between levels: the sampler is shared (`scene_samp`
+/// takes `scene_color`'s), and the blurred mirror's chain is read at fractional levels. A target with
+/// one level never sees the difference.
+fn target_image_mips(label: &'static str, size: UVec2, format: TextureFormat, mips: u32) -> Image {
     let mut image = Image::new_uninit(
         Extent3d {
             width: size.x,
@@ -177,6 +194,7 @@ fn target_image(label: &'static str, size: UVec2, format: TextureFormat) -> Imag
     );
     image.texture_descriptor.usage =
         TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT;
+    image.texture_descriptor.mip_level_count = mips.max(1);
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         label: Some(label.into()),
         address_mode_u: ImageAddressMode::ClampToEdge,
@@ -186,7 +204,7 @@ fn target_image(label: &'static str, size: UVec2, format: TextureFormat) -> Imag
         // rather than blended — so it takes nearest and the colour copies take linear.
         mag_filter: filter_for(format),
         min_filter: filter_for(format),
-        mipmap_filter: ImageFilterMode::Nearest,
+        mipmap_filter: filter_for(format),
         ..default()
     });
     image
@@ -299,6 +317,8 @@ struct ScreenVariant {
     linear_depth: CachedRenderPipelineId,
     // fork: the mirror's blur (`fs_blur_reflect`).
     reflect_blur: CachedRenderPipelineId,
+    // fork: the blurred mirror's mip chain (`fs_mip_down`).
+    mip_down: CachedRenderPipelineId,
 }
 
 fn init_pipelines(mut commands: Commands, asset_server: Res<AssetServer>) {
@@ -415,6 +435,11 @@ fn build_variant(
             "fs_blur_reflect",
             TextureFormat::Rgba16Float,
         )),
+        mip_down: pipeline_cache.queue_render_pipeline(pipeline(
+            "liquid_reflection_mips",
+            "fs_mip_down",
+            TextureFormat::Rgba16Float,
+        )),
         layout,
     }
 }
@@ -453,11 +478,12 @@ pub(crate) fn liquid_screen_pass(
             return; // `specialize_pipelines` builds it this frame; drawn next
         };
         let cache = world.resource::<PipelineCache>();
-        let (Some(copy), Some(blur), Some(linear_depth), Some(reflect_blur)) = (
+        let (Some(copy), Some(blur), Some(linear_depth), Some(reflect_blur), Some(mip_down)) = (
             cache.get_render_pipeline(variant.copy),
             cache.get_render_pipeline(variant.blur),
             cache.get_render_pipeline(variant.linear_depth),
             cache.get_render_pipeline(variant.reflect_blur),
+            cache.get_render_pipeline(variant.mip_down),
         ) else {
             return; // still compiling — the water falls back to its flat lane this frame
         };
@@ -502,12 +528,31 @@ pub(crate) fn liquid_screen_pass(
         // fork: the mirror's blur reads the mirror at 4 and writes `reflect_blur`, which no group
         // binds. The mirror camera (`order` −1) has already filled it this frame.
         let bind_mirror = bind("liquid_reflection_bind_blur", &mirror.texture_view);
+        // fork: one single-level view per level of the blurred mirror: a colour attachment takes one
+        // level, and each level below the first is drawn from the one above, a disjoint subresource
+        // of the same texture, which a pass may read while it writes another.
+        let mirror_levels: Vec<TextureView> =
+            (0..mirror_blurred.texture_descriptor.mip_level_count)
+                .map(|level| {
+                    mirror_blurred.texture.create_view(&TextureViewDescriptor {
+                        label: Some("liquid_reflection_blur_level"),
+                        base_mip_level: level,
+                        mip_level_count: Some(1),
+                        ..Default::default()
+                    })
+                })
+                .collect();
+        let bind_levels: Vec<BindGroup> = mirror_levels
+            .iter()
+            .take(mirror_levels.len().saturating_sub(1))
+            .map(|src| bind("liquid_reflection_bind_mips", src))
+            .collect();
 
         // colour ← the live main texture; blur ← that copy; depth ← the view's depth buffer.
         // The blur reads `color` rather than the main texture again purely so the two colour reads
         // agree bit for bit — a reflection sampling a different frame from the refraction beside it
         // is the kind of mismatch that only shows up in motion.
-        let passes: [(&str, &RenderPipeline, &BindGroup, &TextureView); 4] = [
+        let mut passes: Vec<(&str, &RenderPipeline, &BindGroup, &TextureView)> = vec![
             (
                 "liquid_screen_copy",
                 copy,
@@ -530,9 +575,13 @@ pub(crate) fn liquid_screen_pass(
                 "liquid_reflection_blur",
                 reflect_blur,
                 &bind_mirror,
-                &mirror_blurred.texture_view,
+                &mirror_levels[0],
             ),
         ];
+        // fork: then the chain, level by level, each from the one above.
+        for (src, dst) in bind_levels.iter().zip(mirror_levels.iter().skip(1)) {
+            passes.push(("liquid_reflection_mips", mip_down, src, dst));
+        }
         for (label, pipeline, group, dst) in passes {
             let mut pass =
                 render_context
@@ -584,4 +633,20 @@ pub(crate) fn register(app: &mut App) {
                 .after(crate::ssilvb::ssilvb_pass)
                 .before(main_transparent_pass_3d),
         );
+}
+
+#[cfg(test)]
+mod tests {
+    /// The blurred mirror's level count is one number in two places: [`super::REFLECT_MIPS`]
+    /// allocates the chain and `liquid_cata.wgsl`'s `MIRROR_MIPS` clamps the level it reads. A shader
+    /// asking past the chain reads its last level as if it were blurrier than it is.
+    #[test]
+    fn the_water_reads_the_mirror_chain_this_allocates() {
+        let cata = include_str!("../../../benilla-assets/src/shaders/liquid_cata.wgsl");
+        let want = format!("const MIRROR_MIPS: f32 = {}.0;", super::REFLECT_MIPS);
+        assert!(
+            cata.contains(&want),
+            "liquid_cata.wgsl must declare `{want}`"
+        );
+    }
 }

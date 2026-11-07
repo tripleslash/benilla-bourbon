@@ -87,20 +87,27 @@ const NOISE_BYTES: &[u8] = include_bytes!("../../assets/liquid/magma_noise.rgba"
 /// `RENDER_WORLD` only, like every other world texture: nothing on the CPU side reads it back, and
 /// the main-world copy would be a quarter-megabyte held for nothing. The sampler repeats on both
 /// axes — the whole point is tiling — and takes linear filtering.
+///
+/// **With its whole mip chain** ([`bump_mips`]). A 256² sheet tiled at world scale is minified
+/// across almost every water pixel past a few yards, and a minified texture with no mips aliases:
+/// the far water sparkled as each pixel landed on one arbitrary texel. The reference's own normal
+/// maps are authored art with mips; this one is synthesised, so it builds its own.
 pub(super) fn bump_image() -> Image {
-    let mut image = Image::new(
+    let (data, levels) = bump_mips(BUMP_BYTES, BUMP_SIZE as usize);
+    let mut image = Image::new_uninit(
         Extent3d {
             width: BUMP_SIZE,
             height: BUMP_SIZE,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        BUMP_BYTES.to_vec(),
         // NOT sRGB: this is a normal, not a colour. The gamma lane (`world_assets::images`) is
         // about colour bytes; pushing a direction through a transfer curve would bend it.
         TextureFormat::Rgba8Unorm,
         RenderAssetUsages::RENDER_WORLD,
     );
+    image.data = Some(data);
+    image.texture_descriptor.mip_level_count = levels;
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         label: Some("liquid_bump".into()),
         address_mode_u: ImageAddressMode::Repeat,
@@ -112,6 +119,75 @@ pub(super) fn bump_image() -> Image {
         ..default()
     });
     image
+}
+
+/// The variance a bump texel's alpha can carry: `a² · BUMP_VAR_MAX` is the slope variance per axis
+/// its footprint averaged away (`liquid_cata.wgsl`'s `BUMP_VAR_MAX`, which a test holds to this).
+/// Square-root encoded, so the small variances of a shallow sheet keep their precision.
+pub(super) const BUMP_VAR_MAX: f32 = 0.05;
+
+/// The bump map's mip chain, level 0 first, and its level count: each level the box average of the
+/// level-0 normals under it, and in ALPHA the slope variance per axis that averaging took out —
+/// `sqrt(σ² / BUMP_VAR_MAX)`, exactly 0 at level 0. `liquid_cata.wgsl`'s `bump_gradient` reads it
+/// back as roughness, so the far water's gloss widens as its ripples blur away rather than staying
+/// a mirror of the average normal.
+///
+/// The variance is stored, not inferred from the averaged normal's shortening (Toksvig): this sheet
+/// is shallow — its slopes run a few hundredths — so the shortening sits under the 8-bit encoding's
+/// own error and reads as nothing.
+pub(super) fn bump_mips(base: &[u8], size: usize) -> (Vec<u8>, u32) {
+    let decode = |b: u8| b as f32 / 255.0 * 2.0 - 1.0;
+    let encode = |v: f32| ((v * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0).round() as u8;
+    let unit = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    // Level 0 as the committed sheet, its alpha 0: nothing is averaged away at full resolution.
+    let mut data: Vec<u8> = base
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|t| [t[0], t[1], t[2], 0])
+        .collect();
+    // Per texel of the current level: the sums of the level-0 normals' x, y, z and of x², y² under it.
+    let mut level: Vec<[f32; 5]> = base
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|t| {
+            let (x, y, z) = (decode(t[0]), decode(t[1]), decode(t[2]));
+            [x, y, z, x * x, y * y]
+        })
+        .collect();
+    let (mut n, mut levels, mut count) = (size, 1u32, 1.0f32);
+    while n > 1 {
+        let half = n / 2;
+        count *= 4.0;
+        let mut next = vec![[0.0f32; 5]; half * half];
+        for y in 0..half {
+            for x in 0..half {
+                let mut acc = [0.0f32; 5];
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let t = level[(2 * y + dy) * n + 2 * x + dx];
+                    for c in 0..5 {
+                        acc[c] += t[c];
+                    }
+                }
+                next[y * half + x] = acc;
+            }
+        }
+        for t in &next {
+            let m = [t[0] / count, t[1] / count, t[2] / count];
+            let var = 0.5 * ((t[3] / count - m[0] * m[0]) + (t[4] / count - m[1] * m[1]));
+            data.extend_from_slice(&[
+                encode(m[0]),
+                encode(m[1]),
+                encode(m[2]),
+                unit((var.max(0.0) / BUMP_VAR_MAX).sqrt()),
+            ]);
+        }
+        level = next;
+        n = half;
+        levels += 1;
+    }
+    (data, levels)
 }
 
 /// Build the `Image` the cata liquid materials bind on stage 7 — the shoreline foam sheet.
@@ -597,6 +673,62 @@ mod tests {
         }
         assert_eq!(kernel(1.0), 0.0, "the kernel must be hard zero at the rim");
         assert_eq!(kernel(0.0), 1.0, "the kernel must reach full at the centre");
+    }
+
+    /// The mip chain is complete, its level 0 is the committed sheet with no variance in its alpha,
+    /// and its coarser levels carry the slope variance they average away, more of it the more they
+    /// average — the roughness `liquid_cata.wgsl` reads back at the scale `BUMP_VAR_MAX` it shares
+    /// with this file.
+    #[test]
+    fn the_bump_mips_carry_the_variance_they_average_away() {
+        let n = super::BUMP_SIZE as usize;
+        let (data, levels) = super::bump_mips(super::BUMP_BYTES, n);
+        assert_eq!(levels, 9, "256² has nine levels down to 1²");
+        let total: usize = (0..levels).map(|l| (n >> l).pow(2) * 4).sum();
+        assert_eq!(data.len(), total);
+        for (got, want) in data[..n * n * 4]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(super::BUMP_BYTES.as_chunks::<4>().0.iter())
+        {
+            assert_eq!(
+                &got[..3],
+                &want[..3],
+                "level 0's normals are the committed sheet's"
+            );
+            assert_eq!(got[3], 0, "level 0 averages nothing away");
+        }
+        let level = |l: u32| {
+            let off: usize = (0..l).map(|k| (n >> k).pow(2) * 4).sum();
+            &data[off..off + (n >> l).pow(2) * 4]
+        };
+        let mean_var = |l: u32| {
+            let t = level(l);
+            let a: f32 = t
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|t| (t[3] as f32 / 255.0).powi(2) * super::BUMP_VAR_MAX)
+                .sum();
+            a / (t.len() / 4) as f32
+        };
+        let (v2, v5) = (mean_var(2), mean_var(5));
+        assert!(v2 > 0.0, "a coarse level carries some variance");
+        assert!(
+            v5 > 2.0 * v2,
+            "coarser levels carry more of it: {v5} vs {v2}"
+        );
+        assert!(
+            mean_var(8) < super::BUMP_VAR_MAX,
+            "the whole sheet's variance fits the encoding's range"
+        );
+        let cata = include_str!("../../../benilla-assets/src/shaders/liquid_cata.wgsl");
+        let want = format!("const BUMP_VAR_MAX: f32 = {};", super::BUMP_VAR_MAX);
+        assert!(
+            cata.contains(&want),
+            "liquid_cata.wgsl must declare `{want}`"
+        );
     }
 
     /// The encoded field is unit normals with a positive `z`, and it TILES.

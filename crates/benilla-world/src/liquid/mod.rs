@@ -197,6 +197,15 @@ impl Plugin for LiquidPlugin {
             // commands applied and show up in its `Added` query — a surface is never drawn
             // material-less, and never dressed twice.
             .add_systems(PostUpdate, surface::apply_water_detail)
+            // fork: the Modern (Experimental) water's fine ring, for its displaced surface. In
+            // `Update`, after the tier's own sync (after the frame's script calls, whose
+            // `waterDetail` callback writes the tier): in `PostUpdate` it would race the transform
+            // propagation and the bounds over the camera's `GlobalTransform` and every `Mesh3d`.
+            // It reads the camera a frame old at worst, a yard of a 16-yard hysteresis.
+            .add_systems(
+                Update,
+                surface::swap_fine_liquids.after(surface::sync_water_tier),
+            )
             .add_systems(
                 Update,
                 (

@@ -299,6 +299,20 @@ pub(crate) fn dome_radiance(light: &WowLighting) -> [Vec3; 6] {
     })
 }
 
+/// The dome's dawn/dusk warp: `x` its strength S, `y` the sun's azimuth `atan2(z, x)`, both
+/// quantized to 1/4096; S = 0 (midday, or a `highlightSky` 0 zone) leaves the gradient untouched.
+/// fork: read by the dome and by the water's sky reflection (`liquid::ripple`'s sky rows), so the
+/// water mirrors the warped sky that is drawn.
+pub(crate) fn dome_warp(light: &WowLighting) -> Vec4 {
+    let s = light.celestial_dir;
+    Vec4::new(
+        benilla_assets::quantize(light.sky_warp, 4096.0),
+        benilla_assets::quantize(s.z.atan2(s.x), 4096.0),
+        0.0,
+        0.0,
+    )
+}
+
 /// Push the time-of-day sky stops and fog colour (`WowLighting`) into the dome material.
 fn update_sky_colors(
     light: Res<WowLighting>,
@@ -309,16 +323,7 @@ fn update_sky_colors(
         return;
     };
     let (sky, fog) = dome_stops(&light);
-    // Dawn/dusk warp: strength S and the sun's azimuth `atan2(z, x)`, quantized to 1/4096; S = 0
-    // (midday, or a `highlightSky` 0 zone) leaves the gradient untouched.
-    let s = light.celestial_dir;
-    let sun_az = s.z.atan2(s.x);
-    let warp = Vec4::new(
-        benilla_assets::quantize(light.sky_warp, 4096.0),
-        benilla_assets::quantize(sun_az, 4096.0),
-        0.0,
-        0.0,
-    );
+    let warp = dome_warp(&light);
     benilla_assets::write_gated(
         &mut materials,
         &handle.0,

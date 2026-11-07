@@ -298,10 +298,18 @@ pub(crate) fn spawn_liquids<'a>(
     }
     for (_, lane, layers) in groups {
         let mesh = liquid_bevy_mesh(&layers, None);
-        // Computed here, so the exterior cull tests the cell from its first frame.
-        let aabb = mesh.compute_aabb();
+        // Computed here, so the exterior cull tests the cell from its first frame. fork: as tall as
+        // the surface's displacement reaches (`liquid_cata.wgsl`'s `HEIGHT_MAX_YD`).
+        let aabb = mesh.compute_aabb().map(|mut b| {
+            b.half_extents.y += HEIGHT_MAX_YD;
+            b
+        });
+        let coarse = meshes.add(mesh);
+        let fine = (!lane.kind.is_fullbright())
+            .then(|| LiquidFine::new(&layers, coarse.clone()))
+            .flatten();
         let mut ec = commands.spawn((
-            Mesh3d(meshes.add(mesh)),
+            Mesh3d(coarse),
             Transform::IDENTITY,
             LiquidSurface,
             LiquidLayerBoxes(layers.iter().filter_map(|lq| layer_box(lq)).collect()),
@@ -317,9 +325,184 @@ pub(crate) fn spawn_liquids<'a>(
         if let Some(aabb) = aabb {
             ec.insert(aabb);
         }
+        if let Some(fine) = fine {
+            ec.insert(fine);
+        }
         record_lane(&mut ec, lane);
         entities.push(ec.id());
     }
+}
+
+/// fork: how far the Modern (Experimental) water's surface rises or falls at most, yards
+/// (`liquid_cata.wgsl`'s `HEIGHT_MAX_YD`, which a test holds to this): the cells' bounds grow by it.
+pub(super) const HEIGHT_MAX_YD: f32 = 0.75;
+
+/// fork: the fine ring's split: each wet cell of a surface near the eye is drawn as this many quads a
+/// side, so the Modern (Experimental) water's displacement (`liquid_cata.wgsl`'s vertex stage), which
+/// the 4.17-yard lattice cannot carry, has a vertex about every yard.
+const FINE_SPLIT: usize = 4;
+/// A surface takes its fine mesh when its nearest point comes this near the eye, horizontally, and
+/// gives it back past [`FINE_RING_OUT`]. The shader's height is gone by 56 yd (`HEIGHT_GONE_YD`), so
+/// a surface drawn coarse is always flat there and the two meshes meet without a crack.
+const FINE_RING_IN: f32 = 64.0;
+const FINE_RING_OUT: f32 = 80.0;
+/// The fine meshes built in one frame at most: a camera cut spreads its ring over a few frames.
+const FINE_RING_BUILDS: usize = 6;
+
+/// fork: what an ADT water surface needs to build its fine mesh on demand ([`swap_fine_liquids`]):
+/// its layers, its coarse mesh, the fine one while it is near, and its wet cells' bounds in Bevy XZ.
+#[derive(Component)]
+pub(crate) struct LiquidFine {
+    layers: Vec<LiquidMesh>,
+    coarse: Handle<Mesh>,
+    fine: Option<Handle<Mesh>>,
+    lo: Vec2,
+    hi: Vec2,
+}
+
+impl LiquidFine {
+    /// `None` for a surface with no real vertex.
+    fn new(layers: &[&LiquidMesh], coarse: Handle<Mesh>) -> Option<Self> {
+        let (mut lo, mut hi) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+        for p in layers
+            .iter()
+            .flat_map(|lq| lq.positions.iter())
+            .filter(|p| p[2].abs() < 1.0e8)
+        {
+            let b = wow_to_bevy(*p);
+            lo = lo.min(Vec2::new(b.x, b.z));
+            hi = hi.max(Vec2::new(b.x, b.z));
+        }
+        (lo.x <= hi.x).then(|| Self {
+            layers: layers.iter().map(|lq| (*lq).clone()).collect(),
+            coarse,
+            fine: None,
+            lo,
+            hi,
+        })
+    }
+}
+
+/// fork: **the fine ring** — while the Modern (Experimental) water runs on a modern frame (the tier
+/// whose vertex stage displaces the surface), each ADT water surface within [`FINE_RING_IN`] of the
+/// eye draws its fine mesh ([`liquid_bevy_mesh_split`]), built on demand, and one past
+/// [`FINE_RING_OUT`] its coarse one again, the fine one dropped.
+pub(super) fn swap_fine_liquids(
+    detail: Res<WaterDetail>,
+    eye: Query<&GlobalTransform, With<crate::view::WorldCamera>>,
+    mut surfaces: Query<(&mut Mesh3d, &mut LiquidFine)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let on = detail.is_experimental() && crate::modern::frame_is_modern();
+    let eye = eye.iter().next().map(|t| {
+        let p = t.translation();
+        Vec2::new(p.x, p.z)
+    });
+    let mut builds = 0;
+    for (mut mesh, mut fine) in &mut surfaces {
+        let d = eye.map_or(f32::MAX, |e| (e.clamp(fine.lo, fine.hi) - e).length());
+        let want = on && (d < FINE_RING_IN || (fine.fine.is_some() && d < FINE_RING_OUT));
+        if want {
+            if fine.fine.is_none() {
+                if builds >= FINE_RING_BUILDS {
+                    continue;
+                }
+                builds += 1;
+                let layers: Vec<&LiquidMesh> = fine.layers.iter().collect();
+                fine.fine = Some(meshes.add(liquid_bevy_mesh_split(&layers, FINE_SPLIT)));
+            }
+            if let Some(handle) = &fine.fine {
+                if mesh.0 != *handle {
+                    mesh.0 = handle.clone();
+                }
+            }
+        } else {
+            if mesh.0 != fine.coarse {
+                mesh.0 = fine.coarse.clone();
+            }
+            if let Some(handle) = fine.fine.take() {
+                meshes.remove(&handle);
+            }
+        }
+    }
+}
+
+/// fork: [`liquid_bevy_mesh`] with every wet cell split `split` ways a side, bilinear over the cell's
+/// four corners — position, UV and the depth `V` alike. An edge two cells share is interpolated from
+/// the same two corners by `a·(1 − t) + b·t`, exact at both ends, so the cells' vertices along it agree
+/// bit for bit and the displaced surface opens no crack.
+fn liquid_bevy_mesh_split(layers: &[&LiquidMesh], split: usize) -> Mesh {
+    let split = split.max(1);
+    let lerp = |a: f32, b: f32, t: f32| a * (1.0 - t) + b * t;
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut uv1: Vec<[f32; 2]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    for lq in layers {
+        let cols = lq.grid[0] as usize;
+        let cells_x = cols.saturating_sub(1);
+        if cells_x == 0 {
+            continue;
+        }
+        for (cell, _) in lq.wet.iter().enumerate().filter(|(_, wet)| **wet) {
+            let (cx, cy) = (cell % cells_x, cell / cells_x);
+            let at = |dx: usize, dy: usize| (cy + dy) * cols + cx + dx;
+            let (c00, c10, c01, c11) = (at(0, 0), at(1, 0), at(0, 1), at(1, 1));
+            let base = positions.len() as u32;
+            for j in 0..=split {
+                let t = j as f32 / split as f32;
+                for i in 0..=split {
+                    let u = i as f32 / split as f32;
+                    let bil =
+                        |a: f32, b: f32, c: f32, d: f32| lerp(lerp(a, b, u), lerp(c, d, u), t);
+                    let (p00, p10, p01, p11) = (
+                        lq.positions[c00],
+                        lq.positions[c10],
+                        lq.positions[c01],
+                        lq.positions[c11],
+                    );
+                    let p = [
+                        bil(p00[0], p10[0], p01[0], p11[0]),
+                        bil(p00[1], p10[1], p01[1], p11[1]),
+                        bil(p00[2], p10[2], p01[2], p11[2]),
+                    ];
+                    positions.push(wow_to_bevy(p).to_array());
+                    let (q00, q10, q01, q11) = (lq.uvs[c00], lq.uvs[c10], lq.uvs[c01], lq.uvs[c11]);
+                    uvs.push([
+                        bil(q00[0], q10[0], q01[0], q11[0]),
+                        bil(q00[1], q10[1], q01[1], q11[1]),
+                    ]);
+                    let d = bil(
+                        lq.depths[c00],
+                        lq.depths[c10],
+                        lq.depths[c01],
+                        lq.depths[c11],
+                    );
+                    uv1.push([d, 0.0]);
+                }
+            }
+            let row = (split + 1) as u32;
+            for j in 0..split as u32 {
+                for i in 0..split as u32 {
+                    let a = base + j * row + i;
+                    let (b, c, d) = (a + 1, a + row, a + row + 1);
+                    // Two-sided like every reference liquid pass, so the winding is free.
+                    indices.extend_from_slice(&[a, c, b, b, c, d]);
+                }
+            }
+        }
+    }
+    let n = positions.len();
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; n]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, uv1);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
 }
 
 /// The collision trimesh input for one [`LiquidMesh`]: the render mesh's own wet-cell triangles,
@@ -640,6 +823,8 @@ pub(super) fn setup_liquid(
                     look_b: cata_water_look(kind)[1],
                     look_c: cata_water_look(kind)[2],
                     look_d: cata_water_look(kind)[3],
+                    look_e: cata_water_look(kind)[4],
+                    look_f: cata_water_look(kind)[5],
                     light_buf: world_assets.shared_light.clone(),
                     modern_cascades: benilla_assets::materials::MODERN_SHADOW_CASCADES, // fork: modern lighting (FORK.md, P4)
                     modern_fog: benilla_assets::materials::MODERN_FOG_VOLUME,
@@ -748,15 +933,17 @@ fn cata_optics(kind: LiquidKind) -> Vec4 {
 /// * `look_a` = (bed filter, its onset depth in yd, head-on reflectance, reflection pulled to the body);
 /// * `look_b` = (wind swell a river keeps, swell over no depth, refraction bend per yd, highlight
 ///   roughness `α`);
-/// * `look_c` = (reflectance at grazing, the power of the climb to it, share of the reference
+/// * `look_c` = (the far water's reflectance ceiling, the gain on the facets' spread the Fresnel
+///   averages over, share of the reference
 ///   combine blended over the clear surface, the wind ripples' RMS slope);
 /// * `look_d` = (the sun/moon disk's angular radius in radians, the share of the kind's own swell
 ///   on the highlight's normal, the wind ripples' RMS slope on it — the sea's alone, a river or lake
 ///   having no ripple octaves — the highlight's gain).
 ///
-/// The Fresnel is the reference combine's shape (`0.1 + 0.5 · fres²`) rather than water's: a floor
-/// that keeps the sky in a river looked down on, and a cap that stops the water toward the horizon
-/// becoming a solid sheet. Rapids keep more of their chop in the shallows (white water is the point
+/// The Fresnel is water's own over the surface's roughness (the benilla-watershader fork's lively
+/// Fresnel), raised to a floor that keeps the sky in a river looked down on, with the far water's mean
+/// rescaled to a ceiling that stops the water toward the horizon becoming a solid sheet while each
+/// wave keeps its own contrast. Rapids keep more of their chop in the shallows (white water is the point
 /// of them) and the sea keeps its whole wind sea whatever `look_b.x` says. The ripples are a light
 /// wind's: a real surface's RMS slope runs ~0.1-0.2 at a few yards a second of wind. Magma and slime
 /// never reach the lane.
@@ -766,27 +953,43 @@ fn cata_optics(kind: LiquidKind) -> Vec4 {
 /// sharp-edged islands, spread wide by a normal that keeps the swell the shallows' calm gives up —
 /// each kind's own octaves, never the sea's on a lake. The disk is a stylised ~2.6°, five times the real sun's, which is what makes the islands
 /// big enough to read; rapids take a broader lobe, white water being rough.
-fn cata_water_look(kind: LiquidKind) -> [Vec4; 4] {
-    let fresnel = Vec4::new(0.35, 2.0, 0.5, 0.2);
+///
+/// * `look_e` = (turbidity per yd, wind speed in m/s for the Cox–Munk roughness floor, caustic gain,
+///   the roughness `α` at which the surface counts as wholly unresolved);
+/// * `look_f` = (the reflection's contrast lost near, and far, the displacement's gain, reserved).
+///
+/// The roughness the far water takes is the slope its faded octaves no longer draw (the
+/// benilla-watershader fork's energy-conserving filter), floored by a light wind's sub-pixel ripples:
+/// 1.5 m/s on a river or lake keeps the near highlight's islands crisp (`α` stays under the disk), the
+/// sea's 3 and the rapids' 4 roughen theirs. Turbidity is small on clear water (the bed must show
+/// mid-channel) and larger on rapids, whose bubbles scatter; the caustics follow it the other way.
+fn cata_water_look(kind: LiquidKind) -> [Vec4; 6] {
+    let fresnel = Vec4::new(0.35, 1.0, 0.5, 0.2);
     match kind {
         LiquidKind::Ocean => [
             Vec4::new(0.35, 1.0, 0.08, 0.3),
             Vec4::new(1.0, 0.5, 0.25, 0.04),
             fresnel,
             Vec4::new(0.045, 1.0, 0.2, 1.0),
+            Vec4::new(0.02, 3.0, 0.8, 0.25),
+            Vec4::new(0.1, 0.5, 1.0, 0.0),
         ],
         LiquidKind::Rapids => [
             Vec4::new(0.5, 0.6, 0.08, 0.3),
             Vec4::new(0.35, 0.6, 0.25, 0.07),
             fresnel,
             Vec4::new(0.045, 1.0, 0.0, 1.0),
+            Vec4::new(0.08, 4.0, 0.4, 0.3),
+            Vec4::new(0.1, 0.5, 0.6, 0.0),
         ],
-        LiquidKind::Magma | LiquidKind::Slime => [Vec4::ZERO; 4],
+        LiquidKind::Magma | LiquidKind::Slime => [Vec4::ZERO; 6],
         _ => [
             Vec4::new(0.5, 0.6, 0.08, 0.3),
             Vec4::new(0.35, 0.25, 0.25, 0.03),
             fresnel,
             Vec4::new(0.045, 1.0, 0.0, 1.0),
+            Vec4::new(0.03, 1.5, 0.9, 0.25),
+            Vec4::new(0.1, 0.5, 0.6, 0.0),
         ],
     }
 }
@@ -941,6 +1144,71 @@ mod tests {
             material_id: None,
             kind: LiquidKind::Still,
         }
+    }
+
+    /// fork: the displacement's bound is one number in two places: the shader clamps the surface to
+    /// it and the cells' bounds grow by it ([`HEIGHT_MAX_YD`]). A shader past the bound draws a wave
+    /// the exterior cull can drop.
+    #[test]
+    fn the_cells_bounds_reach_as_high_as_the_shader_displaces() {
+        let cata = include_str!("../../../benilla-assets/src/shaders/liquid_cata.wgsl");
+        let want = format!("const HEIGHT_MAX_YD: f32 = {HEIGHT_MAX_YD};");
+        assert!(
+            cata.contains(&want),
+            "liquid_cata.wgsl must declare `{want}`"
+        );
+    }
+
+    /// fork: the fine ring's mesh splits each wet cell `split²` ways with no crack: two cells that
+    /// share an edge put their vertices along it at the same positions bit for bit, the corners are
+    /// the lattice's own, and a dry cell gets nothing.
+    #[test]
+    fn the_fine_mesh_splits_wet_cells_and_shares_their_edges_exactly() {
+        use bevy::mesh::VertexAttributeValues;
+        // A 3×2 grid of vertices (two cells side by side, the left one wet, then both), sloped so
+        // interpolation is exercised on every axis.
+        let mut lq = one_sheet([0.0, 0.0, 0.0]);
+        lq.grid = [3, 2];
+        lq.positions = vec![
+            [0.0, 0.0, 1.0],
+            [4.1666, 0.0, 1.3],
+            [8.3333, 0.0, 0.7],
+            [0.0, 4.1666, 1.1],
+            [4.1666, 4.1666, 0.9],
+            [8.3333, 4.1666, 1.7],
+        ];
+        lq.uvs = vec![[0.0, 0.0]; 6];
+        lq.depths = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
+        lq.wet = vec![true, false];
+        let split = 4;
+        let one = super::liquid_bevy_mesh_split(&[&lq], split);
+        assert_eq!(
+            one.count_vertices(),
+            (split + 1) * (split + 1),
+            "one wet cell, the dry one skipped"
+        );
+
+        lq.wet = vec![true, true];
+        let two = super::liquid_bevy_mesh_split(&[&lq], split);
+        let Some(VertexAttributeValues::Float32x3(p)) = two.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("positions");
+        };
+        let row = split + 1;
+        let (left, right) = (&p[..row * row], &p[row * row..]);
+        for j in 0..row {
+            assert_eq!(
+                left[j * row + split],
+                right[j * row],
+                "the shared edge's vertex {j} differs between the two cells"
+            );
+        }
+        // The corners are the lattice's own vertices, carried to Bevy space untouched.
+        assert_eq!(left[0], wow_to_bevy(lq.positions[0]).to_array());
+        assert_eq!(
+            right[row * row - 1],
+            wow_to_bevy(lq.positions[5]).to_array()
+        );
     }
 
     /// Only the ADT still-water material, without which `spawn_liquids` spawns nothing.
@@ -1311,10 +1579,11 @@ pub(super) fn sync_water_tier(
 }
 
 /// fork: modern lighting — the live override of the Modern (Experimental) tier's look
-/// (`$WOW_WATER_LOOK`, browser `?water_look=`): up to sixteen comma-separated values over
+/// (`$WOW_WATER_LOOK`, browser `?water_look=`): up to twenty-four comma-separated values over
 /// [`cata_water_look`]'s lanes in order — `bed_filter, filter_depth, reflect_f0, reflect_body,
-/// wind_keep, shallow_keep, refract_bend, highlight_roughness, reflect_grazing, fresnel_power,
-/// cata_share, ripple_slope, disk_radius, highlight_swell, highlight_ripples, highlight_gain`. An
+/// wind_keep, shallow_keep, refract_bend, highlight_roughness, reflect_grazing, facet_spread,
+/// cata_share, ripple_slope, disk_radius, highlight_swell, highlight_ripples, highlight_gain,
+/// turbidity, wind_speed, caustic_gain, alpha_full, grade_near, grade_far, height_gain, -`. An
 /// empty or unparsable entry keeps the kind's own value, so `,,0.3` moves only
 /// the reflection. For calibrating against a reference shot without a rebuild; the settled numbers
 /// belong in [`cata_water_look`].
@@ -1345,7 +1614,7 @@ pub(super) fn sync_water_look(
             continue;
         };
         let mut look = cata_water_look(key.kind);
-        for (i, v) in over.iter().enumerate().take(16) {
+        for (i, v) in over.iter().enumerate().take(24) {
             if let Some(v) = v {
                 look[i / 4][i % 4] = *v;
             }
@@ -1354,6 +1623,8 @@ pub(super) fn sync_water_look(
         material.extension.look_b = look[1];
         material.extension.look_c = look[2];
         material.extension.look_d = look[3];
+        material.extension.look_e = look[4];
+        material.extension.look_f = look[5];
     }
     info!("liquid: water look {now:?}");
     *last = Some(now);

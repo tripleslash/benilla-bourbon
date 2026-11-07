@@ -543,8 +543,12 @@ pub struct LiquidCataExt {
     /// Stage 5: the tiling wave normal map, sampled four times per fragment at two scales and two
     /// scroll phases. Synthesised at build time — `benilla_world`'s `liquid::art` is the whole
     /// account of why, and of why it is a full RGB normal rather than a two-channel derivative.
+    ///
+    /// fork: the sampler (104, `art_samp`) reaches the vertex stage too, for the noise volume the
+    /// Modern (Experimental) water's displacement reads there. A stage has its own sampler budget, so
+    /// this costs the fragment's 16 nothing.
     #[texture(103, visibility(fragment))]
-    #[sampler(104, visibility(fragment))]
+    #[sampler(104, visibility(vertex, fragment))]
     pub bump: Handle<Image>,
 
     /// Stage 0: the opaque frame, for refraction.
@@ -598,7 +602,11 @@ pub struct LiquidCataExt {
     /// on `w` too — and 104, the shared `art_samp` it now takes instead of one of its own, repeats
     /// on all three axes for exactly that reason. A sampler carries no dimensionality, so the same
     /// binding serves this 3D volume and the two 2D sheets alike.
-    #[texture(111, dimension = "3d", visibility(fragment))]
+    ///
+    /// fork: in the vertex stage too: the Modern (Experimental) water's displacement reads the wind
+    /// sea's phase warp and gusts off it, as the fragment's slope does (`liquid_cata.wgsl`'s
+    /// `wind_noise`).
+    #[texture(111, dimension = "3d", visibility(vertex, fragment))]
     pub noise_vol: Handle<Image>,
 
     /// `ProcWaterAbove`'s stage 4: the dynamic ripple displacement map — `.x` the current wave
@@ -685,8 +693,9 @@ pub struct LiquidCataExt {
     /// refraction's bend per yard of water crossed, `w` = the sun/moon highlight's GGX roughness `α`.
     #[uniform(102)]
     pub look_b: Vec4,
-    /// fork: modern lighting — the same tier's Fresnel: `x` = the reflectance at grazing (the curve's
-    /// cap; `look_a.z` is its head-on floor), `y` = the power of its climb along `1 − cos`, `z` = the
+    /// fork: modern lighting — the same tier's Fresnel: `x` = the ceiling the far water's mean
+    /// reflectance is rescaled to (`look_a.z` is its head-on floor), `y` = the gain on the unresolved
+    /// facets' spread the lively Fresnel averages over, `z` = the
     /// share of the reference combine blended over the clear surface, `w` = the wind ripples' RMS
     /// slope, a multi-octave layer under the swell.
     #[uniform(102)]
@@ -697,6 +706,17 @@ pub struct LiquidCataExt {
     /// it (the sea's alone), `w` = the highlight's gain over the microfacet value.
     #[uniform(102)]
     pub look_d: Vec4,
+    /// fork: modern lighting — the same tier's body and roughness: `x` = the turbidity, a grey
+    /// extinction per yard on top of the absorption, `y` = the wind speed (m/s) whose sub-pixel
+    /// ripples floor the roughness (Cox–Munk), `z` = the caustics' gain, `w` = the roughness `α` at
+    /// which the surface counts as wholly unresolved.
+    #[uniform(102)]
+    pub look_e: Vec4,
+    /// fork: modern lighting — the same tier's reflection grade and surface height: `x`/`y` = the
+    /// share of the reflection's contrast lost near and far, `z` = the displacement's gain over the
+    /// wind sea's own height, `w` reserved.
+    #[uniform(102)]
+    pub look_f: Vec4,
 
     /// **The shared global light**, as [`LiquidExt::light_buf`] — same buffer, same rows. The cata
     /// path reads the two water swatches for its depth ramp, the sun/ambient/diffuse for its
@@ -876,6 +896,60 @@ impl MaterialExtension for TerrainExtension {
 
 #[cfg(test)]
 mod tests {
+    /// `LiquidCataExt`'s `#[uniform(102)]` fields ARE `liquid_cata.wgsl`'s `LiquidParams`, name for
+    /// name and in order, and every one is a `Vec4`/`vec4<f32>`. `AsBindGroup` packs the fields in
+    /// declaration order and the shader reads them by offset, so a field added to one side only, or
+    /// in another place, shifts every lane after it with no error on any backend. All-`vec4` keeps
+    /// the block free of padding under WebGPU's uniform layout rules (16-byte members, a 16-byte
+    /// multiple overall), so the browser reads the same offsets native does.
+    #[test]
+    fn the_cata_uniform_block_matches_the_shader_field_for_field() {
+        let rust = include_str!("materials.rs");
+        let body = &rust[rust
+            .find("pub struct LiquidCataExt {")
+            .expect("LiquidCataExt")..];
+        let body = &body[..body.find("\n}\n").expect("the struct closes")];
+        let mut lines = body.lines();
+        let mut rust_fields = Vec::new();
+        while let Some(line) = lines.next() {
+            if line.trim() != "#[uniform(102)]" {
+                continue;
+            }
+            let field = lines
+                .next()
+                .and_then(|l| l.trim().strip_prefix("pub "))
+                .expect("a pub field follows #[uniform(102)]");
+            let (name, ty) = field.trim_end_matches(',').split_once(": ").unwrap();
+            assert_eq!(
+                ty, "Vec4",
+                "uniform field {name} is {ty}: keep the block all-Vec4"
+            );
+            rust_fields.push(name.to_string());
+        }
+
+        let wgsl = include_str!("shaders/liquid_cata.wgsl");
+        let block = &wgsl[wgsl.find("struct LiquidParams {").expect("LiquidParams")..];
+        let block = &block[..block.find("};").expect("the struct closes")];
+        let wgsl_fields: Vec<String> = block
+            .lines()
+            .skip(1)
+            .map(str::trim)
+            .filter(|l| !l.starts_with("//") && !l.is_empty())
+            .map(|l| {
+                let (name, ty) = l.trim_end_matches(',').split_once(": ").unwrap();
+                assert_eq!(
+                    ty, "vec4<f32>",
+                    "LiquidParams.{name} is {ty}: keep the block all-vec4"
+                );
+                name.to_string()
+            })
+            .collect();
+        assert_eq!(
+            rust_fields, wgsl_fields,
+            "LiquidCataExt's uniform(102) fields and liquid_cata.wgsl's LiquidParams disagree"
+        );
+    }
+
     /// The sky depth law for the WMO skybox, the one sky element on the model lane.
     #[test]
     fn the_sky_lane_pins_the_far_depth_at_the_vertex() {

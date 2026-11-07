@@ -166,4 +166,98 @@ mod tests {
                 });
         }
     }
+
+    /// The cata water (`benilla_assets`'s `liquid_cata.wgsl`) composed as the material pipeline
+    /// composes it, over the two vertex layouts the liquid meshes draw (plain, and a WMO interior
+    /// pool's with its vertex colour), validated and translated for this platform's backend. Every
+    /// other check that would compile it needs an install and a frame; this one needs neither.
+    #[test]
+    fn the_cata_water_shader_composes_and_translates() {
+        use bevy::shader::{Shader, ShaderCache, ShaderCacheSource, ShaderDefVal};
+        let app = crate::game_plugins::schedule_tests::headless_client_unrun();
+        let server = app.world().resource::<AssetServer>();
+        let source = server.get_source(AssetSourceId::from("embedded")).unwrap();
+        let mut files = Vec::new();
+        embedded_shaders(source, std::path::Path::new(""), &mut files);
+
+        let mut cache: ShaderCache<naga::Module, ()> = ShaderCache::new(
+            (),
+            bevy::render::render_resource::WgpuFeatures::empty(),
+            bevy::render::render_resource::DownlevelFlags::all(),
+            |_, source, _| match source {
+                ShaderCacheSource::Naga(module) => Ok(module),
+                _ => panic!("a WGSL shader composes to a naga module"),
+            },
+        );
+        // The material registers its shader with the world's plugins, which the headless client
+        // does not build; it takes its import libraries (bevy's, `benilla_modern`'s) from there.
+        files.push((
+            "benilla_assets/shaders/liquid_cata.wgsl".into(),
+            include_str!("../../benilla-assets/src/shaders/liquid_cata.wgsl").into(),
+        ));
+        let water = AssetId::<Shader>::Uuid {
+            uuid: bevy::asset::uuid::Uuid::from_u128(files.len() as u128),
+        };
+        for (i, (path, text)) in files.into_iter().enumerate() {
+            let id = AssetId::<Shader>::Uuid {
+                uuid: bevy::asset::uuid::Uuid::from_u128(i as u128 + 1),
+            };
+            cache.set_shader(id, Shader::from_wgsl(text, format!("embedded://{path}")));
+        }
+
+        let storage =
+            bevy::render::settings::WgpuLimits::default().max_storage_buffers_per_shader_stage;
+        for colors in [false, true] {
+            let mut defs: Vec<ShaderDefVal> = [
+                "VERTEX_POSITIONS",
+                "VERTEX_NORMALS",
+                "VERTEX_UVS",
+                "VERTEX_UVS_A",
+                "VERTEX_UVS_B",
+            ]
+            .iter()
+            .map(|&d| d.into())
+            .collect();
+            if colors {
+                defs.push("VERTEX_COLORS".into());
+            }
+            defs.push(ShaderDefVal::UInt("MATERIAL_BIND_GROUP".into(), 3));
+            defs.push(ShaderDefVal::UInt(
+                "AVAILABLE_STORAGE_BUFFER_BINDINGS".into(),
+                storage,
+            ));
+            defs.push(ShaderDefVal::UInt("MAX_DIRECTIONAL_LIGHTS".into(), 10));
+            defs.push(ShaderDefVal::UInt("MAX_CASCADES_PER_LIGHT".into(), 4));
+            defs.push(ShaderDefVal::UInt("MAX_RECT_LIGHTS".into(), 8));
+            let module = cache.get(0, water, &defs).unwrap_or_else(|e| {
+                panic!("colors {colors}: liquid_cata.wgsl does not compose: {e:?}")
+            });
+            let info = naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::default(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| {
+                panic!("colors {colors}: liquid_cata.wgsl does not validate: {e:?}")
+            });
+            #[cfg(target_os = "macos")]
+            naga::back::msl::write_string(
+                &module,
+                &info,
+                &naga::back::msl::Options {
+                    lang_version: (2, 4),
+                    ..Default::default()
+                },
+                &naga::back::msl::PipelineOptions::default(),
+            )
+            .unwrap_or_else(|e| {
+                panic!("colors {colors}: liquid_cata.wgsl does not translate to MSL: {e:?}")
+            });
+            #[cfg(not(target_os = "macos"))]
+            naga::back::spv::write_vec(&module, &info, &naga::back::spv::Options::default(), None)
+                .unwrap_or_else(|e| {
+                    panic!("colors {colors}: liquid_cata.wgsl does not translate to SPIR-V: {e:?}")
+                });
+        }
+    }
 }

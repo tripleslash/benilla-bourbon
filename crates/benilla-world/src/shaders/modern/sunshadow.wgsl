@@ -413,9 +413,19 @@ fn wind_dir() -> vec2<f32> {
 // into a visible lattice, and their energy gathered into gust patches by `gust` (0..1, also noise).
 // Each train fades out before it would alias at this distance.
 fn wind_swell(xz: vec2<f32>, time: f32, dist: f32, warp: vec2<f32>, gust: f32) -> vec2<f32> {
-    let wd = wind_dir();
-    let across = vec2<f32>(-wd.y, wd.x);
-    // wavelength (yd), direction offset across the wind, steepness
+    return wind_sea(xz, time, dist, warp, gust, WIND_SEA_HEIGHT_OFF).slope;
+}
+
+/// The sea's train count, longest first ([`wind_wave`]).
+const WIND_TRAINS: u32 = 9u;
+/// A [`wind_sea`] call that wants no height: no train is this long.
+const WIND_SEA_HEIGHT_OFF: f32 = 1.0e9;
+/// The mean square of the crest-sharpened profile `cos θ · (1 + 0.35 sin θ)` over a cycle,
+/// `½ + ½ · 0.175²`: a train's slope variance per unit of its amplitude squared.
+const WIND_CREST_VAR: f32 = 0.5153;
+
+/// Row `k` of the sea: wavelength (yd), direction offset across the wind, steepness.
+fn wind_wave(k: u32) -> vec3<f32> {
     let waves = array<vec3<f32>, 9>(
         vec3<f32>(17.3, 0.07, 0.055),
         vec3<f32>(11.1, -0.31, 0.06),
@@ -427,26 +437,88 @@ fn wind_swell(xz: vec2<f32>, time: f32, dist: f32, warp: vec2<f32>, gust: f32) -
         vec3<f32>(1.3, -0.97, 0.036),
         vec3<f32>(0.9, 0.62, 0.03),
     );
+    return waves[k];
+}
+
+/// One train of the sea at `xz`: its heading, wavenumber, slope amplitude (gust-scaled), phase and
+/// how much of it this view distance still draws. The slope, the lost variance and the height all
+/// read this, so the water's normal, its roughness and its displaced surface are one sea.
+struct WindTrain {
+    dir: vec2<f32>,
+    kw: f32,
+    amp: f32,
+    phase: f32,
+    fade: f32,
+    wl: f32,
+}
+
+fn wind_train(k: u32, xz: vec2<f32>, time: f32, dist: f32, warp: vec2<f32>, gust: f32) -> WindTrain {
+    let wd = wind_dir();
+    let across = vec2<f32>(-wd.y, wd.x);
+    let wave = wind_wave(k);
+    let wl = wave.x;
+    var t: WindTrain;
+    t.wl = wl;
+    t.dir = normalize(wd + across * wave.y);
+    t.kw = 6.2831853 / wl;
+    // Deep water: omega = sqrt(g k), g = 9.8 m/s^2 in yards.
+    let omega = sqrt(10.7 * t.kw);
+    let fk = f32(k);
+    // The warp displaces each train by a different share of its own wavelength.
+    let shift = dot(warp, vec2<f32>(cos(fk * 2.4), sin(fk * 2.4))) * wl * 0.6;
+    t.phase = (dot(t.dir, xz) + shift) * t.kw - omega * time + fk * 1.37;
+    t.fade = 1.0 - smoothstep(wl * 18.0, wl * 45.0, dist);
     // Chop (short trains) follows the gusts; swell (long trains) barely does.
-    var slope = vec2<f32>(0.0);
-    for (var k = 0u; k < 9u; k = k + 1u) {
-        let wl = waves[k].x;
-        let dir = normalize(wd + across * waves[k].y);
-        let kw = 6.2831853 / wl;
-        // Deep water: omega = sqrt(g k), g = 9.8 m/s^2 in yards.
-        let omega = sqrt(10.7 * kw);
-        let fk = f32(k);
-        // The warp displaces each train by a different share of its own wavelength.
-        let shift = dot(warp, vec2<f32>(cos(fk * 2.4), sin(fk * 2.4))) * wl * 0.6;
-        let phase = (dot(dir, xz) + shift) * kw - omega * time + fk * 1.37;
-        let fade = 1.0 - smoothstep(wl * 18.0, wl * 45.0, dist);
-        let chop = mix(0.85, 0.25 + 1.1 * gust, clamp(1.0 - wl / 8.0, 0.0, 1.0));
+    let chop = mix(0.85, 0.25 + 1.1 * gust, clamp(1.0 - wl / 8.0, 0.0, 1.0));
+    t.amp = wave.z * chop;
+    return t;
+}
+
+/// The sea at a point: its SLOPE (d height / d xz), the slope covariance its faded trains no longer
+/// draw (`(xx, zz, xz)`, energy-conserving: what a train loses to the distance fade is variance the
+/// caller turns into roughness instead of throwing away), and the HEIGHT of the trains at least
+/// `height_from` yards long (the slope's integral, so a displaced surface and its normal agree).
+struct WindSea {
+    slope: vec2<f32>,
+    lost: vec3<f32>,
+    height: f32,
+}
+
+fn wind_sea(xz: vec2<f32>, time: f32, dist: f32, warp: vec2<f32>, gust: f32, height_from: f32) -> WindSea {
+    var sea: WindSea;
+    sea.slope = vec2<f32>(0.0);
+    sea.lost = vec3<f32>(0.0);
+    sea.height = 0.0;
+    for (var k = 0u; k < WIND_TRAINS; k = k + 1u) {
+        let t = wind_train(k, xz, time, dist, warp, gust);
         // A sharpened crest: slope of a trochoid-like profile, steeper just before the crest.
-        let c = cos(phase);
-        let crest = c * (1.0 + 0.35 * sin(phase));
-        slope = slope + dir * (crest * waves[k].z * fade * chop);
+        let c = cos(t.phase);
+        let crest = c * (1.0 + 0.35 * sin(t.phase));
+        sea.slope = sea.slope + t.dir * (crest * t.amp * t.fade);
+        let d = t.dir;
+        sea.lost = sea.lost + vec3<f32>(d.x * d.x, d.y * d.y, d.x * d.y)
+            * (t.amp * t.amp * WIND_CREST_VAR * (1.0 - t.fade * t.fade));
+        sea.height = sea.height + wind_train_height(t) * f32(t.wl >= height_from);
     }
-    return slope;
+    return sea;
+}
+
+/// One train's height: the integral of its slope along its heading, `∫ cos θ + 0.175 sin 2θ dθ / k`.
+fn wind_train_height(t: WindTrain) -> f32 {
+    return t.amp * t.fade / t.kw * (sin(t.phase) - 0.0875 * cos(2.0 * t.phase));
+}
+
+/// The height of the trains at least `from_wl` yards long, alone — the vertex stage's displacement,
+/// without the slope and variance sums it does not read.
+fn wind_sea_height(xz: vec2<f32>, time: f32, dist: f32, warp: vec2<f32>, gust: f32, from_wl: f32) -> f32 {
+    var h = 0.0;
+    for (var k = 0u; k < WIND_TRAINS; k = k + 1u) {
+        if (wind_wave(k).x < from_wl) {
+            break; // longest first: every later train is shorter still
+        }
+        h = h + wind_train_height(wind_train(k, xz, time, dist, warp, gust));
+    }
+    return h;
 }
 
 // P4: `sky_visibility` in one tap.

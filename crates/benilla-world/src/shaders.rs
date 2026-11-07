@@ -24,6 +24,10 @@ pub(crate) fn plugin(app: &mut App) {
     // fork: perf — a library (`benilla_world::effect_points`): registered and held loaded, so
     // the effect lane's and FSR's `#import` of it resolves.
     bevy::shader::load_shader_library!(app, "shaders/effect_points.wgsl");
+    // fork: a library (`benilla_modern::skydome`): the dome's dawn/dusk warp, shared by the dome
+    // and the water's reflection of it. Here rather than in `modern_libraries` because the dome
+    // draws under both lighting models.
+    bevy::shader::load_shader_library!(app, "shaders/modern/skydome.wgsl");
 }
 
 /// The modern lighting model's shared WGSL libraries (`benilla_modern::*`), registered AND held
@@ -161,6 +165,8 @@ mod tests {
         for path in [
             "/src/shaders/static_gx.wgsl",
             "/../benilla-assets/src/shaders/terrain.wgsl",
+            // fork: the water, whose footprint and shore derivatives sit at its body's top.
+            "/../benilla-assets/src/shaders/liquid_cata.wgsl",
         ] {
             let src = std::fs::read_to_string(format!("{root}{path}")).expect(path);
             assert_eq!(

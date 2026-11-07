@@ -76,6 +76,7 @@
 #import benilla_modern::colorspace
 #import benilla_modern::sunshadow
 #import benilla_modern::froxelfog
+#import benilla_modern::skydome
 #import bevy_pbr::{
     mesh_functions,
     forward_io::Vertex,
@@ -153,7 +154,8 @@ struct LiquidParams {
     // water with no depth under it, z = the refraction's bend per yard of water, w = the sun/moon
     // highlight's GGX roughness `α` (`disk_highlight`).
     look_b: vec4<f32>,
-    // x = the reflectance at grazing (the Fresnel's cap), y = the power of its climb, z = the share
+    // x = the far water's mean reflectance ceiling (`lively_fresnel`), y = the gain on the facets'
+    // spread the Fresnel averages over, z = the share
     // of the reference's combine blended over the clear surface, w = the wind ripples' RMS slope
     // (`wind_ripples`).
     look_c: vec4<f32>,
@@ -161,6 +163,13 @@ struct LiquidParams {
     // swell on the highlight's own normal, z = the wind ripples' RMS slope on it (the sea's alone),
     // w = its gain over the microfacet value.
     look_d: vec4<f32>,
+    // x = the turbidity (grey extinction per yard on top of the absorption), y = the wind speed
+    // (m/s) whose sub-pixel ripples floor the roughness (Cox–Munk), z = the caustics' gain, w = the
+    // roughness `α` at which the surface counts as wholly unresolved.
+    look_e: vec4<f32>,
+    // x/y = the share of the reflection's contrast lost near and far (the grade), z = the
+    // displacement's gain over the sea's own height, w = reserved.
+    look_f: vec4<f32>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var<uniform> w: LiquidParams;
 
@@ -199,6 +208,10 @@ const WATER_SHADOW_BED_LIFT: f32 = 0.15;
 // fork: modern lighting — the HDR sun glitter `fragment_classic` leaves for the linear wrapper, which
 // adds it after the decode so it can carry energy above white into the bloom.
 var<private> modern_glint: vec3<f32>;
+// fork: fog once — the share of the experimental tier's output, linear, that already carries its own
+// fog (the bed seen through the water, the reflected world): `fragment_classic` leaves it out of its
+// gamma output and the wrapper adds it after the surface's fog. Zero on every other lane.
+var<private> modern_prefogged: vec3<f32>;
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(113) var ripple_map: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(114) var ripple_samp: sampler;
@@ -236,24 +249,59 @@ struct Ripple {
 ///
 /// The dome is camera-centred and world-aligned, so this is exact for the backdrop whatever the
 /// mirror is doing — the environment the water reflects when the mirror has no picture of its own.
+///
+/// fork: the dome's dawn/dusk warp too (`benilla_modern::skydome`, its strength and the sun's azimuth
+/// on the rows' `w` — `liquid::ripple`'s `pack_sky_rows`), so a sunset sky's glow toward the sun is in
+/// the water under it.
 fn sky_dome(dir: vec3<f32>) -> vec3<f32> {
-    let elev = degrees(asin(clamp(dir.y, -1.0, 1.0)));
+    return sky_dome_at(degrees(asin(clamp(dir.y, -1.0, 1.0))), dir);
+}
+
+/// [`sky_dome`] at elevation `elev` (degrees) on the azimuth of `dir`.
+fn sky_dome_at(elev: f32, dir: vec3<f32>) -> vec3<f32> {
     let s = ripple.sky;
+    var s1 = s[1].rgb;
+    var s2 = s[2].rgb;
+    var s3 = s[3].rgb;
+    var s4 = s[4].rgb;
+    let warp_s = s[0].w;
+    if (warp_s > 0.0) {
+        let gl = skydome::warp_glows(dir, s[1].w);
+        s1 = skydome::warp_ring(s[1].rgb, gl, warp_s, s[0].rgb, s[1].rgb);
+        s2 = skydome::warp_ring(s[2].rgb, gl, warp_s, s[0].rgb, s[1].rgb);
+        s3 = skydome::warp_ring(s[3].rgb, gl, warp_s, s[0].rgb, s[1].rgb);
+        s4 = skydome::warp_ring(s[4].rgb, gl, warp_s, s[0].rgb, s[1].rgb);
+    }
     var col: vec3<f32>;
     if (elev <= 0.0) {
         col = s[5].rgb;
     } else if (elev < 1.8) {
-        col = mix(s[5].rgb, s[4].rgb, elev / 1.8);
+        col = mix(s[5].rgb, s4, elev / 1.8);
     } else if (elev < 3.7) {
-        col = mix(s[4].rgb, s[3].rgb, (elev - 1.8) / (3.7 - 1.8));
+        col = mix(s4, s3, (elev - 1.8) / (3.7 - 1.8));
     } else if (elev < 9.8) {
-        col = mix(s[3].rgb, s[2].rgb, (elev - 3.7) / (9.8 - 3.7));
+        col = mix(s3, s2, (elev - 3.7) / (9.8 - 3.7));
     } else if (elev < 16.8) {
-        col = mix(s[2].rgb, s[1].rgb, (elev - 9.8) / (16.8 - 9.8));
+        col = mix(s2, s1, (elev - 9.8) / (16.8 - 9.8));
     } else {
-        col = mix(s[1].rgb, s[0].rgb, (elev - 16.8) / (90.0 - 16.8));
+        col = mix(s1, s[0].rgb, (elev - 16.8) / (90.0 - 16.8));
     }
     return colorspace::modern_in(col, wow_light.point_count.y);
+}
+
+/// fork: the sky a rough surface reflects along `dir`: the dome blurred along elevation by the lobe
+/// of the slope the surface no longer draws (`alpha_lost`, the roughness above the calm floor), three
+/// taps at `±σ`, `σ = √2·α`. The spread is capped at half the ray's elevation, so the band at and
+/// below the horizon (the fog colour) never bleeds up into the reflected sky.
+fn sky_dome_rough(dir: vec3<f32>, alpha_lost: f32) -> vec3<f32> {
+    let elev = asin(clamp(dir.y, -1.0, 1.0));
+    let sigma = min(1.41421356 * alpha_lost, 0.5 * max(elev, 0.0));
+    if (sigma < 0.002) {
+        return sky_dome_at(degrees(elev), dir);
+    }
+    return 0.25 * sky_dome_at(degrees(elev - sigma), dir)
+        + 0.5 * sky_dome_at(degrees(elev), dir)
+        + 0.25 * sky_dome_at(degrees(elev + sigma), dir);
 }
 
 struct VsOut {
@@ -331,6 +379,79 @@ fn apply_fog(rgb: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
 /// which a mirror about the wrong plane stops resembling the world at all.
 const MIRROR_PLANE_FADE_START: f32 = 2.0;
 const MIRROR_PLANE_FADE_END: f32 = 12.0;
+
+// fork: the experimental tier's mirror read. How far (yd) the reflected world is assumed to stand
+// behind the water — the reference's own 20, there being no per-pixel hit distance — and the share
+// of it the wave's lean moves the read by.
+const MIRROR_HIT_YD: f32 = 20.0;
+const MIRROR_WAVE_REACH: f32 = 0.4;
+// fork: the mirror's mip chain (`liquid::screen`'s `REFLECT_MIPS`, which a test pins against this):
+// its level count, the blur of its level 0 in its own texels (the four-tap tent it is filtered
+// with), and the level whose texels are the local mean the grade pivots on.
+const MIRROR_MIPS: f32 = 5.0;
+const MIRROR_CHAIN_SIGMA0: f32 = 1.2;
+const MIRROR_MEAN_LOD: f32 = 4.0;
+// fork: a three-tap column at gap `g` spreads as far as one tap of `σ·√(1 + 8/3)` would: the column's
+// reach over the narrow axis's blur.
+const MIRROR_TAP_REACH: f32 = 1.915;
+// fork: the view distances (yd) over which the reflection's grade goes from near to far.
+const GRADE_NEAR_YD: f32 = 30.0;
+const GRADE_FAR_YD: f32 = 300.0;
+// fork: the vertical column (yd) over which the experimental tier's water comes in at the shore.
+const SHORE_FADE_YD: f32 = 0.3;
+
+/// fork: a reflected ray that a wave has turned under the surface, folded back just above it: a facet
+/// that would reflect into the water sends its light up off the next wave instead.
+fn fold_above(r: vec3<f32>) -> vec3<f32> {
+    return normalize(r + vec3<f32>(0.0, max(r.y, 0.01) - r.y, 0.0));
+}
+
+/// fork: **the mirror through a rough surface** (the benilla-watershader fork's lobe): the reflected
+/// rays of the facets the pixel no longer draws spread `2·σ` radians along the view's bearing (`up`)
+/// and `2·σ·μ` across it (`side`), the across axis foreshortened at grazing — the tall streaks a
+/// rough lake draws under a far bank. Seen from the eye that spread is `h = D/(D + d_eye)` of itself,
+/// so a reflection stays sharp near its contact. The mirror's mips carry the narrow axis's blur and a
+/// three-tap column the rest of the tall one; under half a texel it is the plain read.
+///
+/// Then **graded**, luma-only, toward the mirror's own local mean (a high mip): rough and far water
+/// keeps `1 − (look_f.x + look_f.y·ρ)` of its reflection's contrast. The pivot is the world the mirror
+/// drew, never the sky, so water under a dark bank darkens toward the bank; luma-only, so a grey post
+/// does not take the pivot's hue.
+fn mirror_read_rough(uv: vec2<f32>, lost: vec3<f32>, v: vec3<f32>, d_eye: f32, rho: f32) -> vec3<f32> {
+    let flat_len = length(v.xz);
+    let b = v.xz / max(flat_len, 1e-4);
+    let c = vec2<f32>(-b.y, b.x);
+    let l_along = b.x * b.x * lost.x + b.y * b.y * lost.y + 2.0 * b.x * b.y * lost.z;
+    let l_across = c.x * c.x * lost.x + c.y * c.y * lost.y + 2.0 * c.x * c.y * lost.z;
+    let mu = clamp(-v.y, 0.0, 1.0);
+    let h = MIRROR_HIT_YD / (MIRROR_HIT_YD + d_eye);
+    let dims = vec2<f32>(textureDimensions(reflect_map, 0));
+    // Mirror texels per radian at the centre of the view, vertically and across alike.
+    let per_rad = dims.y * 0.5 * view.clip_from_view[1][1];
+    let sv = 2.0 * sqrt(max(l_along, 0.0)) * h * per_rad;
+    let ss = 2.0 * sqrt(max(l_across, 0.0)) * mu * h * per_rad;
+    var col: vec3<f32>;
+    if (max(sv, ss) < 0.5) {
+        col = textureSampleLevel(reflect_map, scene_samp, uv, 0.0).rgb;
+    } else {
+        let lod = clamp(log2(max(max(ss, sv / MIRROR_TAP_REACH), 1e-3) / MIRROR_CHAIN_SIGMA0), 0.0, MIRROR_MIPS - 1.0);
+        let sig = MIRROR_CHAIN_SIGMA0 * exp2(lod);
+        // Three taps at `±g` spread `g·√(2/3)`; the gap makes up what the level does not carry, at
+        // most two of its own blurs apart so the column never breaks into copies. Taps step ±¼σ
+        // sideways so the filter's bilinear facets do not line up.
+        let gap = min(sqrt(max(sv * sv - sig * sig, 0.0) * 1.5), 2.0 * sig);
+        let du = vec2<f32>(0.25 * sig, gap) / dims;
+        col = (textureSampleLevel(reflect_map, scene_samp, uv + vec2<f32>(du.x, -du.y), lod).rgb
+            + textureSampleLevel(reflect_map, scene_samp, uv, lod).rgb
+            + textureSampleLevel(reflect_map, scene_samp, uv + vec2<f32>(-du.x, du.y), lod).rgb) / 3.0;
+    }
+    let mean = textureSampleLevel(reflect_map, scene_samp, uv, MIRROR_MEAN_LOD).rgb;
+    let k = clamp(1.0 - (w.look_f.x + w.look_f.y * rho), 0.0, 1.0);
+    let y = colorspace::luminance(col);
+    let y_mean = colorspace::luminance(mean);
+    let y_graded = y_mean + k * (y - y_mean);
+    return col * clamp(y_graded / max(y, 1e-4), 0.0, 4.0);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────────── the swatch
 
@@ -458,7 +579,48 @@ fn vertex(in: Vertex) -> VsOut {
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     ) * vcolor;
+
+    // fork: **the surface rises and falls** — the Modern (Experimental) tier on a modern frame lifts
+    // an ADT surface by the height of the same long wind trains whose slope the fragment draws
+    // (`sunshadow::wind_sea_height`, the slope's own integral, over the same noise warp), so the
+    // displaced surface and its normal are one sea. It keeps the kind's share of the wind sea (all of
+    // it on the sea), goes flat toward the shore (the depth byte `V` is 0 at the waterline), full to
+    // `HEIGHT_FULL_YD` and gone by `HEIGHT_GONE_YD` — inside the fine ring (`liquid::surface`), so
+    // the coarse lattice past it is always flat — and never more than `HEIGHT_MAX_YD` either way.
+    // WMO pools stay flat: a fountain does not carry a sea.
+    if (w.optics.w > 0.5 && wow_light.point_count.y > 0.5 && w.path.x < 0.5 && w.look_f.z > 0.0) {
+        let dist = length(out.view_vec);
+        let fade = 1.0 - smoothstep(HEIGHT_FULL_YD, HEIGHT_GONE_YD, dist);
+        if (fade > 0.0) {
+            let xz = out.world_position.xz;
+            let noise = wind_noise(xz, globals.time);
+            let keep = select(w.look_b.x, 1.0, w.kind.y > 0.5);
+            let shore = smoothstep(HEIGHT_SHORE_V.x, HEIGHT_SHORE_V.y, out.depth_v);
+            let h = sunshadow::wind_sea_height(xz, globals.time, dist, noise.xy, noise.z, WAVE_HEIGHT_FROM)
+                * keep * shore * fade * w.look_f.z;
+            out.world_position.y = out.world_position.y + clamp(h, -HEIGHT_MAX_YD, HEIGHT_MAX_YD);
+            out.clip_position = position_world_to_clip(out.world_position.xyz);
+            out.view_vec = out.world_position.xyz - view.world_position.xyz;
+        }
+    }
     return out;
+}
+
+// fork: the displacement's reach: full to `FULL`, gone by `GONE` yd from the eye (inside the fine
+// ring's 64), and at most `MAX` yd either way (`liquid::surface`'s `HEIGHT_MAX_YD`, which a test holds
+// to this). `SHORE_V` is the depth `V` over which it comes in from the waterline.
+const HEIGHT_FULL_YD: f32 = 34.0;
+const HEIGHT_GONE_YD: f32 = 56.0;
+const HEIGHT_MAX_YD: f32 = 0.75;
+const HEIGHT_SHORE_V: vec2<f32> = vec2<f32>(0.05, 0.4);
+
+/// fork: the wind sea's two slow noise taps at world `xz`: `xy` the phase warp, `z` the gust field —
+/// one read for the vertex stage's height and the fragment's slope alike, so the two follow one sea.
+/// An explicit level, so either stage may call it.
+fn wind_noise(xz: vec2<f32>, t: f32) -> vec3<f32> {
+    let warp_n = textureSampleLevel(noise_vol, art_samp, vec3<f32>(xz * 0.011 + vec2<f32>(t * 0.004, 0.0), fract(t * 0.003)), 0.0).rgb;
+    let gust_n = textureSampleLevel(noise_vol, art_samp, vec3<f32>(xz * 0.0045 - sunshadow::wind_dir() * t * 0.0012, fract(t * 0.002 + 0.5)), 0.0).r;
+    return vec3<f32>(warp_n.rg * 2.0 - vec2<f32>(1.0), smoothstep(0.25, 0.75, gust_n));
 }
 
 // ───────────────────────────────────────────────────────────────────────────────── the fragment
@@ -471,11 +633,33 @@ fn vertex(in: Vertex) -> VsOut {
 /// reason cata water does not shimmer into noise at range: at the camera the coarse pair dominates
 /// (`t = 0.2`), and past ~800 yards the fine pair has taken over entirely — which sounds backwards
 /// until you notice the fine pair is what carries the *large* features once it is scaled by 2.
-fn bump_gradient(in: VsOut) -> vec2<f32> {
-    let a = textureSample(bump_tex, art_samp, in.bump_uv_a.xy).xyz;
-    let b = textureSample(bump_tex, art_samp, in.bump_uv_a.zw).xyz;
-    let c = textureSample(bump_tex, art_samp, in.bump_uv_b.xy).xyz;
-    let d = textureSample(bump_tex, art_samp, in.bump_uv_b.zw).xyz;
+///
+/// fork: also the slope variance per axis the sheet's mips have averaged out of the four taps
+/// (`lost`), stored in each mip texel's alpha (`bump_lost`) and weighted as the taps are summed — the far water's ripples become its roughness instead of vanishing.
+struct Bump {
+    slope: vec2<f32>,
+    lost: f32,
+}
+
+/// fork: the slope variance a tap's alpha can carry (`liquid::art`'s `BUMP_VAR_MAX`, which its test
+/// holds to this): each mip texel stores the variance per axis its footprint averaged away as
+/// `sqrt(σ² / BUMP_VAR_MAX)`, 0 at level 0, so a filtered tap's `a² · BUMP_VAR_MAX` is that variance
+/// back, trilinear like the normal beside it.
+const BUMP_VAR_MAX: f32 = 0.05;
+
+fn bump_lost(tap: vec4<f32>) -> f32 {
+    return tap.a * tap.a * BUMP_VAR_MAX;
+}
+
+fn bump_gradient(in: VsOut) -> Bump {
+    let ta = textureSample(bump_tex, art_samp, in.bump_uv_a.xy);
+    let tb = textureSample(bump_tex, art_samp, in.bump_uv_a.zw);
+    let tc = textureSample(bump_tex, art_samp, in.bump_uv_b.xy);
+    let td = textureSample(bump_tex, art_samp, in.bump_uv_b.zw);
+    let a = ta.xyz;
+    let b = tb.xyz;
+    let c = tc.xyz;
+    let d = td.xyz;
     let fine = (a + b) - 1.0;
     let coarse = ((c + d) - 1.0) * 1.4;
     let dist = length(in.view_vec);
@@ -484,7 +668,12 @@ fn bump_gradient(in: VsOut) -> vec2<f32> {
     // The raw SLOPE, not a normal. The reference normalises here (`bump.z = 1`, then `nrm`), but the
     // ripple field has its own slope to add and the two have to be summed before either is turned
     // into a direction — normalising twice would let whichever is larger swallow the other.
-    return g.xy * w.bump_params.w;
+    //
+    // fork: `g = t·(n_a + n_b) + 0.7·(1 − t)·(n_c + n_d)` in decoded normals, so each tap's lost
+    // variance enters at its weight squared.
+    let s = w.bump_params.w;
+    let lost = t * t * (bump_lost(ta) + bump_lost(tb)) + 0.49 * (1.0 - t) * (1.0 - t) * (bump_lost(tc) + bump_lost(td));
+    return Bump(g.xy * s, lost * s * s);
 }
 
 /// The dynamic ripple field's contribution to the surface slope.
@@ -543,6 +732,15 @@ fn scene_depth_at(uv: vec2<f32>) -> f32 {
     let dims = vec2<f32>(textureDimensions(scene_depth));
     let px = vec2<i32>(clamp(uv * dims, vec2<f32>(0.0), dims - 1.0));
     return textureLoad(scene_depth, px, 0).x;
+}
+
+/// fork: the world point the screen shows at `uv` at planar view depth `z` (yd), through the view's
+/// own projection, its jitter included: `ndc = (P₀₀·x − P₂₀·z) / z`, solved for `x` (and `y`).
+fn view_point_at(uv: vec2<f32>, z: f32) -> vec3<f32> {
+    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    let p = view.clip_from_view;
+    let vp = vec3<f32>((ndc.x + p[2][0]) * z / p[0][0], (ndc.y + p[2][1]) * z / p[1][1], -z);
+    return (view.world_from_view * vec4<f32>(vp, 1.0)).xyz;
 }
 
 /// fork: how far a refracted read at view depth `read_z` can be trusted to show what this pixel's
@@ -607,9 +805,6 @@ fn magma(in: VsOut) -> vec4<f32> {
     return vec4<f32>(apply_fog(rgb, in.world_position.xyz), 1.0);
 }
 
-// fork: modern lighting — the waterline: the water (yd along the view ray) the reflection takes to
-// come in, so a surface meets its bank as the bed seen through nothing rather than as a drawn edge.
-const MODERN_SHORE_FADE: f32 = 1.0;
 // fork: modern lighting — the surf on the experimental tier: a soft bright band along the waterline,
 // the reference shot's (a faint lift at its peak, fading out over under a yard of water, no sheet
 // detail in it). `WIDTH` scales the classic foam depth; `MOTTLE` is the sheet's frequency when it is
@@ -620,6 +815,13 @@ const MODERN_FOAM_MOTTLE: f32 = 0.04;
 // fork: modern lighting — the experimental tier's waves: the vertical depth (yd) by which a surface
 // has its full swell back, and the most water (yd along the ray) the refraction bends through.
 const MODERN_WAVE_FULL_DEPTH: f32 = 3.0;
+// fork: the shortest wind train (yd) whose height the surface carries — the crest shading's and the
+// displacement's: the long swell rises and falls, the chop only tilts.
+const WAVE_HEIGHT_FROM: f32 = 4.0;
+// fork: the crest shading: how far the body's light swings, and the swell height (yd) that takes it
+// all the way.
+const CREST_SHADE: f32 = 0.15;
+const CREST_HEIGHT_YD: f32 = 0.3;
 const MODERN_REFRACT_MAX_PATH: f32 = 6.0;
 // fork: how many doublings apart the water in front of a refracted read and in front of this
 // pixel's own background may be before the read stops being trusted (whole within one, none by two).
@@ -658,12 +860,22 @@ const RIPPLE_ALIAS_END: f32 = 1.2;
 /// reference shot's long streaks (~90 % of its ripple power has crests within 20° of across the
 /// view, 6-15 times longer than they are deep). The many octaves are what keeps that true at every
 /// distance: there is always one at the edge of what the pixels resolve.
-fn wind_ripples(xz: vec2<f32>, foot_x: vec2<f32>, foot_y: vec2<f32>) -> vec2<f32> {
+///
+/// fork: the slope a train's fade takes out is not thrown away: `lost` carries it, `(xx, zz, xz)` in
+/// the same unit RMS, for the caller to turn into roughness (`surface_roughness`) — the fork's
+/// energy-conserving filter, so a calmed-out octave widens the gloss it would have broken up.
+struct Ripples {
+    slope: vec2<f32>,
+    lost: vec3<f32>,
+}
+
+fn wind_ripples(xz: vec2<f32>, foot_x: vec2<f32>, foot_y: vec2<f32>) -> Ripples {
     let t = anim_time();
     let coarse = textureSampleLevel(noise_vol, art_samp, vec3<f32>(xz * 0.015 + vec2<f32>(t * 0.004, 0.0), fract(t * 0.003)), 0.0).rgb - vec3<f32>(0.5);
     let fine = textureSampleLevel(noise_vol, art_samp, vec3<f32>(xz * 0.05 - vec2<f32>(0.0, t * 0.01), fract(t * 0.006 + 0.5)), 0.0).rgb - vec3<f32>(0.5);
     let wd = sunshadow::wind_dir();
     var slope = vec2<f32>(0.0);
+    var lost = vec3<f32>(0.0);
     var energy = 0.0;
     let foot = max(length(foot_x), length(foot_y));
     for (var i = 0u; i < RIPPLE_TRAINS; i = i + 1u) {
@@ -685,11 +897,48 @@ fn wind_ripples(xz: vec2<f32>, foot_x: vec2<f32>, foot_y: vec2<f32>) -> vec2<f32
         // Crest sharpened as `sunshadow::wind_swell`'s.
         let c = cos(phase);
         slope = slope + dir * (weight * group * fade * c * (1.0 + 0.35 * sin(phase)));
+        let amp = weight * group;
+        lost = lost + vec3<f32>(dir.x * dir.x, dir.y * dir.y, dir.x * dir.y)
+            * (amp * amp * sunshadow::WIND_CREST_VAR * (1.0 - fade * fade));
         energy = energy + weight * weight;
     }
     // The unfaded layer's RMS slope (a half per train from the cosine), so a faded train only calms the
     // water rather than being renormalised back up.
-    return slope / sqrt(energy * 0.5);
+    let norm = energy * 0.5;
+    return Ripples(slope / sqrt(norm), lost / norm);
+}
+
+/// fork: the GGX `α` of a roughness tensor `(xx, zz, xz)` (`α²` per axis): the isotropic lobe of the
+/// same footprint, `det^¼`.
+fn tensor_alpha(a: vec3<f32>) -> f32 {
+    return sqrt(sqrt(max(a.x * a.y - a.z * a.z, 1e-12)));
+}
+
+/// fork: the roughness tensor `α²` of a surface whose resolved facets are `α0` rough, over the sub-
+/// pixel wind ripples of a `wind` m/s wind (Cox–Munk: a mean square slope of `0.00512·U`, of which the
+/// share under the finest drawn octave is about an eighth) and the slope covariance `lost` its
+/// octaves no longer draw — `α²` being twice the slope variance per axis (Beckmann).
+fn surface_roughness(alpha0: f32, wind: f32, lost: vec3<f32>) -> vec3<f32> {
+    let floor2 = alpha0 * alpha0 + COX_MUNK_SHARE * 0.00512 * max(wind, 0.0);
+    return vec3<f32>(floor2, floor2, 0.0) + 2.0 * lost;
+}
+
+/// fork: the share of the Cox–Munk mean square slope that sits below the finest octave drawn.
+const COX_MUNK_SHARE: f32 = 0.12;
+
+/// fork: the glint's soft knee, on its brightest channel so its hue holds: linear to `GLINT_KNEE`,
+/// then rolling off toward `GLINT_KNEE + GLINT_TOP` — HDR enough to bloom, never a single-pixel
+/// firefly a hundred times the sky.
+const GLINT_KNEE: f32 = 4.0;
+const GLINT_TOP: f32 = 12.0;
+
+fn glint_knee(c: vec3<f32>) -> vec3<f32> {
+    let m = max(c.r, max(c.g, c.b));
+    if (m <= GLINT_KNEE) {
+        return c;
+    }
+    let over = m - GLINT_KNEE;
+    return c * ((GLINT_KNEE + GLINT_TOP * over / (GLINT_TOP + over)) / m);
 }
 
 // fork: modern lighting — the experimental tier's highlight: water's own head-on reflectance (the
@@ -748,11 +997,183 @@ fn disk_highlight(n: vec3<f32>, to_eye: vec3<f32>, to_light: vec3<f32>, alpha: f
     return HIGHLIGHT_PI * d * vis * f * nl * energy;
 }
 
+/// fork: Karis's 2014 fit of the split-sum environment BRDF for a GGX lobe of roughness `r` (`√α`):
+/// the share of a lobe's light a reflectance `f0` returns at `n·v`.
+fn env_brdf_approx(f0: f32, n_dot_v: f32, r: f32) -> f32 {
+    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
+    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
+    let q = r * c0 + c1;
+    let a004 = min(q.x * q.x, exp2(-9.28 * n_dot_v)) * q.x + q.y;
+    let ab = vec2<f32>(-1.04, 1.04) * a004 + q.zw;
+    return f0 * ab.x + ab.y;
+}
+
+/// fork: **water's Fresnel over a rough lobe**: Schlick at `μ = n·v`, times the share of a lobe of
+/// roughness `α` that still reflects against a mirror's (the env-BRDF fit's rough-over-smooth ratio).
+/// Exactly Schlick at `α = 0`; a rough surface reflects less at grazing, where its facets turn away.
+/// Below `μ_kink` the fit's `min` changes branch and the ratio dips into a dark band under the
+/// horizon, so the ratio is read no lower than it: reflectance never rises as the view leaves grazing.
+fn water_fresnel(mu: f32, alpha: f32) -> f32 {
+    let m = clamp(mu, 0.0, 1.0);
+    let schlick = WATER_F0 + (1.0 - WATER_F0) * pow(1.0 - m, 5.0);
+    let r = sqrt(clamp(alpha, 0.0, 1.0));
+    let kink = -log2(max((1.0 - r) * (1.0 - r), 1e-6)) / 9.28;
+    let me = max(m, kink);
+    let ratio = env_brdf_approx(WATER_F0, me, r) / max(env_brdf_approx(WATER_F0, me, 0.0), 1e-4);
+    return max(schlick * min(ratio, 1.0), WATER_F0);
+}
+
+/// fork: the stylised reflectance: water's own curve ([`water_fresnel`]) raised to a head-on floor
+/// `f0`, so a river looked straight down on keeps some sky.
+fn styled_fresnel(mu: f32, alpha: f32, f0: f32) -> f32 {
+    return f0 + (1.0 - f0) * water_fresnel(mu, alpha);
+}
+
+/// fork: **the lively Fresnel** (the benilla-watershader fork's): the reflectance averaged over the
+/// facets the pixel no longer draws — two-point Gauss–Hermite at `μ ± σ` — on the pixel's own wave
+/// normal (`mu_px`), then RESCALED by how far the flat water's mean (`mu_flat`) overshoots the
+/// `ceiling`. A hard cap flattened all far water to one coat; the rescale keeps each wave's own
+/// contrast — a face turned to the eye shows the body, its back the sky — while the mean still sits at
+/// the ceiling. `σ` is what makes far water average smoothly instead of flickering facet by facet.
+fn lively_fresnel(mu_px: f32, mu_flat: f32, sigma: f32, alpha: f32, f0: f32, ceiling: f32) -> f32 {
+    let f_px = 0.5 * (styled_fresnel(mu_px - sigma, alpha, f0) + styled_fresnel(mu_px + sigma, alpha, f0));
+    let f_mean = 0.5 * (styled_fresnel(mu_flat - sigma, alpha, f0) + styled_fresnel(mu_flat + sigma, alpha, f0));
+    return clamp(f_px * min(1.0, ceiling / max(f_mean, 1e-4)), f0, 0.95);
+}
+
+/// fork: the cosine of a ray of cosine `mu` (against the surface's up) once refracted into water
+/// (`n = 1.333`), floored at the critical angle's 0.6612: however grazing the ray in air, it crosses at
+/// most ~1.5 yards of water per yard of depth.
+fn refracted_cos(mu: f32) -> f32 {
+    let m = clamp(mu, 0.0, 1.0);
+    return max(sqrt(max(1.0 - (1.0 - m * m) / (WATER_IOR * WATER_IOR), 0.0)), WATER_CRITICAL_COS);
+}
+
+const WATER_IOR: f32 = 1.333;
+const WATER_CRITICAL_COS: f32 = 0.6612;
+/// fork: the share of the bed the authored depth's swatch blend leaves showing that the clear water
+/// keeps at the least ([`modern_water`]'s transmittance floor), so a bed the 1.12 water showed at that
+/// depth never sinks out of sight under the clear combine.
+const BED_FLOOR_SHARE: f32 = 0.6;
+/// fork: how much the body's light swings with the sun's bearing across a wave's face.
+const BODY_RIPPLE_SHADE: f32 = 0.2;
+
+// ─────────────────────────────────────────────────────────────────────────────────── the caustics
+//
+// fork: **the caustic net** (the benilla-watershader fork's lens estimate). A ray of the sun entering
+// the surface at `x` lands on a bed `D` deep along its refracted path at `x + D·κ·∇h(x)`, κ = 1 − 1/n,
+// so the bed's irradiance is the sun's over |det(I + D·κ·H)|, `H` the surface's Hessian. The lenses
+// are two sets of six analytic ripples, a fine one (1.0-0.3 yd) sharp in the first yard or two and a
+// coarse one (3.6-1.6 yd) focusing `CAUSTIC_COARSE` times deeper, laid on the wind's headings at the
+// swell's deep-water pace so the net moves with the water. The intensity is regularised
+// (`CAUSTIC_EPS`) and divided by its mean at that depth, so only the sun's direct share is
+// redistributed and the bed keeps its energy; neither set is drawn past its sharpest, where it would
+// break into speckle, and each ripple fades as the bed's pixel footprint nears its wavelength.
+
+/// The path along the refracted sun (yd) at which a ripple's curvature of one focuses.
+const CAUSTIC_FOCUS_YD: f32 = 0.72;
+/// How much deeper the coarse set focuses than the fine one.
+const CAUSTIC_COARSE: f32 = 3.3;
+/// The regularisation of `1/|det|`: the brightest line is `1/ε` over the mean.
+const CAUSTIC_EPS: f32 = 0.15;
+/// The deepest focus ratio either set is drawn at.
+const CAUSTIC_RHO_MAX: f32 = 1.6;
+/// Each ripple's curvature per unit focus.
+const CAUSTIC_CURV: f32 = 0.57735;
+/// The path (yd) over which the net's contrast fades out.
+const CAUSTIC_FADE_YD: vec2<f32> = vec2<f32>(6.0, 20.0);
+/// How fast turbidity scatters the net away, per unit of turbidity per yard.
+const CAUSTIC_TURB: f32 = 0.6;
+/// A ripple's wavelength in bed pixels between which it fades out of the net: its lines are a tenth
+/// of it wide, so under 8 px it would alias, and at 16 it draws whole.
+const CAUSTIC_RIPPLE_PX: vec2<f32> = vec2<f32>(8.0, 16.0);
+
+/// One set's Hessian at world `p` (`h_xx, h_zz, h_xz` per unit focus) and, in `w`, the mean square
+/// of what the footprint `foot` (yd per pixel on the bed) keeps of its ripples.
+fn caustic_hessian(p: vec2<f32>, t: f32, foot: f32, coarse: bool) -> vec4<f32> {
+    let wd = sunshadow::wind_dir();
+    var h = vec4<f32>(0.0);
+    for (var i = 0u; i < 6u; i = i + 1u) {
+        let fi = f32(i);
+        let wl = select(mix(1.0, 0.3, fi / 5.0), mix(3.6, 1.6, fi / 5.0), coarse);
+        // Headings scattered by the golden angle about the wind, every side reached.
+        let turn = 6.2831853 * fract(fi * 0.618034 + select(0.13, 0.41, coarse));
+        let d = vec2<f32>(wd.x * cos(turn) - wd.y * sin(turn), wd.x * sin(turn) + wd.y * cos(turn));
+        let k = 6.2831853 / wl;
+        let omega = sqrt(10.7 * k) * RIPPLE_PACE;
+        let keep = smoothstep(CAUSTIC_RIPPLE_PX.x, CAUSTIC_RIPPLE_PX.y, wl / max(foot, 1e-5));
+        let c = -sin(dot(d, p) * k - omega * t + fi * 2.39996 + select(0.0, 1.1, coarse)) * CAUSTIC_CURV * keep;
+        h = h + vec4<f32>(c * d.x * d.x, c * d.y * d.y, c * d.x * d.y, keep * keep);
+    }
+    return vec4<f32>(h.xyz, h.w / 6.0);
+}
+
+/// The regularised intensity's mean over the pattern at focus ratio `rho`: a rational fit, within 11 %
+/// from 0 to 6.
+fn caustic_mean(rho: f32) -> f32 {
+    let r = min(rho, 6.0);
+    let r2 = r * r;
+    let r3 = r2 * r;
+    return (0.989 + 2.1614 * r2 - 0.1102 * r3) / (1.0 - 0.1993 * r2 + 0.6322 * r3);
+}
+
+/// The net of Hessian `h` at focus ratio `rho`, mean 1. A set whose ripples the footprint has faded
+/// is the whole set at a shallower focus (`rho` times the rms it keeps), so its mean is read there.
+fn caustic_lens(h: vec4<f32>, rho: f32) -> f32 {
+    let jxx = 1.0 + rho * h.x;
+    let jzz = 1.0 + rho * h.y;
+    let jxz = rho * h.z;
+    let det = jxx * jzz - jxz * jxz;
+    return inverseSqrt(det * det + CAUSTIC_EPS * CAUSTIC_EPS) / caustic_mean(rho * sqrt(h.w));
+}
+
+/// Both sets' net, mean 1, on the bed point whose refracted sun ray entered the surface at `entry`
+/// (world XZ) and ran `path` yards to it, seen through `foot` yards a pixel on the bed: the fine net
+/// sharp in the first yard or two, handing over to the coarse one as the bed falls away.
+fn caustic_net(entry: vec2<f32>, path: f32, t: f32, foot: f32) -> f32 {
+    let wf = 1.0 - smoothstep(1.0, 3.5, path);
+    let wc = smoothstep(0.4, 2.0, path);
+    var c = 1.0;
+    if (wf > 0.0) {
+        let rho = min(path / CAUSTIC_FOCUS_YD, CAUSTIC_RHO_MAX);
+        c = c + wf * (caustic_lens(caustic_hessian(entry, t, foot, false), rho) - 1.0);
+    }
+    if (wc > 0.0) {
+        let rho = min(path / (CAUSTIC_FOCUS_YD * CAUSTIC_COARSE), CAUSTIC_RHO_MAX);
+        c = c + wc * (caustic_lens(caustic_hessian(entry, t, foot, true), rho) - 1.0);
+    }
+    return c;
+}
+
+/// fork: the clear water's output, linear: all of it (`rgb`), and the share of it that already
+/// carries its own fog (`fogged`) — the bed seen through the water and the world in the reflection,
+/// each fogged where it was drawn. A modern frame's surface fog then falls on the rest alone ("fog
+/// once"): the body's own light and the sky.
+struct ClearWater {
+    rgb: vec3<f32>,
+    fogged: vec3<f32>,
+}
+
+/// What [`modern_water`] reads beyond the surface's own frame: the reflection, how much of it is
+/// already fogged, the calm surface's roughness tensor and lost slope, the bed's caustic gain, the
+/// crest shading, the sun's direction and reach, and the swatch's opacity at the authored depth.
+struct ClearInputs {
+    refl: vec3<f32>,
+    refl_fogged: f32,
+    rough: vec3<f32>,
+    lost: vec3<f32>,
+    caustic: f32,
+    crest: f32,
+    to_light: vec3<f32>,
+    sun: f32,
+    auth_alpha: f32,
+}
+
 /// fork: modern lighting — **stylised clear water**, above the water, in linear radiance. Replaces
 /// the classic COMBINE on a modern frame at the Modern (Experimental) water tier (`waterDetail 3`,
 /// `w.optics.w`; plain Modern keeps the combine) — not its reflection, which arrives here as `refl`
-/// exactly as the classic lane reads it (the planar mirror on its short bent ray, the trace over it
-/// on the flattened normal).
+/// exactly as the classic lane reads it (the planar mirror on its bent ray, the trace over it where
+/// the mirror is invalid).
 ///
 /// The target is WoW Forever's river: a bed you can see from the bank out, taking the water's hue
 /// from the first inches, with the bank's shadows carried across it unbroken, and hardly any mirror
@@ -770,13 +1191,21 @@ fn disk_highlight(n: vec3<f32>, to_eye: vec3<f32>, to_light: vec3<f32>, alpha: f
 ///   channel — by `look_a.x`, coming in over the first `look_a.y` yards so the waterline stays soft.
 ///   A filter multiplies: the bed keeps its contrast, and its shadows show through as the water's
 ///   own dark colour rather than being washed out by an overlay;
-/// * then **Beer–Lambert** toward the DEEP row under the surface's light (the colour the classic
-///   swatch reaches at depth), so a channel darkens into the zone's water and the clock keeps moving
-///   it;
-/// * the reflection goes over that at a stylised Fresnel — a raised head-on reflectance
-///   (`look_a.z`) climbing to a capped grazing one (`look_c.x`) — and is itself pulled `look_a.w` of
-///   the way to the body — the reference combine's `c11.y` idea, which is what keeps
-///   water painterly rather than glossy.
+/// * the bed carries the **caustics** the surface focuses onto it (`x.caustic`, mean 1);
+/// * then **Beer–Lambert** over the optical path a refracted ray really runs — down to the bed along
+///   the view refracted into the water, and the sun's light down to it along its own refracted ray,
+///   both floored at the critical angle — through the absorption and the grey turbidity, toward the
+///   DEEP row under the surface's light (the colour the classic swatch reaches at depth). The deep
+///   row stands for the water's single-scatter albedo, so what the column takes from the bed it gives
+///   back in the zone's colour; a channel darkens into the zone's water and the clock keeps moving it.
+///   The body's light leans with the sun's bearing across each wave and lifts on the crests, where
+///   the water is thinnest. The bed keeps at least `BED_FLOOR_SHARE` of what the 1.12 swatch blend
+///   left of it at the authored depth;
+/// * the reflection goes over that at the **lively Fresnel** ([`lively_fresnel`]): water's curve over
+///   the surface's roughness raised to a head-on floor (`look_a.z`), its far-water mean rescaled to a
+///   ceiling (`look_c.x`), the facets' spread `look_c.y` times what the roughness says — and is itself
+///   pulled `look_a.w` of the way to the body, the reference combine's `c11.y` idea, which is what
+///   keeps water painterly rather than glossy.
 fn modern_water(
     in: VsOut,
     n: vec3<f32>,
@@ -786,36 +1215,42 @@ fn modern_water(
     frag_view_z: f32,
     deep: vec3<f32>,
     lit: vec3<f32>,
-    refl: vec3<f32>,
-) -> vec3<f32> {
+    x: ClearInputs,
+) -> ClearWater {
     // `scene_depth` is planar view depth, so the bed's distance along this pixel's ray scales off
-    // the surface's by the same ratio. The light that lit the bed crossed the column on its way
-    // down as well, so the vertical depth is added once more.
+    // the surface's by the same ratio; `z` is how deep the bed lies under the surface there.
     let path = max(bed_z - frag_view_z, 0.0) * length(in.view_vec) / max(frag_view_z, 0.001);
-    let column = path * clamp(-v.y, 0.0, 1.0);
-    let trans = exp(-w.optics.xyz * min(path + column, 1000.0));
+    let mu_v = clamp(-v.y, 0.0, 1.0);
+    let z = path * mu_v;
+    let optical = min(z / refracted_cos(mu_v) + z / refracted_cos(x.to_light.y), 1000.0);
+    var trans = exp(-(w.optics.xyz + vec3<f32>(max(w.look_e.x, 0.0))) * optical);
+    trans = max(trans, vec3<f32>((1.0 - pow(clamp(x.auth_alpha, 0.0, 1.0), 2.2)) * BED_FLOOR_SHARE));
     // The scene copy is linear on a modern frame and the frame's own gamma bytes on a classic one;
     // this combine runs in linear either way. The bed and its depth are the refraction's own read
     // (`fragment_classic`), shared with the reference half of the blend rather than taken twice.
     let bed = select(colorspace::srgb_to_linear(bed_raw), bed_raw, wow_light.point_count.y > 0.5);
-    let scatter = colorspace::srgb_to_linear(deep * lit);
+    let bearing = x.to_light.xz / max(length(x.to_light.xz), 1e-4);
+    let lean = 1.0 + BODY_RIPPLE_SHADE * dot(n.xz, bearing) / max(n.y, 0.2) * x.sun;
+    let scatter = colorspace::srgb_to_linear(deep * lit) * max(lean * x.crest, 0.0);
     let deep_lin = colorspace::srgb_to_linear(deep);
     let hue = deep_lin / max(max(deep_lin.r, max(deep_lin.g, deep_lin.b)), 1e-4);
-    let tint = mix(vec3<f32>(1.0), hue, w.look_a.x * smoothstep(0.0, max(w.look_a.y, 0.01), column));
-    let under = bed * tint * trans + scatter * (vec3<f32>(1.0) - trans);
+    let tint = mix(vec3<f32>(1.0), hue, w.look_a.x * smoothstep(0.0, max(w.look_a.y, 0.01), z));
+    let seen_bed = bed * tint * x.caustic * trans;
+    let body = scatter * (vec3<f32>(1.0) - trans);
 
-    // A stylised Fresnel, the reference combine's shape rather than Schlick's: a raised head-on
-    // reflectance (`look_a.z`) climbing only to a cap (`look_c.x`) at grazing, along `(1 − cos)` to
-    // the `look_c.y` power, and faded in over the first few inches of water so the surface meets
-    // the bank as the bed rather than as a line of reflection laid along it. Water's real curve is
-    // the wrong one to draw: 2 % head-on leaves a river looked down on with no sky in it at all,
-    // and its climb to ~100 % at grazing turns every stretch of water toward the horizon into a
-    // solid sheet — mercury, not water. The reference combine runs `0.1 + 0.5 · fres²`.
     let f0 = clamp(w.look_a.z, 0.0, 1.0);
-    let cos_i = clamp(dot(-v, n), 0.0, 1.0);
-    let rise = pow(1.0 - cos_i, max(w.look_c.y, 0.5));
-    let fres = mix(f0, clamp(w.look_c.x, f0, 1.0), rise) * smoothstep(0.0, MODERN_SHORE_FADE, path);
-    return mix(under, mix(refl, scatter, w.look_a.w), fres);
+    let ceiling = clamp(w.look_c.x, f0, 1.0);
+    let flat_len = length(v.xz);
+    let b = v.xz / max(flat_len, 1e-4);
+    let along = b.x * b.x * x.lost.x + b.y * b.y * x.lost.y + 2.0 * b.x * b.y * x.lost.z;
+    let sigma = flat_len * sqrt(max(along, 0.0)) * max(w.look_c.y, 0.0);
+    let fres = lively_fresnel(dot(-v, n), mu_v, sigma, tensor_alpha(x.rough), f0, ceiling);
+
+    let a = clamp(w.look_a.w, 0.0, 1.0);
+    var out: ClearWater;
+    out.rgb = (1.0 - fres) * (seen_bed + body) + fres * ((1.0 - a) * x.refl + a * scatter);
+    out.fogged = (1.0 - fres) * seen_bed + fres * (1.0 - a) * x.refl * clamp(x.refl_fogged, 0.0, 1.0);
+    return out;
 }
 
 fn fragment_classic(in: VsOut) -> vec4<f32> {
@@ -856,47 +1291,77 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
     // only a modern frame has (the wind sea, the cascades, the HDR glitter, the froxel fog) it takes
     // there; a classic frame keeps its own fog and the reference's sun specular.
     let experimental = !below && w.optics.w > 0.5;
+    // fork: the pixel's world footprint and how fast the water column changes across it, taken here
+    // at the top, in uniform control flow, for everything below that filters by them — the ripples'
+    // fade, the caustics' and the soft shore's width. A browser's compiler refuses a derivative
+    // under a branch on anything per-pixel, and naga does not check it.
+    let foot_x = dpdx(in.world_position.xz);
+    let foot_y = dpdy(in.world_position.xz);
+    let foot = max(length(foot_x), length(foot_y));
+    let column_rate = fwidth(column_v);
     // fork: modern lighting — the experimental tier's wind ripples, read here in uniform control flow
     // for the pixel footprint's derivatives. Only the sea carries them, on its calm surface
     // (`look_c.w`) and on its highlight's normal (`look_d.z`); a river, a lake and a WMO's liquid keep
     // the cata bump's own octaves on both.
     var ripples = vec2<f32>(0.0);
     var spec_ripples = vec2<f32>(0.0);
+    var ripples_lost = vec3<f32>(0.0);
     if (experimental && w.kind.y > 0.5 && (w.look_c.w > 0.0 || w.look_d.z > 0.0)) {
-        let unit = wind_ripples(
-            in.world_position.xz, dpdx(in.world_position.xz), dpdy(in.world_position.xz),
-        );
-        ripples = w.look_c.w * unit;
-        spec_ripples = w.look_d.z * unit;
+        let unit = wind_ripples(in.world_position.xz, foot_x, foot_y);
+        ripples = w.look_c.w * unit.slope;
+        spec_ripples = w.look_d.z * unit.slope;
+        ripples_lost = unit.lost;
     }
 
     // The swell, plus whatever a body wading nearby has pushed into the water. The two are summed
     // as SLOPES and normalised once — see `bump_gradient`.
-    let bump = bump_gradient(in);
+    let bump_tap = bump_gradient(in);
+    let bump = bump_tap.slope;
     var swell = bump;
     // fork: modern lighting — a modern frame adds a wind-driven swell under the authored bump.
     var wind = vec2<f32>(0.0);
+    var wind_lost = vec3<f32>(0.0);
+    var sea_height = 0.0;
     if (modern) {
         // Two slow drifting taps of the noise volume: one warps the wave phases, one is the gust
         // field, so no two stretches of water repeat the same pattern.
         let wn = in.world_position.xz;
         let wt = globals.time;
-        let warp_n = textureSampleLevel(noise_vol, art_samp, vec3<f32>(wn * 0.011 + vec2<f32>(wt * 0.004, 0.0), fract(wt * 0.003)), 0.0).rgb;
-        let gust_n = textureSampleLevel(noise_vol, art_samp, vec3<f32>(wn * 0.0045 - sunshadow::wind_dir() * wt * 0.0012, fract(wt * 0.002 + 0.5)), 0.0).r;
-        let warp = warp_n.rg * 2.0 - vec2<f32>(1.0);
-        let gust = smoothstep(0.25, 0.75, gust_n);
-        wind = sunshadow::wind_swell(wn, wt, view_len, warp, gust);
+        let noise = wind_noise(wn, wt);
+        let sea = sunshadow::wind_sea(wn, wt, view_len, noise.xy, noise.z, WAVE_HEIGHT_FROM);
+        wind = sea.slope;
+        wind_lost = sea.lost;
+        sea_height = sea.height;
         if (!experimental) {
             swell = swell + wind;
         }
     }
+    // fork: the experimental tier's roughness — the slope variance its normal no longer draws, as an
+    // `α²` tensor `(xx, zz, xz)` in the shading normal's own slope units: the bump sheet's mips, the
+    // wind sea's faded trains and the ripples' faded octaves, each at the share of it the surface
+    // keeps, under the Cox–Munk floor. `rough_s` is the calm surface's (the Fresnel and the
+    // reflection read it), `rough_h` the highlight's own normal's.
+    var rough_s = vec3<f32>(0.0);
+    var rough_h = vec3<f32>(0.0);
+    var lost_s = vec3<f32>(0.0);
+    let keep = select(w.look_b.x, 1.0, w.kind.y > 0.5);
     if (experimental) {
         // The experimental tier's water is calm: the sea keeps its whole sea, a river or lake
         // `look_b.x` of it (its authored bump is its own) with the wind's ripples over it, and water
         // with little under it goes near glassy — a hand-deep stream does not carry a 17-yard swell.
-        let keep = select(w.look_b.x, 1.0, w.kind.y > 0.5);
-        swell = (swell + wind * keep + ripples) * mix(w.look_b.y, 1.0, smoothstep(0.0, MODERN_WAVE_FULL_DEPTH, column_v));
+        let calm = mix(w.look_b.y, 1.0, smoothstep(0.0, MODERN_WAVE_FULL_DEPTH, column_v));
+        swell = (swell + wind * keep + ripples) * calm;
+        let sp2 = w.shade_params.x * w.shade_params.x;
+        let shared_lost = vec3<f32>(bump_tap.lost, bump_tap.lost, 0.0) + wind_lost * (keep * keep);
+        lost_s = (shared_lost + ripples_lost * (w.look_c.w * w.look_c.w)) * (calm * calm * sp2);
+        let lost_h = (shared_lost + ripples_lost * (w.look_d.z * w.look_d.z)) * (w.look_d.y * w.look_d.y * sp2);
+        rough_s = surface_roughness(w.look_b.w, w.look_e.y, lost_s);
+        rough_h = surface_roughness(w.look_b.w, w.look_e.y, lost_h);
     }
+    // fork: the crests' lift on the body's light: the long swell's height (the trains the surface
+    // carries as height), at the share the calm surface keeps — thin water at a crest lets more light
+    // through than the deeper column in a trough.
+    let crest = 1.0 + CREST_SHADE * clamp(sea_height * keep / CREST_HEIGHT_YD, -1.0, 1.0);
     let grad = normalize(vec3<f32>(
         swell + ripple_slope(in.world_position.xz, swell),
         1.0,
@@ -918,11 +1383,12 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
     var spec_n = n;
     var spec_alpha = w.look_b.w;
     if (experimental && modern) {
-        let spec_keep = select(w.look_b.x, 1.0, w.kind.y > 0.5);
-        let full = (bump + wind * spec_keep + spec_ripples) * w.look_d.y;
+        let full = (bump + wind * keep + spec_ripples) * w.look_d.y;
         let spec_grad = normalize(vec3<f32>(full + ripple_slope(in.world_position.xz, full), 1.0));
         spec_n = normalize(vec3<f32>(spec_grad.x * w.shade_params.x, 1.0, spec_grad.y * w.shade_params.x));
-        spec_alpha = specular_aa(spec_n, w.look_b.w);
+        // fork: the lobe is as wide as the facets the normal no longer draws (`rough_h`), and then
+        // widened again by how far the drawn normal turns across the pixel.
+        spec_alpha = specular_aa(spec_n, tensor_alpha(rough_h));
     }
     let to_light = -normalize(wow_light.light_sun.xyz);
 
@@ -950,6 +1416,8 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
     // reach at the surface, which the highlights take; `water_lit` the body's shaded light.
     var water_sun = 1.0;
     var water_lit = in.lit_color;
+    // fork: the sun's reach on the bed (its shadow there, under the cloud), for the caustics.
+    var bed_sun = 1.0;
     if (modern) {
         // **The shadow is read where it falls — on the bed, not on the surface.** A shadow is a
         // property of what the light lands on, and the bed seen through the water already carries its
@@ -990,6 +1458,7 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         let shade = max(min(in.lit_color, wow_light.light_ambient.rgb), in.lit_color * WATER_SHADE_KEEP);
         water_lit = mix(shade, in.lit_color, body_sun * cloud);
         water_sun = sun_surface * cloud;
+        bed_sun = body_sun * cloud;
     }
     let body = ramp.rgb * water_lit;
 
@@ -1016,7 +1485,11 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         // so a hand-deep stream bent its bed as hard as a lake — the wobble that makes a riverbed
         // look like glass. Never more than the reference's own bend.
         let per_yd = 0.5 * view.clip_from_view[1][1] / max(frag_view_z, 0.5);
-        let bend = min(w.look_b.z * min(ray_len, MODERN_REFRACT_MAX_PATH) * per_yd, 0.1 * offset_amount);
+        // fork: and no further than the water lets the bed be seen: past `ln 10 / σ̄` less than a
+        // tenth of it survives, and bending what cannot be seen only smears the body.
+        let sigma_mean = dot(w.optics.xyz, vec3<f32>(1.0 / 3.0)) + max(w.look_e.x, 0.0);
+        let reach = min(min(ray_len, MODERN_REFRACT_MAX_PATH), 2.302585 / max(sigma_mean, 1e-3));
+        let bend = min(w.look_b.z * reach * per_yd, 0.1 * offset_amount);
         refract_uv = uv + n.xz * bend;
     }
     // Deviation: a bent read is kept only where it lands on the surface this pixel's own ray sees
@@ -1031,6 +1504,18 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
     if (refract_trust(bed_z, scene_z, frag_view_z) < 0.5) {
         refract_uv = uv;
         bed_z = scene_z;
+    }
+    if (experimental) {
+        // fork: and only where it lands on BED: a read whose point stands more than its own
+        // sideways distance (45°) above the bed under this pixel is a reed, a post or a rock face
+        // seen through the water, not the floor, and it fades back to the unbent read. The depth goes
+        // with it, so the column `modern_water` filters is the one under what it shows.
+        let bed_here = in.world_position.xyz + v * ray_len;
+        let seen = view_point_at(refract_uv, bed_z);
+        let rise = length(seen.xz - bed_here.xz);
+        let accept = 1.0 - smoothstep(rise, rise + 0.15, seen.y - bed_here.y);
+        refract_uv = uv + (refract_uv - uv) * accept;
+        bed_z = mix(scene_z, bed_z, accept);
     }
     let bed_raw = textureSampleLevel(scene_color, scene_samp, refract_uv, 0.0).rgb;
     var refracted = colorspace::modern_in(bed_raw, wow_light.point_count.y);
@@ -1101,6 +1586,36 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         let mottle = textureSampleLevel(foam_tex, art_samp, in.foam_uv.xy * MODERN_FOAM_MOTTLE, 0.0).r;
         foam = water_lit * (band * MODERN_FOAM_GAIN * (0.6 + 0.8 * mottle) * detail_blend);
     }
+    // fork: the soft shore, the experimental tier's: the whole water layer comes in over the first
+    // `SHORE_FADE_YD` of vertical column as `t·(2 − t)` (three quarters there at half way, so a
+    // shallow shelf still reads as water), never narrower than a few pixels' worth of the column's
+    // own change, so a distant bank fades rather than stair-steps. Past ~half a yard of fade whole
+    // lagoons go clear; the fork that measured that settled on a third of a yard.
+    let shore_t = clamp(column_v / max(SHORE_FADE_YD, 3.0 * column_rate), 0.0, 1.0);
+    let shore_cover = select(1.0, shore_t * (2.0 - shore_t), experimental);
+
+    // fork: the caustics on the bed (`caustic_net`), the experimental tier's on a modern frame: the
+    // bed under this pixel, reached along the unrefracted ray, is lit through the point where the
+    // sun's refracted ray entered the surface above it. Only the sun's direct share of the bed's light
+    // is redistributed — none in the bed's shadow — and the net fades with the path and turbidity.
+    var caustic = 1.0;
+    if (experimental && modern && w.look_e.z > 0.0 && to_light.y > 0.0) {
+        let t_ref = refract(-to_light, vec3<f32>(0.0, 1.0, 0.0), 1.0 / WATER_IOR);
+        let path_c = column_v / max(-t_ref.y, 0.2);
+        let fade = (1.0 - smoothstep(CAUSTIC_FADE_YD.x, CAUSTIC_FADE_YD.y, path_c))
+            * exp(-CAUSTIC_TURB * max(w.look_e.x, 0.0) * path_c);
+        let sun_l = colorspace::luminance(wow_light.light_diffuse.rgb) * to_light.y * bed_sun;
+        let sky_l = colorspace::luminance(wow_light.light_ambient.rgb);
+        let share = sun_l / max(sky_l + sun_l, 1e-4);
+        let amp = fade * share * w.look_e.z;
+        if (amp > 1.0 / 256.0) {
+            let bed_p = in.world_position.xyz + v * ray_len;
+            let entry = bed_p.xz - t_ref.xz * path_c;
+            let foot_bed = foot * (view_len + ray_len) / max(view_len, 1e-3);
+            caustic = max(1.0 + amp * (caustic_net(entry, path_c, anim_time(), foot_bed) - 1.0), 0.0);
+        }
+    }
+
     var rgb: vec3<f32>;
     if (below) {
         // ---- ProcWaterBelow perm 0 -------------------------------------------------------------
@@ -1183,7 +1698,22 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         // Undoing it here is one subtract, against a second camera that could not exist otherwise.
         let bend = clamp(dot(v, n) * 0.45 + 0.55, 0.0, 1.0);
         let mirror_ray = v + bend * (-vec3<f32>(n.x, 0.0, n.z) - v);
-        let mirror_clip = view.clip_from_world * vec4<f32>(in.world_position.xyz + mirror_ray * 20.0, 1.0);
+        var mirror_point = in.world_position.xyz + mirror_ray * 20.0;
+        if (experimental) {
+            // fork: the experimental tier reads the mirror where a planar reflection is: the mirror
+            // image of a point `MIRROR_HIT_YD` along the flat reflected ray, which lies on this
+            // pixel's own view ray, moved by how far the WAVE's reflected ray (folded back above the
+            // surface) leans off the flat one, a share of the way to the hit — far banks wobble,
+            // contact points stay put. The world point moves rather than the UV: at grazing a UV shift
+            // shows the same content twice. A surface off the mirror's plane reads the image of its
+            // own height (`2·(plane − y)`).
+            let r_flat = reflect(v, vec3<f32>(0.0, 1.0, 0.0));
+            let dr = fold_above(reflect(v, n)) - r_flat;
+            mirror_point = in.world_position.xyz
+                + (v + vec3<f32>(dr.x, -dr.y, dr.z) * MIRROR_WAVE_REACH) * MIRROR_HIT_YD
+                + vec3<f32>(0.0, 2.0 * (w.path.w - in.world_position.y), 0.0);
+        }
+        let mirror_clip = view.clip_from_world * vec4<f32>(mirror_point, 1.0);
         let mirror_ndc = mirror_clip.xy / max(mirror_clip.w, 0.0001);
         var mirror_uv = (mirror_ndc * vec2<f32>(1.0, -1.0) + 1.0) * 0.5;
         mirror_uv.x = 1.0 - mirror_uv.x;
@@ -1226,33 +1756,78 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         // This is also exactly what perm 4 has in place of the mirror, so the fallback is not a
         // guess — it is the other shipped program.
         var base = wow_light.fog_color.rgb;
+        // fork: the roughness above the calm floor, which blurs what the surface reflects.
+        var alpha_lost = 0.0;
         if (experimental) {
             // fork: modern lighting — the experimental tier keeps this whole lookup and puts the sky
             // dome along the reflected ray in the horizon constant's place: one colour for every
             // direction (in a jungle zone an olive haze) read as goo over a lake whose mirror had not
-            // rendered yet; the dome is the backdrop the player can see.
-            base = sky_dome(r);
+            // rendered yet; the dome is the backdrop the player can see. fork: blurred by the
+            // surface's unresolved roughness, along the ray folded back above the horizon.
+            let a_s = tensor_alpha(rough_s);
+            alpha_lost = sqrt(max(a_s * a_s - w.look_b.w * w.look_b.w, 0.0));
+            base = sky_dome_rough(fold_above(r), alpha_lost);
         }
         if (w.path.z > 0.5) {
-            let mirror = colorspace::modern_in(textureSampleLevel(reflect_map, scene_samp, mirror_uv, 0.0).rgb, wow_light.point_count.y);
+            var mirror_raw: vec3<f32>;
+            if (experimental) {
+                // fork: through the rough surface, graded toward the mirror's own local mean.
+                let a_s = tensor_alpha(rough_s);
+                let rho_rough = smoothstep(w.look_b.w, max(w.look_e.w, w.look_b.w + 1e-3), a_s);
+                let rho_far = smoothstep(GRADE_NEAR_YD, GRADE_FAR_YD, view_len);
+                let rho = 1.0 - (1.0 - rho_rough) * (1.0 - rho_far);
+                mirror_raw = mirror_read_rough(mirror_uv, lost_s, v, view_len, rho);
+            } else {
+                mirror_raw = textureSampleLevel(reflect_map, scene_samp, mirror_uv, 0.0).rgb;
+            }
+            let mirror = colorspace::modern_in(mirror_raw, wow_light.point_count.y);
             base = mix(base, mirror, mirror_valid);
         }
         // `ADDR R3.xyz, R3, -R5` / `MADR R3.xyz, R1.w, R3, R5` — the mirror is the BASE and the
         // screen-space hit is lerped over it by the same validity perm 4 lerps the horizon by.
-        var reflected = mix(base, hit, validity);
+        //
+        // fork: the experimental tier lays the hit only where the mirror is not valid: a read off the
+        // screen changes as its source leaves the frame (the same island graded about grey on screen
+        // and about the sky past its edge), and the mirror under it never does.
+        var ssr_share = validity;
+        if (experimental) {
+            ssr_share = validity * (1.0 - mirror_valid * w.path.z);
+        }
+        var reflected = mix(base, hit, ssr_share);
         if (experimental) {
             // fork: modern lighting — the same reflection, softened toward the body and laid over
-            // `modern_water`'s tinted bed at its stylised Fresnel instead of the two steps below.
-            // Linear out, re-encoded so the wrapper's decode hands it back unchanged.
-            let clear = colorspace::linear_to_srgb(modern_water(
-                in, n, v, bed_raw, bed_z, frag_view_z, swatch(1.0).rgb, water_lit,
-                colorspace::srgb_to_linear(reflected),
-            ));
+            // `modern_water`'s tinted bed at its lively Fresnel instead of the two steps below.
+            var x: ClearInputs;
+            x.refl = colorspace::srgb_to_linear(reflected);
+            // The mirror's world and the screen's hit were fogged where they were drawn; the dome
+            // under them was not.
+            x.refl_fogged = 1.0 - (1.0 - mirror_valid * w.path.z) * (1.0 - ssr_share);
+            x.rough = rough_s;
+            x.lost = lost_s;
+            x.caustic = caustic;
+            x.crest = crest;
+            x.to_light = to_light;
+            x.sun = water_sun;
+            x.auth_alpha = swatch(in.depth_v).a;
+            let clear = modern_water(in, n, v, bed_raw, bed_z, frag_view_z, swatch(1.0).rgb, water_lit, x);
             // The tier sits between the clear surface and the reference's combine: `look_c.z` of
             // the reference's own (the swatch over the refraction, the reflection pulled to the
             // body), over the same calm normal, the same reflection, and the same bed read.
             let cata = mix(refracted, mix(reflected, body, 0.6), fres2 * 0.5 + 0.1);
-            rgb = mix(clear, cata, w.look_c.z);
+            let k = w.look_c.z;
+            // fork: the soft shore — the whole water layer comes in over the first fraction of a yard
+            // of column (`shore_cover`), over the bed seen straight through.
+            let here_raw = textureSampleLevel(scene_color, scene_samp, uv, 0.0).rgb;
+            let here = select(colorspace::srgb_to_linear(here_raw), here_raw, modern);
+            let total = mix(here, mix(clear.rgb, colorspace::srgb_to_linear(cata), k), shore_cover);
+            // fork: fog once — on a modern frame what already carries its fog (the bed, the
+            // reflected world, the bank at the waterline) leaves here linear and goes round the
+            // wrapper's surface fog; the rest is fogged at the surface as before.
+            if (modern) {
+                modern_prefogged = mix(here, (1.0 - k) * clear.fogged, shore_cover);
+            }
+            // Linear out, re-encoded so the wrapper's decode hands it back unchanged.
+            rgb = colorspace::linear_to_srgb(max(total - modern_prefogged, vec3<f32>(0.0)));
         } else {
             // Then 60% of the way back toward the body colour. Water is not a mirror; this is the
             // program's own `c11.y`, and it is what stops a lake from reading as chrome at noon.
@@ -1288,7 +1863,8 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
     } else {
         // fork: modern lighting — the experimental tier takes the reference's glare and specular
         // in the same share it takes the reference's combine (`look_c.z`).
-        let k = w.look_c.z;
+        // fork: all of it at the soft shore's coverage, like the surface it sits on.
+        let k = w.look_c.z * shore_cover;
         let glare = clamp(dot(to_light, n), 0.0, 1.0) * w.shade_params.w;
         rgb += k * glare * wow_light.light_diffuse.rgb * body * water_sun;
         rgb += k * w.shade_params.z * spec_color * fres2 * water_sun;
@@ -1296,7 +1872,7 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
             // A classic frame has no glitter path to carry the sun (that is HDR, added by the
             // linear wrapper), so the clear share keeps the reference's Blinn track there —
             // without the sheen floor, whose flat grazing lift the reflection carries.
-            rgb += (1.0 - k) * w.shade_params.z * wow_light.light_spec.rgb * spec * fres2;
+            rgb += (1.0 - w.look_c.z) * shore_cover * w.shade_params.z * wow_light.light_spec.rgb * spec * fres2;
         }
     }
     // fork: modern lighting — the sun's glitter path: a tight HDR lobe on the reflected ray over a
@@ -1313,7 +1889,7 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
             // The experimental tier's highlight is a microfacet lobe off the light's disk on its own
             // rough normal (`disk_highlight`): Forever's PBR water, its path broken into flat-topped
             // islands as bright as the disk, rather than a smooth glow on a calm surface.
-            modern_glint = key * (disk_highlight(spec_n, -v, to_light, spec_alpha, w.look_d.x) * w.look_d.w * water_sun * horizon);
+            modern_glint = glint_knee(key * (disk_highlight(spec_n, -v, to_light, spec_alpha, w.look_d.x) * w.look_d.w * water_sun * horizon)) * shore_cover;
         } else {
             let rv = reflect(v, n);
             let sd = clamp(dot(rv, to_light), 0.0, 1.0);
@@ -1337,6 +1913,7 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
 @fragment
 fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     modern_glint = vec3<f32>(0.0);
+    modern_prefogged = vec3<f32>(0.0);
     let c = fragment_classic(in);
     var rgb = colorspace::modern_out(c.rgb, wow_light.point_count.y) + modern_glint;
     // P4: transparent water draws after the fog composite, so it fogs itself; opaque magma and slime
@@ -1346,5 +1923,8 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         let fog = froxelfog::fog_at(modern_fog_volume, scene_samp, air, in.world_position.xyz);
         rgb = rgb * fog.a + fog.rgb;
     }
+    // fork: fog once — what already carried its fog when it was drawn (the experimental tier's bed and
+    // reflected world, `fragment_classic`) joins after the surface's fog, not under it.
+    rgb = rgb + modern_prefogged;
     return vec4<f32>(rgb, c.a);
 }

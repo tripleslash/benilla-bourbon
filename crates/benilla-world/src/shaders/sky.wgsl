@@ -5,6 +5,7 @@
     forward_io::VertexOutput,
     mesh_view_bindings::view,
 }
+#import benilla_modern::skydome
 
 struct SkyColors {
     sky0: vec4<f32>, // zenith (90°)
@@ -21,27 +22,10 @@ struct SkyColors {
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> sky: SkyColors;
 
-// Glow `g` for a sun-relative azimuth phase, sampled linearly like `0x6d0f50` from the reference's
-// six-keyframe wrap-around table at `0xce9af8` (written by `0x6ce210`); 0.125 is the sun bearing.
-fn azimuth_glow(phase: f32) -> f32 {
-    let p = fract(phase);
-    if (p < 0.125) { return mix(0.0, 1.0, (p + 0.125) / 0.25); } // wrap 0.875(g0)→1.125(g1)
-    else if (p < 0.375) { return mix(1.0, 0.0, (p - 0.125) / 0.25); }
-    else if (p < 0.5) { return mix(0.0, -0.5, (p - 0.375) / 0.125); }
-    else if (p < 0.625) { return mix(-0.5, -0.7, (p - 0.5) / 0.125); }
-    else if (p < 0.75) { return mix(-0.7, -0.5, (p - 0.625) / 0.125); }
-    else if (p < 0.875) { return mix(-0.5, 0.0, (p - 0.75) / 0.125); }
-    else { return mix(0.0, 1.0, (p - 0.875) / 0.25); } // wrap 0.875(g0)→1.125(g1)
-}
-
-// One mid-ring's warped colour for glow `g` (`0x6d0f50`): `S^2` is the prepass S nested in the
-// per-segment S, and 0.7 is the constant at `0x7ffd7c`.
+// The dawn/dusk warp's table and ring blend live in `benilla_modern::skydome`, which the water's
+// reflection of this dome reads too.
 fn warp_one(base: vec3<f32>, g: f32, s: f32) -> vec3<f32> {
-    let s2 = s * s;
-    if (g >= 0.0) {
-        return mix(base, sky.sky1.rgb, (1.0 - g) * s2);
-    }
-    return mix(mix(base, sky.sky1.rgb, s), sky.sky0.rgb, 0.7 * (-g) * s2);
+    return skydome::warp_one(base, g, s, sky.sky0.rgb, sky.sky1.rgb);
 }
 
 // fork (Everwood port): the smooth gradient of a modern frame.
@@ -121,8 +105,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let seg = az * 24.0; // 24 azimuth segments, like the dome vertices
         let s0 = floor(seg);
         let f = seg - s0;
-        let g0 = azimuth_glow(s0 / 24.0);
-        let g1 = azimuth_glow((s0 + 1.0) / 24.0);
+        let g0 = skydome::azimuth_glow(s0 / 24.0);
+        let g1 = skydome::azimuth_glow((s0 + 1.0) / 24.0);
         s1 = mix(warp_one(sky.sky1.rgb, g0, warp_s), warp_one(sky.sky1.rgb, g1, warp_s), f);
         s2c = mix(warp_one(sky.sky2.rgb, g0, warp_s), warp_one(sky.sky2.rgb, g1, warp_s), f);
         s3 = mix(warp_one(sky.sky3.rgb, g0, warp_s), warp_one(sky.sky3.rgb, g1, warp_s), f);
