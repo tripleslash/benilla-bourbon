@@ -314,12 +314,6 @@ fn scan_faders(
     unarmed_left
 }
 
-/// Whether the last full cull's lists still answer: it read this draw epoch and left no exile to
-/// arm.
-fn memo_holds(memo: Option<(u64, bool)>, epoch: u64) -> bool {
-    memo.is_some_and(|(e, revisit)| e == epoch && !revisit)
-}
-
 /// The CPU scene walk into this frame's visible lists: frustum, farclip and the exterior window
 /// gate per cell (conservative: overdraw, never a hole), plus the portal PVS per WMO group, the
 /// camera's own building exempt from the gate. A re-admitted exile despawns and clears its kill
@@ -332,8 +326,8 @@ pub(super) fn cull_cells(
     view: Res<crate::view::ViewDistance>,
     cam: Query<
         (
-            Ref<GlobalTransform>,
-            Ref<Projection>,
+            &GlobalTransform,
+            &Projection,
             &bevy::camera::primitives::Frustum,
         ),
         With<crate::view::WorldCamera>,
@@ -341,11 +335,6 @@ pub(super) fn cull_cells(
     windows: Res<crate::wmo_portal::ExteriorWindows>,
     claim: Res<crate::wmo_portal::CameraInteriorClaim>,
     instances: Query<&crate::wmo_portal::WmoPortalInstance>,
-    // A placement's PVS or fog lane moving, or a placement leaving, re-runs the cull.
-    (moved_instances, mut gone_instances): (
-        Query<(), Changed<crate::wmo_portal::WmoPortalInstance>>,
-        RemovedComponents<crate::wmo_portal::WmoPortalInstance>,
-    ),
     horizon: Option<Res<crate::horizon::Horizon>>,
     census: Option<ResMut<crate::horizon::HorizonCensus>>,
 ) {
@@ -353,35 +342,16 @@ pub(super) fn cull_cells(
     for e in gx.pending_despawn.drain(..) {
         commands.entity(e).try_despawn();
     }
+    // Every frame, as the reference re-culls its whole scene each frame.
     let cam_view = cam.iter().next();
-    // A still frame over an unchanged draw set: every verdict below is last frame's, so the
-    // published lists stand. Fader bands move only with the camera.
-    let gone = gone_instances.read().count();
-    let scene_still = cam_view
-        .as_ref()
-        .is_some_and(|(t, p, _)| !t.is_changed() && !p.is_changed())
-        && !debug.is_changed()
-        && !view.is_changed()
-        && !windows.is_changed()
-        && !claim.is_changed()
-        && !horizon.as_ref().is_some_and(|h| h.is_changed())
-        && moved_instances.is_empty()
-        && gone == 0;
-    if scene_still && memo_holds(gx.cull_memo, gx.draw_epoch) {
-        return;
-    }
     let StaticGx {
         cells,
         wmos,
         props,
         world,
         fade_events,
-        draw_epoch,
-        cull_memo,
         ..
     } = &mut *gx;
-    // Whether this run leaves an exile to arm next frame, which a still frame must not skip.
-    let mut revisit = false;
     // Reap regions whose instance died with its placement; a WMO placement never changes owner
     // tile (the straddler handoff is M2-only).
     wmos.retain(|e, _| instances.contains(*e));
@@ -402,11 +372,8 @@ pub(super) fn cull_cells(
     world.visible.clear();
     world.visible_wmos.clear();
     let Some((cam_t, proj, frustum)) = cam_view else {
-        // Nothing is published without a camera: the next frame with one runs whole.
-        *cull_memo = None;
         return;
     };
-    let (cam_t, proj) = (&*cam_t, &*proj);
     let cam_pos = cam_t.translation();
     let cam_fwd = Vec3::from(cam_t.forward());
     let gate = crate::exterior_cull::ExteriorGate::build(&windows, Some((cam_t, proj)));
@@ -439,7 +406,7 @@ pub(super) fn cull_cells(
             && world.cells.get(&key).is_none_or(|d| {
                 gate.admits(&GlobalTransform::from_translation(d.origin), Some(&d.aabb))
             });
-        revisit |= scan_faders(
+        scan_faders(
             &mut commands,
             cell,
             world.cells.get_mut(&key),
@@ -455,7 +422,7 @@ pub(super) fn cull_cells(
             continue;
         }
         let inst = instances.get(entity).ok();
-        revisit |= scan_faders(
+        scan_faders(
             &mut commands,
             cell,
             world.props.get_mut(&entity),
@@ -657,7 +624,6 @@ pub(super) fn cull_cells(
             .visible_wmos
             .extend(admitted.into_iter().map(|(_, v)| v));
     }
-    *cull_memo = Some((*draw_epoch, revisit));
     if let Some(mut census) = census {
         census.gx_cells = h_cells;
         census.gx_groups = h_groups;
@@ -786,16 +752,6 @@ mod tests {
                 d += 0.037;
             }
         }
-    }
-
-    /// A still frame reuses the last full cull only over the same draw set, and never while an
-    /// exile waits to be armed.
-    #[test]
-    fn the_cull_memo_holds_only_over_the_same_draw_set() {
-        assert!(!memo_holds(None, 0), "no full run yet");
-        assert!(memo_holds(Some((3, false)), 3));
-        assert!(!memo_holds(Some((3, false)), 4), "a bake or a drop since");
-        assert!(!memo_holds(Some((3, true)), 3), "an exile to arm");
     }
 
     /// A prop fader inside its band exiles as an entity on its rooms, its retained item killed

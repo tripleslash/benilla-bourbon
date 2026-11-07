@@ -355,12 +355,6 @@ pub struct StaticGx {
     props: bevy::platform::collections::HashMap<Entity, GxCell>,
     /// The published half the render node draws.
     pub(crate) world: render::GxWorld,
-    /// Bumped whenever a drawable region is baked, dropped or cleared: the cull's structural input,
-    /// so a still frame over an unchanged draw set reuses last frame's lists.
-    draw_epoch: u64,
-    /// The cull's last full run: the draw epoch it read, and whether it left an exile to arm
-    /// (which the next frame must revisit).
-    cull_memo: Option<(u64, bool)>,
     frame: u32,
     /// Declined-batch census: env-map, depth-flag, shade-family, prop-fader, prop-no-instance.
     declined: [u32; 5],
@@ -757,7 +751,6 @@ impl StaticGx {
         self.world.cells.clear();
         self.world.wmos.clear();
         self.world.props.clear();
-        self.draw_epoch += 1;
         self.world.visible.clear();
         self.world.visible_wmos.clear();
         // The census counts this world only; carried across a map change it reads as a leak.
@@ -910,28 +903,6 @@ pub(crate) mod testkit {
 mod tests {
     use super::testkit::{batch, batch_of, object, tri};
     use super::*;
-
-    /// Every change to the drawable set moves the cull's structural epoch: a bake, and a clear.
-    #[test]
-    fn a_bake_and_a_clear_move_the_draw_epoch() {
-        use bevy::ecs::system::RunSystemOnce;
-        bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
-        let mut world = World::new();
-        world.init_resource::<Assets<Mesh>>();
-        let mut gx = StaticGx::default();
-        let g = tri([0.0; 3]);
-        assert!(gx.divert(batch(&g, Vec3::ZERO, None, ModelBlend::Opaque)));
-        gx.flush_now = true;
-        world.insert_resource(gx);
-        world.run_system_once(bake::flush_static_gx).unwrap();
-        let after_bake = world.resource::<StaticGx>().draw_epoch;
-        assert!(after_bake > 0, "a bake moves it");
-        world.resource_mut::<StaticGx>().clear();
-        assert!(
-            world.resource::<StaticGx>().draw_epoch > after_bake,
-            "a clear moves it"
-        );
-    }
 
     /// The static pass lights as the entity pass does, per vertex: `vertex_light` holds every
     /// lane, the vertex stage writes its clamped colour to the interpolated `primary`, and the

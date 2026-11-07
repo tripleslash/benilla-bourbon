@@ -446,8 +446,8 @@ pub struct BillboardPlace;
 pub(crate) fn face_billboards(
     par_commands: ParallelCommands,
     time: Res<Time>,
-    cam: Query<(Ref<GlobalTransform>, Option<Ref<Transform>>), With<WorldCamera>>,
-    owners: Query<Ref<GlobalTransform>, (Without<WorldCamera>, Without<BillboardCard>)>,
+    cam: Query<&GlobalTransform, With<WorldCamera>>,
+    owners: Query<&GlobalTransform, (Without<WorldCamera>, Without<BillboardCard>)>,
     mut cards: Query<
         (
             Entity,
@@ -467,11 +467,9 @@ pub(crate) fn face_billboards(
         Without<WorldCamera>,
     >,
 ) {
-    let Ok((cam_tf, cam_local)) = cam.single() else {
+    let Ok(cam_tf) = cam.single() else {
         return;
     };
-    // A teleport frame moves the seat's local before propagation, so either change counts.
-    let cam_moved = cam_tf.is_changed() || cam_local.as_ref().is_some_and(|l| l.is_changed());
     let (fwd, right, up) = (*cam_tf.forward(), *cam_tf.right(), *cam_tf.up());
     let elapsed_ms = time.elapsed().as_millis() as u32;
     // Asked here, on the calling thread: the trace's switch is a lazily filled `OnceLock`, and a
@@ -483,11 +481,6 @@ pub(crate) fn face_billboards(
     cards
         .par_iter_mut()
         .for_each(|(entity, mut card, mut tf, mut global, tag, vis, caster)| {
-            // A track-less card is a pure function of the camera and its owner, so it is skipped
-            // when neither moved, unless it has never been placed (no attach stamp yet).
-            let tracked = card.scale_anim.is_some()
-                || card.seq_translation.is_some()
-                || card.gseq_attach_ms.is_none();
             // A hidden card is not drawn, and the reference animates only the frame's worklist:
             // once its attach anchor is stamped its pose waits, and is placed on the frame its
             // `Visibility` flips. A doodad card's own verdict reads its place, which lags only its
@@ -507,9 +500,6 @@ pub(crate) fn face_billboards(
             if let Some(owner) = card.follow {
                 match owners.get(owner) {
                     Ok(gt) => {
-                        if !tracked && !cam_moved && !gt.is_changed() && !vis.is_changed() {
-                            return;
-                        }
                         let pivot = card.local_pivot;
                         let placement = gt.compute_transform();
                         if !card.is_placed_at(placement, pivot) {
@@ -537,8 +527,6 @@ pub(crate) fn face_billboards(
                         return;
                     }
                 }
-            } else if !tracked && !cam_moved && !vis.is_changed() {
-                return;
             }
             // The gseq attach anchor, stamped on the first placement pass (`CM2Model+0x68`). Written
             // once: a `get_or_insert` through the `Mut` would mark the card changed every frame.
@@ -897,14 +885,13 @@ mod tests {
     }
 
     #[test]
-    fn a_card_born_on_a_still_frame_is_placed() {
+    fn a_new_card_is_placed() {
         use benilla_assets::coords::wow_to_bevy;
         let mut app = App::new();
         app.init_resource::<Time>();
         app.add_systems(Update, face_billboards);
         app.world_mut()
             .spawn((crate::view::WorldCamera, GlobalTransform::IDENTITY));
-        // Two quiet frames: the camera's change tick ages past the still-frame window.
         app.update();
         app.update();
         let root = app
@@ -925,7 +912,7 @@ mod tests {
         let pivot_world = Vec3::new(3.0, 1.5, 0.0) + pivot;
         assert!(
             (tf.translation - pivot_world).length() < 1e-5,
-            "a card born on a still frame sits at its pivot, not at the origin: {:?}",
+            "a new card sits at its pivot, not at the origin: {:?}",
             tf.translation
         );
     }

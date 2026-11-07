@@ -364,12 +364,6 @@ pub(crate) fn compute_wmo_pvs(
     mut camera_claim: ResMut<CameraInteriorClaim>,
     mut camera_windows: ResMut<ExteriorWindows>,
     mut camera_reach: ResMut<ExteriorWindowReach>,
-    // The flood's other inputs: a placement moving, arriving or leaving, and its model landing.
-    (mut gone, mut landed, mut last): (
-        RemovedComponents<WmoPortalInstance>,
-        MessageReader<AssetEvent<WmoModel>>,
-        Local<Option<(Mat4, Option<f32>)>>,
-    ),
 ) {
     // No world camera yet: keep last frame's sets, all visible.
     let Some((cam_t, proj)) = cam.iter().next() else {
@@ -380,23 +374,7 @@ pub(crate) fn compute_wmo_pvs(
     probe.eye = eye_world;
     // The seed's terrain leg, sampled once for the camera's column (`0x6821f0`).
     let terrain = terrain_height_under(&streamer, &adt_tiles, eye_world);
-    // The flood is a pure function of the view, the eye's ground, the placements and their models:
-    // a still camera over unchanged buildings keeps last frame's sets and everything derived from
-    // them (a dump request always floods). This system's own writes do not read back as changed.
-    let key = (clip_from_world, terrain);
-    let models_landed = landed.read().count() > 0;
-    let placements_gone = gone.read().count() > 0;
-    let placements_moved = instances.iter_mut().any(|(_, i)| i.is_changed());
-    if *last == Some(key)
-        && !models_landed
-        && !placements_gone
-        && !placements_moved
-        && probe.dump_to.is_none()
-        && cull_dump_path().is_none()
-    {
-        return;
-    }
-    *last = Some(key);
+    // The flood runs every frame, as the reference re-culls its whole scene each frame.
     // `WOW_CULLDUMP=<path>` re-requests the dump every frame, last writer wins: a headless run has
     // no panel button, and a one-shot request at startup would catch an empty world.
     let dump_to = probe.dump_to.take().or_else(|| cull_dump_path().clone());
@@ -457,8 +435,7 @@ pub(crate) fn compute_wmo_pvs(
         let mut log = dump_text
             .is_some()
             .then(|| TraceLog::new(model, eye_local, terrain_local));
-        // Compare, then write: a parked camera's flood repeats its answer, and a blind write would
-        // mark every instance changed.
+        // Compare, then write: a blind write would mark every instance changed.
         let mut fresh = compute_pvs_traced(
             model,
             eye_local,

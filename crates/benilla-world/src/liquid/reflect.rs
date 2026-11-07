@@ -596,8 +596,7 @@ fn sync_reflection_camera(
     // The frame the mirror clears to is the frame the world clears to: whatever the sky does not
     // cover reads as the same horizon on both sides of the surface. Written blind — neither
     // `ClearColorConfig` nor `Projection` implements `PartialEq`, and both are one component on
-    // one entity that nothing else watches for changes (the `scene_still` gate in
-    // `model_render::visibility` reads the WORLD camera's).
+    // one entity that nothing else watches for changes.
     camera.clear_color = world_camera.clear_color;
     *projection = world_projection.clone();
 
