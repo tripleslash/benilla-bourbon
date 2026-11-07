@@ -86,8 +86,14 @@ mod native {
                 name.starts_with("pipelines-vulkan-10de-2684-") && name.ends_with(".bin"),
                 "{name}"
             );
-            assert_ne!(name, file_name("vulkan", 0x10de, 0x2684, "NVIDIA", "572.16"));
-            assert_ne!(name, file_name("vulkan", 0x10de, 0x2684, "NVIDIA5", "66.36"));
+            assert_ne!(
+                name,
+                file_name("vulkan", 0x10de, 0x2684, "NVIDIA", "572.16")
+            );
+            assert_ne!(
+                name,
+                file_name("vulkan", 0x10de, 0x2684, "NVIDIA5", "66.36")
+            );
         }
     }
 }

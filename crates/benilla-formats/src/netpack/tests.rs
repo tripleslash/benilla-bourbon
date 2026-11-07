@@ -233,12 +233,15 @@ fn the_background_fill_walks_every_pack_the_cache_lacks() {
     publish(&origin.0, &[9u8; 2048]);
     let store = open(&cache.0, &origin.0);
     // A read caches pack 1; the fill starts on what is still missing.
-    store.read("Sound\one.wav").unwrap();
+    store.read("Sound\\one.wav").unwrap();
     assert_eq!(store.next_unfilled(), Some(0));
     store.fill(0).unwrap();
     assert_eq!(store.next_unfilled(), None, "every pack is cached");
     assert_eq!(cached_packs(&cache.0).len(), 2);
-    assert!(!foreground_busy(), "the fill's own download is not foreground");
+    assert!(
+        !foreground_busy(),
+        "the fill's own download is not foreground"
+    );
 }
 
 #[test]
@@ -255,8 +258,12 @@ fn a_failed_fill_passes_the_pack_but_a_read_still_fetches_it() {
     let store = open(&cache.0, &origin.0);
     store.fill(0).unwrap();
     assert!(store.fill(1).is_err());
-    assert_eq!(store.next_unfilled(), None, "the failed pack is passed by the fill");
+    assert_eq!(
+        store.next_unfilled(),
+        None,
+        "the failed pack is passed by the fill"
+    );
 
     std::fs::write(&served, &good).unwrap();
-    assert_eq!(store.read("Sound\two.wav").unwrap(), vec![9u8; 2048]);
+    assert_eq!(store.read("Sound\\two.wav").unwrap(), vec![9u8; 2048]);
 }

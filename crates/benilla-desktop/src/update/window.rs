@@ -234,7 +234,14 @@ unsafe fn paint(hdc: HDC, ui: View) {
     fill(mem, track, TRACK);
     let end = track.left + ((track.right - track.left) as f64 * fraction).round() as i32;
     if end > track.left {
-        fill(mem, RECT { right: end, ..track }, BAR);
+        fill(
+            mem,
+            RECT {
+                right: end,
+                ..track
+            },
+            BAR,
+        );
     }
 
     SetBkMode(mem, TRANSPARENT as _);

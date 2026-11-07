@@ -308,9 +308,10 @@ impl NetPackStore {
     /// Fetch one pack for the background fill. It does not count as foreground, and a failure
     /// skips the pack for the fill alone: a read of it later still downloads it.
     pub fn fill(&self, pack_id: u32) -> io::Result<()> {
-        let meta = self.index.pack(pack_id).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, format!("no pack {pack_id}"))
-        })?;
+        let meta = self
+            .index
+            .pack(pack_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no pack {pack_id}")))?;
         self.ensure_as(pack_id, &meta, false).map(|_| ())
     }
 

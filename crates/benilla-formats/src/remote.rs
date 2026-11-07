@@ -244,7 +244,10 @@ struct Slot(std::sync::RwLock<Option<Arc<NetPackStore>>>);
 
 impl Slot {
     fn get(&self) -> Option<Arc<NetPackStore>> {
-        self.0.read().unwrap_or_else(PoisonError::into_inner).clone()
+        self.0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     fn mount(&self, segment_name: &str) -> Result<()> {

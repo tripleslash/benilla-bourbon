@@ -12,7 +12,13 @@ fn main() {
     // `git log -1 --format=%ct`). Empty when git cannot answer. The stamp's own rerun triggers
     // (HEAD and its ref) rerun this too.
     let time = Command::new("git")
-        .args(["-C", env!("CARGO_MANIFEST_DIR"), "log", "-1", "--format=%ct"])
+        .args([
+            "-C",
+            env!("CARGO_MANIFEST_DIR"),
+            "log",
+            "-1",
+            "--format=%ct",
+        ])
         .output()
         .ok()
         .filter(|out| out.status.success())

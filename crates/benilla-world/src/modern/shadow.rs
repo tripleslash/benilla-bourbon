@@ -15,11 +15,11 @@
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::{CameraProjection, Projection};
-use bevy::math::Vec3A;
 use bevy::image::{
     Image, ImageAddressMode, ImageCompareFunction, ImageFilterMode, ImageSampler,
     ImageSamplerDescriptor,
 };
+use bevy::math::Vec3A;
 use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_resource::{

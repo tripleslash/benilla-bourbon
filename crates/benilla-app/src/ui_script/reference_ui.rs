@@ -110,7 +110,9 @@ pub(super) fn read(req: &str) -> Option<Vec<u8>> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let turtle = benilla_formats::layers::turtle_mounted()
-            .then(|| benilla_formats::remote::loose(benilla_formats::layers::TURTLE_DATA_SEGMENT, req))
+            .then(|| {
+                benilla_formats::remote::loose(benilla_formats::layers::TURTLE_DATA_SEGMENT, req)
+            })
             .flatten();
         if let Some(bytes) = turtle
             .or_else(|| benilla_formats::remote::loose(benilla_formats::remote::DATA_SEGMENT, req))

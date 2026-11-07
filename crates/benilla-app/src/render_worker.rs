@@ -34,9 +34,7 @@ mod imp {
     /// See [`super::install`].
     pub fn install() {
         if crate::webenv::var("WOW_RENDERWORKER").as_deref() == Some("0") {
-            web_sys::console::log_1(
-                &"wow: ?renderworker=0 — rendering on the page thread".into(),
-            );
+            web_sys::console::log_1(&"wow: ?renderworker=0 — rendering on the page thread".into());
             return;
         }
         let Some((bridge, start)) = crate::web_threads::bridge("startRender") else {
@@ -65,9 +63,7 @@ mod imp {
         bevy::winit::set_may_update(render_worker::before_update);
         // And while the page waits in the browser, the worker may take that extract itself.
         bevy::winit::set_lend_world(render_worker::lend, render_worker::reclaim);
-        web_sys::console::log_1(
-            &"wow: rendering on a worker (?renderworker=0 to compare)".into(),
-        );
+        web_sys::console::log_1(&"wow: rendering on a worker (?renderworker=0 to compare)".into());
     }
 
     thread_local! {

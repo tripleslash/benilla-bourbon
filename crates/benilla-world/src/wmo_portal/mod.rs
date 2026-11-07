@@ -1712,10 +1712,7 @@ mod tests {
         model.group_nav[0].flags &= !EXTERIOR_LIT;
         let room = pvs_from(&model);
         assert!(!room.open_air);
-        assert!(
-            !room.visible[4],
-            "a room draws only what its flood reaches"
-        );
+        assert!(!room.visible[4], "a room draws only what its flood reaches");
     }
 
     /// The open-air deviation keeps Pass 2 for the `0x8` shells: from a street with a doorway onto

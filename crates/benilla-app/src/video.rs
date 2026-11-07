@@ -31,9 +31,9 @@ use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy::render::renderer::RenderAdapterInfo;
 use bevy::window::Monitor;
-use bevy::window::{MonitorSelection, PresentMode, PrimaryWindow, WindowMode, WindowResolution};
 #[cfg(windows)]
 use bevy::window::VideoModeSelection;
+use bevy::window::{MonitorSelection, PresentMode, PrimaryWindow, WindowMode, WindowResolution};
 use std::time::Duration;
 
 /// `$WOW_NOVSYNC=1`: uncap for this session only; it never reaches `config.toml` (the
@@ -1282,7 +1282,10 @@ mod tests {
         #[cfg(windows)]
         assert!(matches!(mode, WindowMode::Fullscreen(_, _)), "{mode:?}");
         #[cfg(not(windows))]
-        assert!(matches!(mode, WindowMode::BorderlessFullscreen(_)), "{mode:?}");
+        assert!(
+            matches!(mode, WindowMode::BorderlessFullscreen(_)),
+            "{mode:?}"
+        );
         assert_eq!(
             window_mode(DisplayMode::Windowed, false, MonitorSelection::Primary),
             WindowMode::Windowed
@@ -1291,15 +1294,25 @@ mod tests {
 
     /// The window is born in the mode its rows register at on this locale, a stored value over
     /// that, and a run that sizes its own window over both. zhCN registers windowed and maximized
-    /// (`0x63a738`), which is borderless over the monitor, as every other locale's fullscreen is
-    /// here; they part when the player stores one of the two rows: a stored "0" for `gxMaximize`
-    /// leaves zhCN windowed where another locale stays fullscreen.
+    /// (`0x63a738`), which is borderless over the monitor; every other locale registers
+    /// fullscreen ([`fullscreen_mode`]: exclusive on Windows, the same borderless window
+    /// elsewhere). A stored "0" for `gxMaximize` leaves zhCN windowed where another locale stays
+    /// fullscreen.
     #[test]
     fn the_window_is_born_at_the_locales_registered_modes() {
         let none = |_: &str| None;
         let fullscreen = fullscreen_mode(MonitorSelection::Primary);
         for locale in 0..8 {
-            assert_eq!(boot_window_mode_for(|| locale, none, false), fullscreen);
+            let registered = if locale == 4 {
+                WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
+            } else {
+                fullscreen
+            };
+            assert_eq!(
+                boot_window_mode_for(|| locale, none, false),
+                registered,
+                "locale {locale}"
+            );
         }
         // zhCN with the player's stored windowed, unmaximized choice.
         let stored = |name: &str| match name {

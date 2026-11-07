@@ -168,9 +168,10 @@ fn update(origin: &str, current: Option<u64>, exe: &Path) -> io::Result<Outcome>
                 eprintln!("update: {e}");
             }
             let end = if result.is_ok() { DONE } else { FAILED };
-            let moved = shared
-                .state
-                .compare_exchange(RUNNING, end, Ordering::AcqRel, Ordering::Acquire);
+            let moved =
+                shared
+                    .state
+                    .compare_exchange(RUNNING, end, Ordering::AcqRel, Ordering::Acquire);
             if moved.is_err() || result.is_err() {
                 let _ = fs::remove_file(&staged);
             }
@@ -272,7 +273,9 @@ fn download(
             }
             done += n as u64;
             if done > manifest.bytes {
-                return Err(io::Error::other("the parts are longer than the manifest says"));
+                return Err(io::Error::other(
+                    "the parts are longer than the manifest says",
+                ));
             }
             hash.update(&buf[..n]);
             file.write_all(&buf[..n])?;
@@ -286,7 +289,9 @@ fn download(
         )));
     }
     if hash.finalize().as_slice() != sha1.as_slice() {
-        return Err(io::Error::other("the download does not match the manifest's sha1"));
+        return Err(io::Error::other(
+            "the download does not match the manifest's sha1",
+        ));
     }
     file.sync_all()
 }
@@ -407,7 +412,10 @@ impl<'a> Cursor<'a> {
         while self.s.get(self.i).is_some_and(u8::is_ascii_digit) {
             self.i += 1;
         }
-        std::str::from_utf8(&self.s[start..self.i]).ok()?.parse().ok()
+        std::str::from_utf8(&self.s[start..self.i])
+            .ok()?
+            .parse()
+            .ok()
     }
 
     fn strings(&mut self) -> Option<Vec<String>> {
@@ -523,6 +531,9 @@ mod tests {
             sibling(exe, "download"),
             Path::new("C:/wow/wow-reforged.exe.download")
         );
-        assert_eq!(sibling(exe, "old"), Path::new("C:/wow/wow-reforged.exe.old"));
+        assert_eq!(
+            sibling(exe, "old"),
+            Path::new("C:/wow/wow-reforged.exe.old")
+        );
     }
 }

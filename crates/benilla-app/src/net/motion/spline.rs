@@ -926,9 +926,9 @@ enum ClampGate {
     /// The last answer stands: the ray cannot answer differently.
     Hold,
     /// The rig is out of view ([`benilla_world::rig_anim::AnimParked`]): the wire Z stands.
-    /// Deviation: the reference walks every grounded mover through its surface trace; a parked
-    /// rig is drawn nowhere, and its padded wake sphere (`creature_anim::lod`) re-grounds it
-    /// before it is. A body hidden but not parked keeps the stride (`remote::HIDDEN_STRIDE`).
+    /// Deviation: the reference walks every grounded mover through its surface trace; this skips
+    /// a parked rig's, because it is drawn nowhere and its padded wake sphere
+    /// (`creature_anim::lod`) re-grounds it before it is. A body hidden but not parked keeps the stride (`remote::HIDDEN_STRIDE`).
     Parked,
     Cast,
 }
