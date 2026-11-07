@@ -217,20 +217,21 @@ impl UiQuad {
             && *corners == o.corners
     }
 
-    /// The screen-space move taking `base` to `self` when that is all that changed: every other
-    /// field equal and the rect the same size to [`PAN_SIZE_EPS`] (a rect rebuilt about a moving
-    /// centre drifts in its last bits). A clipped or cornered quad never qualifies, as its
-    /// geometry depends on where it is.
-    pub(crate) fn moved_from(&self, base: &Self) -> Option<Vec2> {
+    /// The screen-space move and clockwise turn taking `base` to `self` when that is all that
+    /// changed: every other field equal and the rect the same size to [`PAN_SIZE_EPS`] (a rect
+    /// rebuilt about a moving centre drifts in its last bits). A clipped or cornered quad never
+    /// qualifies, as its geometry depends on where it is.
+    pub(crate) fn moved_from(&self, base: &Self) -> Option<(Vec2, f32)> {
         let moved = UiQuad {
             rect: base.rect,
+            rotation: base.rotation,
             ..self.clone()
         };
         (moved == *base
             && self.clip.is_none()
             && self.corners.is_none()
             && same_size(self.rect, base.rect))
-        .then(|| self.rect.min - base.rect.min)
+        .then(|| (self.rect.min - base.rect.min, self.rotation - base.rotation))
     }
 }
 
@@ -733,10 +734,10 @@ struct BatchPools {
     meshes: Vec<Handle<Mesh>>,
     /// Each slot's last-written mesh (base positions): an unchanged run is not rewritten.
     stored: Vec<StoredRun>,
-    /// Each slot's pan from its base, on the entity's `Transform`: a run that only moved (the
-    /// minimap tiles) costs no `Assets<Mesh>` write, whose `AssetChanged` probe sweeps every
-    /// `Mesh3d` in the scene.
-    offsets: Vec<Vec2>,
+    /// Each slot's pan from its base, on the entity's `Transform`: a run that only moved or turned
+    /// (the minimap tiles, the player arrow) costs no `Assets<Mesh>` write, whose `AssetChanged`
+    /// probe sweeps every `Mesh3d` in the scene.
+    offsets: Vec<SlotPan>,
     materials: std::collections::HashMap<MatKey, Handle<UiQuadMaterial>>,
     /// Per slot: the material the batch entity carries.
     bound: Vec<Option<AssetId<UiQuadMaterial>>>,
@@ -906,10 +907,35 @@ fn apply_colour_patch(
     }
 }
 
+/// A slot's move off its mesh in world units, and its clockwise turn about `pivot`, the world spot
+/// its lone quad's centre was written at.
+#[derive(Clone, Copy, Default, PartialEq)]
+struct SlotPan {
+    d: Vec2,
+    turn: f32,
+    pivot: Vec2,
+}
+
+impl SlotPan {
+    fn moved(d: Vec2) -> Self {
+        Self { d, ..default() }
+    }
+
+    /// The batch entity's `Transform` at paint depth `z`: world is y-up, so clockwise is negative.
+    fn transform(self, z: f32) -> Transform {
+        let rotation = Quat::from_rotation_z(-self.turn);
+        let pivot = self.pivot.extend(0.0);
+        let at = pivot + self.d.extend(0.0) - rotation * pivot;
+        Transform::from_translation(at.with_z(z)).with_rotation(rotation)
+    }
+}
+
 /// The overlay pan: when the append lane differs from the last rebuild's only by quads that each
-/// fill a run alone and moved (a walking unit's minimap dot), move their batches on the entity's
-/// `Transform`, which the rebuild's own pan gate would conclude after re-deriving every quad. An
-/// unmoved quad alone in its run takes the offset the last rebuild left it. `false` leaves
+/// fill a run alone and moved or turned (a walking unit's minimap dot, the player arrow), carry
+/// their batches on the entity's `Transform`, which the rebuild's own pan gate would conclude
+/// after re-deriving every quad. An unmoved quad alone in its run takes the offset the last
+/// rebuild left it. A turn rides the `Transform` only unstretched: a quad turns in interface px
+/// before the stretch, which no rotation of the stretched mesh reproduces. `false` leaves
 /// everything to the rebuild.
 fn pan_overlays(
     pools: &mut BatchPools,
@@ -917,39 +943,53 @@ fn pan_overlays(
     screen: Option<(Vec2, f32, f32)>,
     commands: &mut Commands,
 ) -> bool {
-    let Some((_, _, stretch)) = screen.filter(|&s| s == pools.screen) else {
+    let Some((window, _, stretch)) = screen.filter(|&s| s == pools.screen) else {
         return false;
     };
     if overlays.len() != pools.overlay_base.len() {
         return false;
     }
-    let mut pans: Vec<(usize, Vec2)> = Vec::new();
+    let mut pans: Vec<(usize, SlotPan)> = Vec::new();
     for (i, (now, then)) in overlays.iter().zip(&pools.overlay_base).enumerate() {
         let slot = pools.overlay_slot.get(i).copied().flatten();
         let base = slot.and_then(|s| pools.slot_base.get(s as usize).copied().flatten());
+        let mut turn = 0.0;
         if now != then {
-            if now.moved_from(then).is_none() {
+            let Some((_, t)) = now.moved_from(then) else {
+                return false;
+            };
+            if t != 0.0 && stretch != 1.0 {
                 return false;
             }
             if !base.is_some_and(|b| same_size(now.rect, b)) {
                 return false;
             }
+            turn = t;
         }
         let (Some(slot), Some(base)) = (slot, base) else {
             continue; // unmoved, and never panned here
         };
         // Interface px, y-down, to world units, y-up, through the stretch the rebuild mapped with.
         let d = now.rect.min - base.min;
-        pans.push((slot as usize, Vec2::new(d.x * stretch, -d.y)));
+        let d = Vec2::new(d.x * stretch, -d.y);
+        let pan = if turn == 0.0 {
+            SlotPan::moved(d)
+        } else {
+            let c = base.center();
+            SlotPan {
+                d,
+                turn,
+                pivot: Vec2::new(c.x * stretch - window.x * 0.5, window.y * 0.5 - c.y),
+            }
+        };
+        pans.push((slot as usize, pan));
     }
-    for (slot, d) in pans {
-        if pools.offsets[slot] != d {
-            pools.offsets[slot] = d;
+    for (slot, pan) in pans {
+        if pools.offsets[slot] != pan {
+            pools.offsets[slot] = pan;
             if let Some(&entity) = pools.entities.get(slot) {
                 let z = f32::from_bits(pools.stored[slot].z_bits);
-                commands
-                    .entity(entity)
-                    .insert(Transform::from_xyz(d.x, d.y, z));
+                commands.entity(entity).insert(pan.transform(z));
             }
         }
     }
@@ -1389,14 +1429,13 @@ fn rebuild_ui_mesh(
                     commands.entity(entity).insert(MeshTag(tag));
                 }
             }
+            let d = SlotPan::moved(d);
             if pools.offsets[used] != d {
                 pools.offsets[used] = d;
                 if let Some(&entity) = pools.entities.get(used) {
-                    commands.entity(entity).insert(Transform::from_xyz(
-                        d.x,
-                        d.y,
-                        f32::from_bits(z_bits),
-                    ));
+                    commands
+                        .entity(entity)
+                        .insert(d.transform(f32::from_bits(z_bits)));
                 }
             }
             used += 1;
@@ -1446,9 +1485,9 @@ fn rebuild_ui_mesh(
         }
         // A rebaked mesh holds absolute positions, so its pan resets (the entity gets `(0, 0, z)`).
         if pools.offsets.len() > used {
-            pools.offsets[used] = Vec2::ZERO;
+            pools.offsets[used] = SlotPan::default();
         } else {
-            pools.offsets.push(Vec2::ZERO);
+            pools.offsets.push(SlotPan::default());
         }
         let mesh_handle = match pools.meshes.get(used) {
             Some(handle) => {
@@ -1751,6 +1790,82 @@ mod tests {
         app.world_mut().resource_mut::<UiQuads>().overlays = vec![red];
         app.update();
         assert!(app.world().resource::<UiMeshCost>().rebuilt);
+    }
+
+    /// The player arrow turns one overlay quad alone in its run: its batch spins on the entity's
+    /// `Transform` about the quad's centre, with no rebuild and so no mesh write, and a turn back
+    /// to the rebuilt angle undoes it. Under the `widescreen` 0 stretch a turn rebuilds.
+    #[test]
+    fn a_lone_turning_overlay_spins_without_a_rebuild() {
+        let mut app = rebuild_app();
+        app.world_mut()
+            .resource_mut::<crate::ui_script::UiCostWanted>()
+            .0 = true;
+        let arrow = UiQuad {
+            rect: Rect::new(100.0, 100.0, 120.0, 120.0),
+            blend: BlendMode::Add, // its own run, apart from the white base quad
+            z_key: 1,
+            ..default()
+        };
+        app.world_mut()
+            .resource_mut::<UiQuads>()
+            .overlays
+            .push(arrow.clone());
+        app.update();
+        assert_eq!(batches(&mut app), 2);
+        let window = app
+            .world_mut()
+            .query::<&Window>()
+            .single(app.world())
+            .unwrap()
+            .size();
+        let center = Vec2::new(110.0 - window.x * 0.5, window.y * 0.5 - 110.0).extend(0.0);
+        let top = |app: &mut App| -> Transform {
+            *app.world_mut()
+                .query_filtered::<&Transform, With<UiQuadBatch>>()
+                .iter(app.world())
+                .max_by(|a, b| a.translation.z.total_cmp(&b.translation.z))
+                .unwrap()
+        };
+        let mut turned = arrow.clone();
+        turned.rotation = std::f32::consts::FRAC_PI_2;
+        app.world_mut().resource_mut::<UiQuads>().overlays = vec![turned.clone()];
+        app.update();
+        assert!(
+            !app.world().resource::<UiMeshCost>().rebuilt,
+            "a turn, no rebuild"
+        );
+        let spun = top(&mut app);
+        assert!(
+            (spun.transform_point(center) - center).truncate().length() < 1e-3,
+            "the quad turns about its own centre"
+        );
+        let right = center + Vec3::X;
+        assert!(
+            (spun.transform_point(right) - (center - Vec3::Y))
+                .truncate()
+                .length()
+                < 1e-3,
+            "clockwise on screen: its right edge swings down"
+        );
+
+        app.world_mut().resource_mut::<UiQuads>().overlays = vec![arrow.clone()];
+        app.update();
+        assert!(!app.world().resource::<UiMeshCost>().rebuilt);
+        let home = top(&mut app);
+        assert_eq!(home.rotation, Quat::IDENTITY, "back at its base");
+        assert_eq!(home.translation.truncate(), Vec2::ZERO);
+
+        // Stretched, the turned quad is no rotation of the mesh: the rebuild redraws it.
+        app.insert_resource(crate::video::Widescreen(false));
+        app.world_mut().resource_mut::<UiQuads>().dirty = true;
+        app.update();
+        app.world_mut().resource_mut::<UiQuads>().overlays = vec![turned];
+        app.update();
+        assert!(
+            app.world().resource::<UiMeshCost>().rebuilt,
+            "a stretched turn rebuilds"
+        );
     }
 
     /// The cache's strong handle would otherwise pin the image and its GPU texture for good.

@@ -216,12 +216,23 @@ fn a_minimap_is_born_with_nine_model_children_and_the_ninth_is_the_player_arrow(
     s.set_minimap_player_facing(-1.25);
     assert_eq!(s.eval::<f32>("return GetPlayerFacing()").unwrap(), -1.25);
 
-    // A frame that turned nothing is no extract input; a turn is.
+    // A frame that turned nothing is no extract input, and neither is a turn of the arrow's pane
+    // while nothing anchors it: it paints nothing. One an addon anchors paints its facing.
+    s.resolve();
     let still = s.visual_epoch();
     s.set_minimap_player_facing(-1.25);
     assert_eq!(s.visual_epoch(), still, "a still arrow moved the count");
     s.set_minimap_player_facing(1.0);
-    assert_ne!(s.visual_epoch(), still, "a turn moves the count");
+    assert_eq!(s.visual_epoch(), still, "an unanchored pane paints nothing");
+    s.run("m:SetPoint('TOPLEFT') m:SetWidth(140) m:SetHeight(140)")
+        .unwrap();
+    s.run("({m:GetChildren()})[9]:SetAllPoints(m)").unwrap();
+    s.resolve();
+    let settled = s.visual_epoch();
+    s.set_minimap_player_facing(2.0);
+    assert_ne!(s.visual_epoch(), settled, "an anchored pane redraws");
+    s.run("({m:GetChildren()})[9]:ClearAllPoints()").unwrap();
+    s.resolve();
     assert_eq!(
         s.eval::<usize>("return m:GetNumChildren()").unwrap(),
         MINIMAP_ENGINE_CHILDREN + 1

@@ -1275,17 +1275,19 @@ impl UiScript {
 
     /// `CMinimap::SetPlayerFacing` (`0x4eb8e0`, fed at `0x4eb0a4`–`0x4eb0b1`) on every Minimap's
     /// player arrow: copies the facing (radians) of the object the camera follows raw into the
-    /// field `Model:SetFacing` (`0x76dce0`) writes, so the arrow's `GetFacing()` reads it. A frame
-    /// that moved none leaves the mutation count standing.
+    /// field `Model:SetFacing` (`0x76dce0`) writes, so the arrow's `GetFacing()` reads it. The
+    /// arrow draws in the minimap's overlay and its own pane paints only if an addon anchors it, so
+    /// a frame that turned no painted pane leaves the mutation count standing.
     pub fn set_minimap_player_facing(&mut self, facing: f32) {
         let mut model = self.model_mut();
         let quiet = model.epoch();
         let mut moved = false;
         for h in minimap::player_arrows(&model) {
+            let paints = model.frame_rects.contains_key(&h);
             if let Some(KindState::Model(state)) =
                 model.arena.frame_mut(h).map(|f| &mut f.kind_state)
             {
-                moved |= state.facing != facing;
+                moved |= paints && state.facing != facing;
                 state.facing = facing;
             }
         }
