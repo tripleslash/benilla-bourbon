@@ -1318,7 +1318,7 @@ pub(crate) fn take_biggest() -> usize {
 #[cfg(target_arch = "wasm32")]
 fn out_of_memory(size: usize) {
     crate::webdiag::out(&format!(
-        "wenilla: no run for {} KiB: largest run {} KiB, headroom {} MiB",
+        "wow: no run for {} KiB: largest run {} KiB, headroom {} MiB",
         size >> 10,
         largest_run() >> 10,
         headroom() >> 20,

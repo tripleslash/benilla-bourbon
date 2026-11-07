@@ -144,7 +144,7 @@ pub fn router_logged(chain: Arc<Chain>, reads: Option<Arc<ReadLog>>) -> Router {
 /// `p/<hi>/<id>.bpk`, and a pack id names a few hundred files at once. Against the mode everyone
 /// actually runs, the host can see *what was fetched* and never *what was wanted*.
 ///
-/// The client can. `?boottrace=1` already fills `window.__wenilla_boottrace` with every name
+/// The client can. `?boottrace=1` already fills `window.__wow_boottrace` with every name
 /// `Chain::read`/`try_read` asked for, in first-need order (`benilla_formats::web::trace`), and
 /// until now a person copied that array out of devtools by hand. This route is the page handing it
 /// over instead: `web/boot.js` posts it once the client reports ready, and the host writes the same

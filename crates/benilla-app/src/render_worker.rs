@@ -35,7 +35,7 @@ mod imp {
     pub fn install() {
         if crate::webenv::var("WOW_RENDERWORKER").as_deref() == Some("0") {
             web_sys::console::log_1(
-                &"wenilla: ?renderworker=0 — rendering on the page thread".into(),
+                &"wow: ?renderworker=0 — rendering on the page thread".into(),
             );
             return;
         }
@@ -54,7 +54,7 @@ mod imp {
         // Before the worker can read anything through `webenv`: it has no `window`.
         crate::webenv::publish_for_workers();
         render_worker::install(kick);
-        // `?rwtrace=1`: the handshake's timeline (`__wenilla_render_trace`).
+        // `?rwtrace=1`: the handshake's timeline (`__wow_render_trace`).
         if crate::webenv::var("WOW_RWTRACE").as_deref() == Some("1") {
             render_worker::set_trace(true);
         }
@@ -66,12 +66,12 @@ mod imp {
         // And while the page waits in the browser, the worker may take that extract itself.
         bevy::winit::set_lend_world(render_worker::lend, render_worker::reclaim);
         web_sys::console::log_1(
-            &"wenilla: rendering on a worker (?renderworker=0 to compare)".into(),
+            &"wow: rendering on a worker (?renderworker=0 to compare)".into(),
         );
     }
 
     thread_local! {
-        /// `__wenilla_threads.kickRender`, looked up once: it is called every extracted frame.
+        /// `__wow_threads.kickRender`, looked up once: it is called every extracted frame.
         static KICK: Option<(JsValue, Function)> = crate::web_threads::bridge("kickRender");
     }
 
@@ -105,14 +105,14 @@ mod imp {
     /// The worker's first call, with the canvas the page transferred to it
     /// (`web/renderworker.js`). **Not for anything else to call.**
     #[wasm_bindgen]
-    pub fn __wenilla_render_entry(canvas: JsValue) {
+    pub fn __wow_render_entry(canvas: JsValue) {
         render_worker::enter(canvas);
     }
 
     /// The handshake's state as one line (`bevy::render::render_worker::describe`), for a console
-    /// on the page: `__wenilla_render_state()` when the client looks stuck.
+    /// on the page: `__wow_render_state()` when the client looks stuck.
     #[wasm_bindgen]
-    pub fn __wenilla_render_state() -> String {
+    pub fn __wow_render_state() -> String {
         render_worker::describe()
     }
 
@@ -120,7 +120,7 @@ mod imp {
     /// `?gpucensus=1` (`web/renderworker.js`), which asks every 5 s; `webdiag` leaves the
     /// counters to it then.
     #[wasm_bindgen]
-    pub fn __wenilla_render_stats() -> String {
+    pub fn __wow_render_stats() -> String {
         let s = render_worker::take_stats();
         let ms = |us: u64| us as f32 / 1000.0;
         let avg = |sum: u64, n: u64| if n > 0 { ms(sum) / n as f32 } else { 0.0 };
@@ -144,15 +144,15 @@ mod imp {
     /// The handshake's timeline since the last call (`render_worker::trace`, `?rwtrace=1`), as
     /// `kind arg µs` lines, for a console on the page. Nothing else calls it.
     #[wasm_bindgen]
-    pub fn __wenilla_render_trace() -> String {
+    pub fn __wow_render_trace() -> String {
         render_worker::trace()
     }
 
     /// Each wake of the worker's event loop (`web/renderworker.js`); `true` when it rendered, and
-    /// the worker then calls [`__wenilla_render_settle`] from its next task. **Not for anything
+    /// the worker then calls [`__wow_render_settle`] from its next task. **Not for anything
     /// else to call.**
     #[wasm_bindgen]
-    pub fn __wenilla_render_poll() -> bool {
+    pub fn __wow_render_poll() -> bool {
         render_worker::poll()
     }
 
@@ -160,7 +160,7 @@ mod imp {
     /// is free again, and renders a world the page lent it meanwhile; `true` when it did, and the
     /// worker then settles again from its next task. **Not for anything else to call.**
     #[wasm_bindgen]
-    pub fn __wenilla_render_settle() -> bool {
+    pub fn __wow_render_settle() -> bool {
         render_worker::settle()
     }
 }

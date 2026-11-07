@@ -118,9 +118,9 @@ scripts/stage-packs.sh
 # Verify the module actually came out threaded. Reads the build's own output, never the flags that
 # were meant to produce it.
 # ---------------------------------------------------------------------------------------------
-WASM=$(ls web/dist/wenilla_bg*.wasm 2>/dev/null | head -1 || true)
+WASM=$(ls web/dist/wow_bg*.wasm 2>/dev/null | head -1 || true)
 if [ -z "${WASM}" ]; then
-  echo "no wenilla_bg*.wasm in web/dist — the build did not get that far" >&2
+  echo "no wow_bg*.wasm in web/dist — the build did not get that far" >&2
   exit 1
 fi
 
@@ -162,7 +162,7 @@ echo "   OK: shared, imported, atomics, simd128 — this module can take worker 
 # ---------------------------------------------------------------------------------------------
 if [ "${BENILLA_KEEP_NAMES:-}" = "1" ]; then
   echo "== BENILLA_KEEP_NAMES=1: re-emitting unoptimized, named glue"
-  ARTIFACT="${CARGO_TARGET_DIR}/wasm32-unknown-unknown/ship/wenilla.wasm"
+  ARTIFACT="${CARGO_TARGET_DIR}/wasm32-unknown-unknown/ship/wow.wasm"
   if [ ! -f "${ARTIFACT}" ]; then
     echo "   no cargo artifact at ${ARTIFACT}" >&2
     exit 1
@@ -176,12 +176,12 @@ if [ "${BENILLA_KEEP_NAMES:-}" = "1" ]; then
     echo "   no wasm-bindgen 0.2.126 found (Trunk caches one; or cargo install wasm-bindgen-cli)" >&2
     exit 1
   fi
-  "${WBG}" --target web --out-dir web/dist --out-name wenilla --no-demangle "${ARTIFACT}"
+  "${WBG}" --target web --out-dir web/dist --out-name wow --no-demangle "${ARTIFACT}"
   # Same rewrite `stage-packs.sh` does, for the same reason — workers have no import map.
-  sed 's|from "wasi_snapshot_preview1"|from "./wasi_stubs.js"|g' web/dist/wenilla.js > web/dist/wenilla.js.tmp
-  cat web/dist/wenilla.js.tmp > web/dist/wenilla.js
-  rm -f web/dist/wenilla.js.tmp
-  echo "   web/dist now carries the NAMED module ($(du -h web/dist/wenilla_bg.wasm | cut -f1)); web/site still has the optimized one."
+  sed 's|from "wasi_snapshot_preview1"|from "./wasi_stubs.js"|g' web/dist/wow.js > web/dist/wow.js.tmp
+  cat web/dist/wow.js.tmp > web/dist/wow.js
+  rm -f web/dist/wow.js.tmp
+  echo "   web/dist now carries the NAMED module ($(du -h web/dist/wow_bg.wasm | cut -f1)); web/site still has the optimized one."
 fi
 
 cat <<'EOF'

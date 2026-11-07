@@ -1,5 +1,5 @@
 [package]
-name = "wenilla"
+name = "wow"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -25,7 +25,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # `default-features = false`, same load-bearing reason as the `benilla` shim's own dependency on
-# this crate: without it, `cargo build --target wasm32-unknown-unknown -p wenilla
+# this crate: without it, `cargo build --target wasm32-unknown-unknown -p wow
 # --no-default-features` would still pull benilla-app's OWN defaults (a path dep gets its own
 # feature resolution), silently linking the dev instruments into the page everyone visits.
 benilla-app = { path = "../benilla-app", default-features = false }

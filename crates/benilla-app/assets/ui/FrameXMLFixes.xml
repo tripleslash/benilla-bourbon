@@ -120,7 +120,7 @@
             end
         end
 
-        -- wenilla carry: TurtleWoW's arena leftovers, defined only where that chain names them, so
+        -- fork carry: TurtleWoW's arena leftovers, defined only where that chain names them, so
         -- stock 1.12 gains no names (ported from benilla-octo 031acdd8, d729fc11, 3247bc76).
         --
         -- Its `CharacterFrame.lua` appends "ArenaFrame" to `CHARACTERFRAME_SUBFRAMES`, six names
@@ -142,7 +142,7 @@
     ]]></Script>
 
     <!--
-        wenilla carry: TurtleWoW's `Blizzard_InspectUI\InspectArenaFrame.xml` has its three team
+        fork carry: TurtleWoW's `Blizzard_InspectUI\InspectArenaFrame.xml` has its three team
         buttons inherit `ArenaTeamTemplate`, which no file on that chain defines, so each OnLoad
         raises on the missing fields. Only the names its scripts index, drawing nothing. A virtual
         template creates no global, so stock 1.12 is unchanged (from benilla-octo d729fc11).

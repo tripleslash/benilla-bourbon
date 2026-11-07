@@ -41,7 +41,7 @@
 //   probes are skipped with it, which also takes two round trips out of boot.
 //
 // `?nosw=1` turns all of that off and unregisters the worker, which is how the pre-worker path —
-// and `wenilla-host --no-ranges`, the Range-less emulation the fallback exists for — stays
+// and the native web host's `--no-ranges`, the Range-less emulation the fallback exists for — stays
 // exercisable.
 //
 // ## The decode worker (`web/packworker.js`)
@@ -57,10 +57,10 @@
 // dies mid-session: every pending warm settles as "not resident" and the read path does exactly
 // what it did before. `?noworker=1` forces that state for bisecting.
 //
-// Page contract: a plain global, `window.__wenilla_packs`, like every other seam this client uses
-// (`__wenilla_env`, `__wenilla_progress`, `__wenilla_boottrace`). Deliberately not a wasm-bindgen
+// Page contract: a plain global, `window.__wow_packs`, like every other seam this client uses
+// (`__wow_env`, `__wow_progress`, `__wow_boottrace`). Deliberately not a wasm-bindgen
 // module import: the client must still run on a page that ships none of this — the resident map is
-// then always empty, every read re-fetches its pack, and `wenilla-host --www web/dist` stays a
+// then always empty, every read re-fetches its pack, and the native web host's `--www web/dist` stays a
 // usable way to bisect a rendering bug.
 
 /// Resident budget. Packs are ~0.6 MB decoded at the container's measured p50, so this is a few
@@ -121,7 +121,7 @@ const WARM_GEOMETRY_SLOTS = 4;
 const QUOTA_CEILING = 0.8;
 /// Where the probe result is remembered per origin, so a repeat visit starts with the right policy
 /// instead of paying a demotion to learn it again.
-const POLICY_KEY = 'wenilla-range-policy';
+const POLICY_KEY = 'wow-range-policy';
 /// **The updated-character-model layer's pack-key offset.** Twin of
 /// `benilla_formats::layers::HD_PACK_KEY_BASE`; the two MUST agree.
 ///
@@ -505,7 +505,7 @@ const packs = {
       const at = this._warmQueue.indexOf(packId);
       if (at >= 0) this._warmQueue.splice(at, 1);
     }
-    if (error) console.warn(`wenilla: pack ${packId} —`, error);
+    if (error) console.warn(`wow: pack ${packId} —`, error);
     pending.resolve(resident);
     // A freed slot is the only thing that lets the next queued warm start, so every settle pumps.
     this._pumpWarms();
@@ -609,7 +609,7 @@ const packs = {
     try {
       index = await fetchIndex(base);
     } catch (e) {
-      console.warn(`wenilla: this origin serves no /${layer.segment} container (${e.message})`);
+      console.warn(`wow: this origin serves no /${layer.segment} container (${e.message})`);
       return false;
     }
     const manifest = await fetchJson(`${base}/boot-packs.json`).catch(() => null);
@@ -686,7 +686,7 @@ const packs = {
       return false;
     }
     try {
-      this._cache = await caches.open(`wenilla-packs-${this.buildId}`);
+      this._cache = await caches.open(`wow-packs-${this.buildId}`);
     } catch (_) {
       this._cache = false; // no Cache Storage here (private mode, disabled storage)
     }
@@ -733,7 +733,7 @@ const packs = {
   },
 };
 
-window.__wenilla_packs = packs;
+window.__wow_packs = packs;
 export default packs;
 
 /// Install the permanence worker, fetch the index, the listfile and the boot pack set, and — where
@@ -853,7 +853,7 @@ async function bootstrapHd(opts = {}) {
   // packs, offset into the layer's key space.
   const opened = await packs.openLayer('hd', { prefetch: opts.prefetch, glue: false });
   if (!opened) {
-    console.warn('wenilla: updated character models are on — running on the original art');
+    console.warn('wow: updated character models are on — running on the original art');
   }
 }
 
@@ -877,7 +877,7 @@ async function openLayerInWorker(layer, base, index) {
       const m = e.data;
       if (m && m.layer === layer && (m.type === 'opened' || m.type === 'failed')) {
         if (m.type === 'failed') {
-          console.warn(`wenilla: pack worker would not open the ${layer} layer —`, m.error);
+          console.warn(`wow: pack worker would not open the ${layer} layer —`, m.error);
         }
         done(m.type === 'opened');
       }
@@ -890,7 +890,7 @@ async function openLayerInWorker(layer, base, index) {
 
 /// Does the player want the updated character models? The `hdCharacterModels` CVar, read straight
 /// out of `localStorage` because this runs long before the wasm module that owns CVars exists ―
-/// with the `?hd_models=1` / `__wenilla_env` lever ahead of it, on `webenv::var`'s own ladder.
+/// with the `?hd_models=1` / `__wow_env` lever ahead of it, on `webenv::var`'s own ladder.
 ///
 /// **A twin of `benilla_app::cvars::apply_boot_layers`, and it has to stay one.** If the page
 /// fetched the layer and the client did not open it, the visitor pays 1.5 GiB for art they do not
@@ -920,11 +920,11 @@ function reforgedWanted() {
 /// then the saved CVar in `config.toml`, then the registered default — **on** for both readers.
 function settingOn(envKey, cvar) {
   // The URL/env lever FIRST, exactly as `benilla_app::webenv::var` orders it: the page env object
-  // (`window.__wenilla_env.hd_models`), then `?hd_models=1`, then the saved setting. The key is the
+  // (`window.__wow_env.hd_models`), then `?hd_models=1`, then the saved setting. The key is the
   // `$WOW_` prefix dropped and lowercased, which is that function's own rule for every switch it
   // serves. Without this arm the lever would move the client and not the page — the client would
   // mount a layer the page never fetched, and every character read would be a cold round trip.
-  const env = window.__wenilla_env;
+  const env = window.__wow_env;
   if (env && env[envKey] !== undefined && env[envKey] !== null) {
     return layerSwitch(String(env[envKey])) === true;
   }
@@ -978,7 +978,7 @@ async function fetchIndex(base) {
 /// Where the page remembers the flavor of the last realm played, so the next boot can put that
 /// flavor's character screens on disk before the realm is even chosen. A hint and nothing more:
 /// the client mounts the Turtle layer off the realm list, never off this.
-const FLAVOR_KEY = 'wenilla.flavor';
+const FLAVOR_KEY = 'wow.flavor';
 
 function rememberFlavor(flavor) {
   safeLocalSet(FLAVOR_KEY, flavor);
@@ -1080,7 +1080,7 @@ export async function prefetchWorld(onProgress = () => {}) {
 /// `/`, and any hosting page that boots the client from a subpath.
 const SW_URL = '/sw.js';
 /// The worker's one cache, keyed by pathname. Twin of `sw.js`'s `CACHE`.
-const SW_CACHE = 'wenilla-data';
+const SW_CACHE = 'wow-data';
 /// How long to wait for a first-visit worker to claim this page. It is `clients.claim()` in an
 /// `activate` handler, so this is milliseconds in practice; the bound exists so a worker that
 /// somehow never activates costs a delay instead of a boot.
@@ -1102,13 +1102,13 @@ async function registerWorker(enabled) {
     return !!(navigator.serviceWorker && navigator.serviceWorker.controller);
   }
   // `isSecureContext` rather than a protocol test: `http://127.0.0.1` is secure and is how
-  // `wenilla-host` is run, while `http://` to a LAN address is not and has no service workers at
+  // the native web host is run, while `http://` to a LAN address is not and has no service workers at
   // all. The page must still boot there, on the pre-worker path.
   if (!('serviceWorker' in navigator) || !self.isSecureContext) return false;
   try {
     await navigator.serviceWorker.register(SW_URL, { scope: '/' });
   } catch (e) {
-    console.warn('wenilla: service worker registration failed —', e);
+    console.warn('wow: service worker registration failed —', e);
     return false;
   }
   if (navigator.serviceWorker.controller) return true;
@@ -1151,7 +1151,7 @@ function syncBuild(buildId) {
       resolve(e.data || null);
     };
     try {
-      worker.postMessage({ type: 'wenilla-build', buildId }, [channel.port2]);
+      worker.postMessage({ type: 'wow-build', buildId }, [channel.port2]);
     } catch (_) {
       clearTimeout(timer);
       resolve(null);
@@ -1175,7 +1175,7 @@ async function startWorker(enabled) {
   try {
     worker = new Worker(WORKER_URL);
   } catch (e) {
-    console.warn('wenilla: pack worker failed to start —', e);
+    console.warn('wow: pack worker failed to start —', e);
     return null;
   }
   let finishOpen = () => {};
@@ -1200,7 +1200,7 @@ async function startWorker(enabled) {
   // that throws while loading its own script never answers, and without this the boot would sit on
   // the ten-second timeout to learn what this already knows.
   worker.onerror = (e) => {
-    console.warn('wenilla: pack worker error —', (e && e.message) || e);
+    console.warn('wow: pack worker error —', (e && e.message) || e);
     finishOpen(null);
     dropWorker('the pack worker failed');
   };
@@ -1213,13 +1213,13 @@ async function startWorker(enabled) {
 
   const answer = await opened;
   if (!answer || answer.type !== 'opened') {
-    console.warn('wenilla: pack worker did not open the container —', (answer && answer.error) || 'no answer');
+    console.warn('wow: pack worker did not open the container —', (answer && answer.error) || 'no answer');
     worker.terminate();
     return null;
   }
   if (packs.buildId && answer.buildId !== packs.buildId) {
     console.warn(
-      `wenilla: pack worker opened container ${answer.buildId}, page has ${packs.buildId} — not using it`
+      `wow: pack worker opened container ${answer.buildId}, page has ${packs.buildId} — not using it`
     );
     worker.terminate();
     return null;

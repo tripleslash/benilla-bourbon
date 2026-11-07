@@ -312,7 +312,7 @@ fn relieve(
     if let Some(farclip) = valve.weigh(now, headroom, run, was) {
         view.farclip = farclip;
         crate::webdiag::out(&format!(
-            "wenilla: memory headroom {} MiB, run {} MiB, view distance {was:.0} -> {farclip:.0} yd ({} step(s) shed)",
+            "wow: memory headroom {} MiB, run {} MiB, view distance {was:.0} -> {farclip:.0} yd ({} step(s) shed)",
             headroom >> 20,
             run >> 20,
             valve.depth(),

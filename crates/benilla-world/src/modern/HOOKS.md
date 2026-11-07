@@ -35,7 +35,7 @@ Fork systems go in `PreUpdate`, `Update` or `Last`.
 | `benilla-world/src/lib.rs` | `pub mod launch_env;` (fork-owned module) | P0 |
 | `benilla-world/src/worldview.rs` | `view_start` reads `WOW_WORLDVIEW_AT` through `crate::launch_env::var` | P0 |
 | `benilla-app/src/lib.rs` | `run_worldview` wrapper (was a `pub use`) + `wants_worldview` | P0 |
-| `wenilla/src/lib.rs` | `?worldview=1` switch in `start()` | P0 |
+| `wow/src/lib.rs` | `?worldview=1` switch in `start()` | P0 |
 | `benilla-world/src/lighting/global_light.rs` | `build_light_data`: `active` param; row 20 `.y` = modern flag | P1 |
 | `benilla-world/src/lighting/resolve.rs` | `apply_sky_backdrop`: decoded clear colour when modern | P1 |
 | `benilla-world/src/lighting/mod.rs`, `lighting/resolve.rs` | `WowLighting::night_key` / `night_tint`: the midnight diffuse and celestial rows, sampled in `update_time_lighting` while the modern moon is up (`sun_arc::moonlit`) | P2 fix |

@@ -1,9 +1,9 @@
 //! fork: web build — the client's side of `web/gpu.js`'s recovery ladder.
 //!
 //! After a lost GPU device the page reloads one rung down the ladder and remembers the rung in
-//! `localStorage` (`wenilla.gpu`). That guess about the machine belongs to the page only until the
+//! `localStorage` (`wow.gpu`). That guess about the machine belongs to the page only until the
 //! player makes their own: when they apply Graphics settings ([`crate::cvars::GRAPHICS_CVARS`]),
-//! the client calls `window.__wenilla_gpu.reset()`, which persists tier 0 and lifts the pixel
+//! the client calls `window.__wow_gpu.reset()`, which persists tier 0 and lifts the pixel
 //! budget on the spot. The render-scale half of the tier is the CVar host's to release
 //! (`Cvars::release_fallbacks`).
 //!
@@ -17,7 +17,7 @@ pub(crate) fn settings_applied() -> bool {
     let Some(window) = web_sys::window() else {
         return false;
     };
-    let Ok(gpu) = js_sys::Reflect::get(&window, &"__wenilla_gpu".into()) else {
+    let Ok(gpu) = js_sys::Reflect::get(&window, &"__wow_gpu".into()) else {
         return false;
     };
     if !gpu.is_object() {

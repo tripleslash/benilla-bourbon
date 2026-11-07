@@ -8,8 +8,8 @@
 //! are exactly the heavy ones. So the app calls back.
 //!
 //! The contract mirrors [`crate::webenv`]'s in reverse: where webenv *reads* a global the page
-//! set (`window.__wenilla_env`), this *calls* one the page may define —
-//! `window.__wenilla_progress(stage)`. A page without the hook (an old copy, upstream's plain
+//! set (`window.__wow_env`), this *calls* one the page may define —
+//! `window.__wow_progress(stage)`. A page without the hook (an old copy, upstream's plain
 //! index) costs one failed `Reflect::get` per signal and nothing else; every error is swallowed,
 //! because a progress overlay must never be able to take the client down. Stages are plain
 //! strings the page switch-cases on:
@@ -27,7 +27,7 @@
 
 use bevy::prelude::{Local, NonSend};
 
-/// Call `window.__wenilla_progress(stage)` if the page defined it; silently do nothing
+/// Call `window.__wow_progress(stage)` if the page defined it; silently do nothing
 /// otherwise. See the module header for the stage vocabulary.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn signal(stage: &str) {
@@ -35,7 +35,7 @@ pub(crate) fn signal(stage: &str) {
     let Some(window) = web_sys::window() else {
         return;
     };
-    let Ok(hook) = js_sys::Reflect::get(&window, &"__wenilla_progress".into()) else {
+    let Ok(hook) = js_sys::Reflect::get(&window, &"__wow_progress".into()) else {
         return;
     };
     let Ok(hook) = hook.dyn_into::<js_sys::Function>() else {

@@ -5,7 +5,7 @@
 //! world alike, then every single run over `WOW_SYSTEM_PROFILE_SPIKE` ms (8) as `SYSTEM_SPIKE`,
 //! with when it ended on the wall clock and whether it ran on the app's thread. Always on in a
 //! build with the feature, and never in a shipped one: the feature is opt-in on every target
-//! (`wenilla`'s `trace_systems` for the browser build).
+//! (`wow`'s `trace_systems` for the browser build).
 //!
 //! The browser's page thread may not block (`Atomics.wait` traps there), so the tallies are taken
 //! with a spinning `try_lock`. The web build has no `LogPlugin`, and `tracing_subscriber`'s registry

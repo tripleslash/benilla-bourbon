@@ -211,11 +211,11 @@ def main():
             f.write(b"".join(p + b"\n" for p in paths))
         out("staged %d bundled addon files" % len(paths))
 
-    # Split the wasm module into 24 MiB *.wasm parts plus wenilla_bg.parts.json.
-    wasm = os.path.join(SITE, "wenilla_bg.wasm")
+    # Split the wasm module into 24 MiB *.wasm parts plus wow.parts.json.
+    wasm = os.path.join(SITE, "wow_bg.wasm")
     if os.path.isfile(wasm):
         size = os.path.getsize(wasm)
-        stem = wasm[:-5]
+        stem = os.path.join(SITE, "wow")  # wow_bg.wasm ships as wow.partNN.wasm
         i = 0
         with open(wasm, "rb") as f:
             while True:
@@ -227,11 +227,11 @@ def main():
                 i += 1
         # The link, not the build: web/dist keeps its inode.
         os.remove(wasm)
-        parts = sorted(n for n in os.listdir(SITE) if fnmatch.fnmatchcase(n, "wenilla_bg.part*.wasm"))
+        parts = sorted(n for n in os.listdir(SITE) if fnmatch.fnmatchcase(n, "wow.part*.wasm"))
         manifest = '{"bytes":%d,"parts":[%s]}\n' % (size, ",".join('"%s"' % p for p in parts))
-        with open(os.path.join(SITE, "wenilla_bg.parts.json"), "wb") as f:
+        with open(os.path.join(SITE, "wow.parts.json"), "wb") as f:
             f.write(manifest.encode("utf-8"))
-        out("split wenilla_bg.wasm (%d B) into %d parts" % (size, len(parts)))
+        out("split wow_bg.wasm (%d B) into %d parts" % (size, len(parts)))
 
     # Nothing at the top of the site may exceed the cap; the packs are capped by the packer.
     with os.scandir(SITE) as it:

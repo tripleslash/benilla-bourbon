@@ -6,7 +6,7 @@
 //   1. it wraps `GPUAdapter.prototype.requestDevice`, and it has to be in place before wgpu asks
 //      for the device — which happens inside `init()`, in `RenderPlugin::finish`;
 //   2. it owns the canvas's CSS box, and winit reads that box when it creates the window;
-//   3. it folds the recovery tier into `window.__wenilla_env`, which `benilla_app::webenv` reads
+//   3. it folds the recovery tier into `window.__wow_env`, which `benilla_app::webenv` reads
 //      once, on the client's first look.
 //
 // ## The report this exists for
@@ -84,7 +84,7 @@ const TIERS = [
   { name: 'minimal', budget: 950000, renderScale: '0.55', lightingQuality: '0' }, //  ~720p, Low
 ];
 
-const STORE_KEY = 'wenilla.gpu';
+const STORE_KEY = 'wow.gpu';
 // A loss older than this is not evidence about this machine any more — a driver was updated, a
 // dock was unplugged, the tab was left open for a week. Without a decay the very first bad day
 // would pin the client at a lower tier for the life of the browser profile.
@@ -119,7 +119,7 @@ export function installGpuGuard(canvas, { query = new URLSearchParams(location.s
   // The diagnostic seam: a pasted console line is how a session on somebody else's machine gets
   // read, and nothing else on the page can imply which tier that session actually ran at. Its one
   // control is `reset()`, which the client calls when the player applies Graphics settings.
-  window.__wenilla_gpu = {
+  window.__wow_gpu = {
     get tier() {
       return state.tier;
     },
@@ -165,11 +165,11 @@ export function installGpuGuard(canvas, { query = new URLSearchParams(location.s
       ? `the GPU driver reset ${state.losses.length} time(s) recently`
       : 'set explicitly';
     console.info(
-      `wenilla: graphics recovery tier ${state.tier} (${TIERS[state.tier].name}) — ${why}. ` +
+      `wow: graphics recovery tier ${state.tier} (${TIERS[state.tier].name}) — ${why}. ` +
         'Applying Graphics settings in the game clears it, as does ?gputier=0.'
     );
   }
-  return window.__wenilla_gpu;
+  return window.__wow_gpu;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -250,7 +250,7 @@ function resetTier(state, governor) {
   governor.recommit();
   if (was > 0) {
     console.info(
-      `wenilla: graphics settings applied — recovery tier ${was} (${TIERS[was].name}) cleared.`
+      `wow: graphics settings applied — recovery tier ${was} (${TIERS[was].name}) cleared.`
     );
   }
   return was > 0;
@@ -260,7 +260,7 @@ function clampTier(n) {
   return Number.isFinite(n) ? Math.min(TIERS.length - 1, Math.max(0, Math.trunc(n))) : 0;
 }
 
-/// Hand the tier's render scale to the client, through the same `window.__wenilla_env` object a
+/// Hand the tier's render scale to the client, through the same `window.__wow_env` object a
 /// hosting page uses for credentials (`benilla_app::webenv`), under its own key
 /// (`gpu_render_scale`, `cvars::apply_gpu_tier`). A fallback, not an override: it applies only
 /// while the player has no render scale of their own saved, is never written to `config.toml`, and
@@ -275,7 +275,7 @@ function clampTier(n) {
 /// lifts it. A `?lightingquality=` or `$WOW_LIGHTING_QUALITY` lever outranks it on the client side.
 function publishTier(state, query) {
   const tier = TIERS[state.tier];
-  const env = (window.__wenilla_env = window.__wenilla_env || {});
+  const env = (window.__wow_env = window.__wow_env || {});
   if (tier.lightingQuality && env.gpu_lighting_quality === undefined) {
     env.gpu_lighting_quality = tier.lightingQuality;
   }
@@ -493,7 +493,7 @@ function onDeviceLost(canvas, state, info) {
   // from here (Dawn puts `DXGI_ERROR_DEVICE_HUNG` / `DEVICE_REMOVED` in the message).
   if (state.leaving || reason === 'destroyed') return;
 
-  console.error(`wenilla: the GPU device was lost (${reason}) — ${message || 'no detail given'}`);
+  console.error(`wow: the GPU device was lost (${reason}) — ${message || 'no detail given'}`);
 
   const now = Date.now();
   state.losses = state.losses.filter((t) => now - t < TIER_DECAY_MS);
@@ -537,7 +537,7 @@ function onUncapturedError(state, governor, kind) {
   state.tier = clampTier(state.tier + 1);
   saveState(state);
   console.warn(
-    `wenilla: ${INTERNAL_ERRORS} device errors in ${INTERNAL_WINDOW_MS / 1000}s — ` +
+    `wow: ${INTERNAL_ERRORS} device errors in ${INTERNAL_WINDOW_MS / 1000}s — ` +
       `dropping to graphics tier ${state.tier} (${TIERS[state.tier].name}) to keep the driver ` +
       'alive. The pixel budget applies now; the render scale and lighting cap follow on the next ' +
         'reload.'
@@ -564,19 +564,19 @@ function showOverlay() {
     return overlayApi(box);
   }
   const root = document.createElement('div');
-  root.id = 'wenilla-gpu';
+  root.id = 'wow-gpu';
   root.innerHTML = `
     <style>
-      #wenilla-gpu { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center;
+      #wow-gpu { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center;
         background: #000; color: #ccc; font: 15px system-ui, sans-serif; }
-      #wenilla-gpu .box { width: min(520px, 86vw); text-align: center; }
-      #wenilla-gpu h1 { font-size: 17px; font-weight: 600; color: #e8e8e8; margin: 0 0 .8rem; }
-      #wenilla-gpu p { margin: 0 0 .8rem; line-height: 1.5; color: #9a9a9a; }
-      #wenilla-gpu ul { margin: 0 0 1rem; padding-left: 1.2rem; text-align: left; color: #9a9a9a;
+      #wow-gpu .box { width: min(520px, 86vw); text-align: center; }
+      #wow-gpu h1 { font-size: 17px; font-weight: 600; color: #e8e8e8; margin: 0 0 .8rem; }
+      #wow-gpu p { margin: 0 0 .8rem; line-height: 1.5; color: #9a9a9a; }
+      #wow-gpu ul { margin: 0 0 1rem; padding-left: 1.2rem; text-align: left; color: #9a9a9a;
         line-height: 1.6; }
-      #wenilla-gpu button { font: inherit; color: #111; background: #c9a227; border: 0;
+      #wow-gpu button { font: inherit; color: #111; background: #c9a227; border: 0;
         border-radius: 4px; padding: .5rem 1.1rem; cursor: pointer; }
-      #wenilla-gpu code { color: #b9b9b9; word-break: break-word; }
+      #wow-gpu code { color: #b9b9b9; word-break: break-word; }
     </style>
     <div class="box"></div>`;
   document.body.appendChild(root);

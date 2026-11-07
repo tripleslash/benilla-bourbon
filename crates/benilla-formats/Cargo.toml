@@ -62,7 +62,7 @@ web-sys = { version = "0.3.99", features = [
     # (`quiet_console_on_web`), so the console is the only place left to say it.
     "console",
 ] }
-# The page seams are plain globals (`__wenilla_packs`, `__wenilla_boottrace`), reached through
+# The page seams are plain globals (`__wow_packs`, `__wow_boottrace`), reached through
 # Reflect rather than a wasm-bindgen module import, so the client still runs on a page that ships
 # neither.
 js-sys = "0.3"

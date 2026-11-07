@@ -3,7 +3,7 @@
 # wasm-memory.ps1 - say what a wasm module's linear memory is, and which target features it was built with.
 # The PowerShell twin of scripts/wasm-memory.py; that header holds the why, and the twins change together.
 #
-#   powershell -ExecutionPolicy Bypass -File scripts\wasm-memory.ps1 web\dist\wenilla_bg.wasm
+#   powershell -ExecutionPolicy Bypass -File scripts\wasm-memory.ps1 web\dist\wow_bg.wasm
 
 param([Parameter(Position = 0)][string]$Path)
 

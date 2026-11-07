@@ -5,7 +5,7 @@
 # change together. Only the section headers and the import, memory and target_features sections are
 # read (through `od`), so a 90 MB module is never loaded whole.
 #
-#   scripts/wasm-memory.sh web/dist/wenilla_bg.wasm
+#   scripts/wasm-memory.sh web/dist/wow_bg.wasm
 set -euo pipefail
 
 f="${1:-}"

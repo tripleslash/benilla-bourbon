@@ -122,7 +122,7 @@ fn at(stage: u32) {
 /// first polled, 4 `initialize_renderer` returned, 5 resources published.
 pub(crate) static DEVICE_AT: AtomicU32 = AtomicU32::new(0);
 
-/// One line of the handshake's state, for a console on the page (`__wenilla_render_state()`): the
+/// One line of the handshake's state, for a console on the page (`__wow_render_state()`): the
 /// statics are in shared memory, so the page reads what the worker wrote.
 pub fn describe() -> String {
     alloc::format!(

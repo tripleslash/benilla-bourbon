@@ -1,6 +1,6 @@
 //! Static hosting for the browser build's output directory — everything `trunk build --release`
 //! writes to `web/dist/`: the page and its scripts, the wasm bundle, `sw.js`, `packworker.js` and
-//! its `wenilla-packdecode` pair, and `config.json`.
+//! its `wow-packdecode` pair, and `config.json`.
 //!
 //! Everything under `--www` gets `no-cache` rather than the immutable long cache the `/data/*`
 //! route uses, and every file there wants it: the bundle changes on every rebuild but keeps the

@@ -52,7 +52,7 @@ function context() {
     if (!Ctor) return null;
     ctx = new Ctor({ latencyHint: 'playback' });
   } catch (e) {
-    console.warn('wenilla: no AudioContext —', (e && e.message) || e);
+    console.warn('wow: no AudioContext —', (e && e.message) || e);
     ctx = null;
   }
   return ctx;
@@ -62,7 +62,7 @@ function context() {
 /// `installThreads` is: the mixer is built inside the plugin graph `init()` constructs, so a bridge
 /// installed afterwards would find the device already opened the other way.
 export function installAudio() {
-  window.__wenilla_audio = {
+  window.__wow_audio = {
     /// The device's sample rate, creating the context if this is the first ask.
     ///
     /// **Synchronous, and that is why it is separate from `start`.** kira's `Backend::setup` has to
@@ -86,7 +86,7 @@ export function installAudio() {
         const c = context();
         if (!c) return false;
         await c.audioWorklet.addModule(sibling('audioworklet.js'));
-        node = new AudioWorkletNode(c, 'wenilla-mix-out', {
+        node = new AudioWorkletNode(c, 'wow-mix-out', {
           numberOfInputs: 0,
           numberOfOutputs: 1,
           outputChannelCount: [2],
@@ -106,7 +106,7 @@ export function installAudio() {
         if (c.state === 'suspended') c.resume().then(() => {}, () => {});
         return true;
       } catch (e) {
-        console.warn('wenilla: AudioWorklet output unavailable —', (e && e.message) || e);
+        console.warn('wow: AudioWorklet output unavailable —', (e && e.message) || e);
         node = null;
         return false;
       }

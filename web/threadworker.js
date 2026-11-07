@@ -18,7 +18,7 @@
 // `memory.atomic.wait32` when it has nothing to do. That instruction traps on the page's main
 // thread and is perfectly legal here, which is the whole reason there is a worker.
 
-import { initSync, __wenilla_thread_entry } from './wenilla.js';
+import { initSync, __wow_thread_entry } from './wow.js';
 
 self.onmessage = (event) => {
   const { module, memory, ptr, stackSize } = event.data || {};
@@ -38,12 +38,12 @@ self.onmessage = (event) => {
     // The page cannot see this failure any other way: it handed the closure over and moved on, and
     // a worker that dies before entering the loop simply never runs any tasks. The pool survives it
     // (it comes up smaller), so this is a diagnostic, not a fatal.
-    console.error('wenilla: thread worker failed to initialise —', e);
+    console.error('wow: thread worker failed to initialise —', e);
     self.close();
     return;
   }
 
   // Returns when the pool that owns this thread is dropped. Until then this call IS the thread.
-  __wenilla_thread_entry(ptr);
+  __wow_thread_entry(ptr);
   self.close();
 };

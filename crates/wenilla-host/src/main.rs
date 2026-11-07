@@ -39,7 +39,7 @@ struct Cli {
     /// a gateway that terminates its own connections binds the public address instead.
     #[arg(long, default_value = "127.0.0.1:8090")]
     bind: String,
-    /// Directory holding the Trunk output (`index.html`, `wenilla.js`, `*.wasm`) — `web/dist/`.
+    /// Directory holding the Trunk output (`index.html`, `wow.js`, `*.wasm`) — `web/dist/`.
     /// Omit it to run as a gateway only, which is what a site does: the page is static files on
     /// A static host, and the only thing this process owns is `/ws/{port}`.
     #[arg(long)]

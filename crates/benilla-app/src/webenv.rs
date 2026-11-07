@@ -22,7 +22,7 @@ pub fn var(name: &str) -> Option<String> {
 /// wasm32: a page-provided env object first, then the page's `?key=value&…` query string —
 /// both keyed by `name` lowercased with its `WOW_` prefix dropped.
 ///
-/// The env object is `window.__wenilla_env` (`{user, pass, host, …}`), which a hosting page sets
+/// The env object is `window.__wow_env` (`{user, pass, host, …}`), which a hosting page sets
 /// before `init()` after fetching the values over its own authenticated session; it is
 /// snapshotted on the first read so the page can `delete` the global right after boot. The
 /// query string is the dev fast path (`?user=&pass=`), but for the three credential keys —
@@ -51,7 +51,7 @@ pub fn var(name: &str) -> Option<String> {
 }
 
 /// A value from **`/config.json`** — the hosted tree's own configuration, fetched by
-/// `web/boot.js` before `init()` and left on `window.__wenilla_config`. It ships at the origin
+/// `web/boot.js` before `init()` and left on `window.__wow_config`. It ships at the origin
 /// root with the build (`web/config.json` → Trunk → `dist/`), not under `/data` with the 3.3 GiB
 /// container: it is the one file in the hosted tree an operator edits. Its two keys — `ws`, the
 /// WebSocket gateway the browser dials, and `realmlist`, the logon address the handshake carries —
@@ -59,7 +59,7 @@ pub fn var(name: &str) -> Option<String> {
 ///
 /// A separate seam from [`var`], not a fourth fallback inside it, and the separation is the design:
 ///
-/// - `__wenilla_env` outranks the query string in [`lookup`], so folding a hosted default into it
+/// - `__wow_env` outranks the query string in [`lookup`], so folding a hosted default into it
 ///   would let `config.json` beat a hand-written `?ws=…`. Backwards. Callers consult `var` first and
 ///   this second, which puts the precedence where it can be read.
 /// - It is read *after* `var`, so the harness levers still win: `$WOW_HOST`/`?host=` mark the
@@ -87,7 +87,7 @@ pub(crate) fn config(key: &str) -> Option<String> {
     }
     CONFIG
         .with(|cell| {
-            cell.get_or_init(|| js_string_map("__wenilla_config"))
+            cell.get_or_init(|| js_string_map("__wow_config"))
                 .get(key)
                 .cloned()
         })
@@ -137,7 +137,7 @@ fn lookup(
     })
 }
 
-/// `window.__wenilla_env` as a string map, read once. Non-string values are ignored; a missing
+/// `window.__wow_env` as a string map, read once. Non-string values are ignored; a missing
 /// or non-object global is an empty map (so upstream's page — which sets nothing — behaves as
 /// "no env, credentials not allowed from the query").
 #[cfg(target_arch = "wasm32")]
@@ -145,7 +145,7 @@ fn page_env() -> std::collections::HashMap<String, String> {
     thread_local! {
         static ENV: std::cell::OnceCell<std::collections::HashMap<String, String>> = const { std::cell::OnceCell::new() };
     }
-    ENV.with(|cell| cell.get_or_init(|| js_string_map("__wenilla_env")).clone())
+    ENV.with(|cell| cell.get_or_init(|| js_string_map("__wow_env")).clone())
 }
 
 /// One page global read as a flat string map. Shared by [`page_env`] and [`config`] because the two
@@ -228,7 +228,7 @@ pub(crate) fn default_wow_host() -> String {
 }
 
 /// The WebSocket gateway base (`wss://host[:port]`), in precedence order: `?ws=` /
-/// `window.__wenilla_env.ws`, then `/config.json`'s `ws`. `None` = the page's own origin, which
+/// `window.__wow_env.ws`, then `/config.json`'s `ws`. `None` = the page's own origin, which
 /// is `benilla_protocol::transport::web`'s own default and today's `wenilla-host` behaviour.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) fn ws_base() -> Option<String> {

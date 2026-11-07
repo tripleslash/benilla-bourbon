@@ -65,10 +65,10 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 # ---------------------------------------------------------------------------------------------
 # Verify the module actually came out threaded, from the build's own output.
 # ---------------------------------------------------------------------------------------------
-$wasm = Get-ChildItem -Path (Join-Path $root 'web\dist') -Filter 'wenilla_bg*.wasm' -ErrorAction SilentlyContinue |
+$wasm = Get-ChildItem -Path (Join-Path $root 'web\dist') -Filter 'wow_bg*.wasm' -ErrorAction SilentlyContinue |
     Select-Object -First 1
 if ($null -eq $wasm) {
-    [Console]::Error.WriteLine('no wenilla_bg*.wasm in web/dist - the build did not get that far')
+    [Console]::Error.WriteLine('no wow_bg*.wasm in web/dist - the build did not get that far')
     exit 1
 }
 
@@ -105,7 +105,7 @@ Write-Host '   OK: shared, imported, atomics, simd128 - this module can take wor
 # ---------------------------------------------------------------------------------------------
 if ($env:BENILLA_KEEP_NAMES -eq '1') {
     Write-Host '== BENILLA_KEEP_NAMES=1: re-emitting unoptimized, named glue'
-    $artifact = Join-Path $env:CARGO_TARGET_DIR 'wasm32-unknown-unknown\ship\wenilla.wasm'
+    $artifact = Join-Path $env:CARGO_TARGET_DIR 'wasm32-unknown-unknown\ship\wow.wasm'
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
         [Console]::Error.WriteLine("   no cargo artifact at $artifact")
         exit 1
@@ -123,15 +123,15 @@ if ($env:BENILLA_KEEP_NAMES -eq '1') {
         [Console]::Error.WriteLine('   no wasm-bindgen 0.2.126 found (Trunk caches one; or cargo install wasm-bindgen-cli)')
         exit 1
     }
-    & $wbg --target web --out-dir web/dist --out-name wenilla --no-demangle $artifact
+    & $wbg --target web --out-dir web/dist --out-name wow --no-demangle $artifact
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # Same rewrite `stage-packs.ps1` does: workers have no import map. Latin-1 keeps every other byte.
-    $glue = Join-Path $root 'web\dist\wenilla.js'
+    $glue = Join-Path $root 'web\dist\wow.js'
     $latin1 = [Text.Encoding]::GetEncoding(28591)
     $text = $latin1.GetString([IO.File]::ReadAllBytes($glue))
     $text = $text.Replace('from "wasi_snapshot_preview1"', 'from "./wasi_stubs.js"')
     [IO.File]::WriteAllBytes($glue, $latin1.GetBytes($text))
-    $named = Get-Item -LiteralPath (Join-Path $root 'web\dist\wenilla_bg.wasm')
+    $named = Get-Item -LiteralPath (Join-Path $root 'web\dist\wow_bg.wasm')
     Write-Host ('   web/dist now carries the NAMED module ({0:N0} MB); web/site still has the optimized one.' -f ($named.Length / 1MB))
 }
 

@@ -58,8 +58,8 @@ use kira::backend::{Backend, Renderer};
 use wasm_bindgen::{JsCast, JsValue};
 
 /// The page global this module reaches, in the shape every other page seam uses
-/// (`__wenilla_threads`, `__wenilla_packs`, `__wenilla_env`).
-const GLOBAL: &str = "__wenilla_audio";
+/// (`__wow_threads`, `__wow_packs`, `__wow_env`).
+const GLOBAL: &str = "__wow_audio";
 
 /// Interleaved stereo, the only shape the mixer produces and the only one the worklet reads.
 const CHANNELS: usize = 2;

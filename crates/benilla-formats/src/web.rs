@@ -355,7 +355,7 @@ mod wasm {
         let Some(window) = web_sys::window() else {
             return;
         };
-        let Ok(packs) = js_sys::Reflect::get(&window, &"__wenilla_packs".into()) else {
+        let Ok(packs) = js_sys::Reflect::get(&window, &"__wow_packs".into()) else {
             return;
         };
         if let Ok(f) = js_sys::Reflect::get(&packs, &method.into()) {
@@ -443,7 +443,7 @@ mod wasm {
 
     /// Append `name` to the page's boot-read trace, if the page armed one — the input to
     /// `web/boot-manifest.json` (see `web/boot.js`). A page that wants the trace defines
-    /// `window.__wenilla_boottrace = []` before `init()` (the `?boottrace=1` switch does);
+    /// `window.__wow_boottrace = []` before `init()` (the `?boottrace=1` switch does);
     /// every chain read then pushes its raw backslash name in true first-need order, and a
     /// person copies the deduplicated array out of the console into the manifest. Without the
     /// array this is one snapshotted `Reflect::get` for the whole session and per-call nothing —
@@ -457,7 +457,7 @@ mod wasm {
         TRACE.with(|cell| {
             let arr = cell.get_or_init(|| {
                 let window = web_sys::window()?;
-                js_sys::Reflect::get(&window, &"__wenilla_boottrace".into())
+                js_sys::Reflect::get(&window, &"__wow_boottrace".into())
                     .ok()?
                     .dyn_into::<js_sys::Array>()
                     .ok()
@@ -471,7 +471,7 @@ mod wasm {
     /// The **layer half** of the boot trace: `name` was answered by the updated-character-model
     /// layer rather than by the base corpus.
     ///
-    /// A second array (`window.__wenilla_boottrace_hd`), not a second column in the first one, and
+    /// A second array (`window.__wow_boottrace_hd`), not a second column in the first one, and
     /// that is deliberate. `boot-manifest.json` is a flat list of names that
     /// `benilla-app/tests/boot_manifest.rs` guards the shape of and `benilla-pack sidecars`
     /// translates against *each* container's index — one name list, two trees, no format change.
@@ -491,7 +491,7 @@ mod wasm {
         TRACE_HD.with(|cell| {
             let arr = cell.get_or_init(|| {
                 let window = web_sys::window()?;
-                js_sys::Reflect::get(&window, &"__wenilla_boottrace_hd".into())
+                js_sys::Reflect::get(&window, &"__wow_boottrace_hd".into())
                     .ok()?
                     .dyn_into::<js_sys::Array>()
                     .ok()
@@ -502,7 +502,7 @@ mod wasm {
         });
     }
 
-    /// The Turtle layer's half of the boot trace (`window.__wenilla_boottrace_turtle`): `name` was
+    /// The Turtle layer's half of the boot trace (`window.__wow_boottrace_turtle`): `name` was
     /// answered by the Turtle WoW 1.18.1 layer. The instrument for "no Turtle read on a 1.12.1
     /// realm": after switching back, this array stops growing.
     pub fn trace_turtle(name: &str) {
@@ -514,7 +514,7 @@ mod wasm {
         TRACE_TURTLE.with(|cell| {
             let arr = cell.get_or_init(|| {
                 let window = web_sys::window()?;
-                js_sys::Reflect::get(&window, &"__wenilla_boottrace_turtle".into())
+                js_sys::Reflect::get(&window, &"__wow_boottrace_turtle".into())
                     .ok()?
                     .dyn_into::<js_sys::Array>()
                     .ok()
@@ -525,7 +525,7 @@ mod wasm {
         });
     }
 
-    /// The reforged layer's half of the boot trace (`window.__wenilla_boottrace_reforged`): `name`
+    /// The reforged layer's half of the boot trace (`window.__wow_boottrace_reforged`): `name`
     /// was answered by the reforged art layer.
     pub fn trace_reforged(name: &str) {
         use wasm_bindgen::JsCast;
@@ -536,7 +536,7 @@ mod wasm {
         TRACE_REFORGED.with(|cell| {
             let arr = cell.get_or_init(|| {
                 let window = web_sys::window()?;
-                js_sys::Reflect::get(&window, &"__wenilla_boottrace_reforged".into())
+                js_sys::Reflect::get(&window, &"__wow_boottrace_reforged".into())
                     .ok()?
                     .dyn_into::<js_sys::Array>()
                     .ok()
@@ -617,7 +617,7 @@ mod wasm {
     /// `unpackBinary` does one `charCodeAt` loop into a `Uint8Array` inside the engine, and the
     /// boundary then sees a single typed-array copy of exactly `len` bytes.
     ///
-    /// It is reached the way [`trace`] reaches `__wenilla_boottrace`: a plain global, looked up
+    /// It is reached the way [`trace`] reaches `__wow_boottrace`: a plain global, looked up
     /// once. **A page that ships no `packs.js` still works** — the Rust loop below is the fallback,
     /// and it is what this function was before the page grew a helper.
     fn binary_string_bytes(value: &JsValue) -> Vec<u8> {
@@ -629,7 +629,7 @@ mod wasm {
         let unpacked = UNPACK.with(|cell| {
             let f = cell.get_or_init(|| {
                 let window = web_sys::window()?;
-                let packs = js_sys::Reflect::get(&window, &"__wenilla_packs".into()).ok()?;
+                let packs = js_sys::Reflect::get(&window, &"__wow_packs".into()).ok()?;
                 js_sys::Reflect::get(&packs, &"unpackBinary".into())
                     .ok()?
                     .dyn_into::<js_sys::Function>()

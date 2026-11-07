@@ -80,7 +80,7 @@ pub struct PackStore {
     /// Which page properties hold this container's prefetched index and listfile — `index` /
     /// `listfile` for the base corpus, `hdIndex` / `hdListfile` for the layer.
     ///
-    /// Two containers hand themselves over through the one `window.__wenilla_packs` object, so the
+    /// Two containers hand themselves over through the one `window.__wow_packs` object, so the
     /// property names have to differ or the second overwrites the first. See [`bootstrap`].
     index_property: &'static str,
     listfile_property: &'static str,

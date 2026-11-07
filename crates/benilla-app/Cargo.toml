@@ -18,13 +18,13 @@ tracy = ["bevy/trace_tracy"]
 trace_chrome = ["bevy/trace_chrome"]
 # Links Bevy as a shared library so an incremental rebuild relinks faster. The binary then starts
 # only through `cargo run`, which puts the toolchain's libstd on the loader path. Native only: the
-# `benilla` launcher forwards it and `wenilla` does not, a wasm module having no shared libraries.
+# `benilla` launcher forwards it and `wow` does not, a wasm module having no shared libraries.
 bevy_dynamic_linking = ["bevy/dynamic_linking"]
 # Tuning only: embedded shaders reload from the source tree on save (`benilla-world`'s).
 shader_reload = ["benilla-world/shader_reload"]
 # fork: perf — per-system CPU time (`benilla-world`'s `trace_systems`, `WOW_SYSTEM_PROFILE=1`).
 trace_systems = ["benilla-world/trace_systems"]
-# Browser render backend, forwarded from `wenilla` (see benilla-world's note on why the world
+# Browser render backend, forwarded from `wow` (see benilla-world's note on why the world
 # needs WebGPU).
 webgl2 = ["bevy/webgl2", "benilla-world/webgl2"]
 webgpu = ["bevy/webgpu", "benilla-world/webgpu"]

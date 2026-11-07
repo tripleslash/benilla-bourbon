@@ -1299,7 +1299,7 @@ fn apply_query_overrides(cvars: &mut Cvars) {
 fn apply_query_overrides(_cvars: &mut Cvars) {}
 
 /// fork: web build — what `web/gpu.js` steps down to after the GPU device was lost. The render
-/// scale (`__wenilla_env.gpu_render_scale`) is a fallback, so a render scale the player saved
+/// scale (`__wow_env.gpu_render_scale`) is a fallback, so a render scale the player saved
 /// wins; the lighting quality (`gpu_lighting_quality`) is a ceiling, so it holds a saved Cinematic
 /// down too. Both are this session's only, either is the player's again from their own write to
 /// it, and any Graphics Apply retires both ([`release_gpu_tier`]).
@@ -1426,7 +1426,7 @@ pub(crate) fn boot_cvar(name: &str) -> Option<String> {
 /// leave the layer off for exactly the players the default is for.
 pub(crate) fn apply_boot_layers() {
     // `webenv::var`, not `std::env` — `$WOW_HD_MODELS` natively, `?hd_models=1` (or
-    // `__wenilla_env`) in a browser tab. The parse is `benilla_formats::layers::layer_switch`'s,
+    // `__wow_env`) in a browser tab. The parse is `benilla_formats::layers::layer_switch`'s,
     // shared with the page and the tools: three readers of one setting that disagree about what
     // "on" means is a client that mounts what the page did not download.
     let hd = crate::webenv::var("WOW_HD_MODELS")

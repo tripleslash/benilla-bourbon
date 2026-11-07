@@ -15,7 +15,7 @@ default = ["dev"]
 # `bevy/debug` names systems and parameters in ECS diagnostics (else "Enable the debug feature to
 # see the name"); set here so `benilla-worldview`, which reports those names, gets it too.
 dev = ["benilla-formats/dev", "benilla-assets/dev", "bevy/debug"]
-# The browser render backend, chosen by the launcher (`wenilla`): WebGL2 runs everywhere but has
+# The browser render backend, chosen by the launcher (`wow`): WebGL2 runs everywhere but has
 # no storage buffers (the shared light blob and the skin palettes are storage — decision 0278), so
 # the world needs WebGPU; WebGL2 stays selectable for the glue screens and as the census baseline.
 # Mutually exclusive — bevy asserts if both are on.

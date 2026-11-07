@@ -19,11 +19,11 @@
 
 import {
   initSync,
-  __wenilla_render_entry,
-  __wenilla_render_poll,
-  __wenilla_render_settle,
-  __wenilla_render_stats,
-} from './wenilla.js';
+  __wow_render_entry,
+  __wow_render_poll,
+  __wow_render_settle,
+  __wow_render_stats,
+} from './wow.js';
 
 /// `web/gpu.js` wraps `requestDevice` on the page to watch for a lost or failing device, and a
 /// device made here is not one it sees. So this worker wraps its own and forwards what it observes;
@@ -59,7 +59,7 @@ function startCensus(exports) {
       const refs = exports?.__wbindgen_externrefs?.length ?? 0;
       const mib = Math.round((exports?.memory?.buffer?.byteLength ?? 0) / 1048576);
       // The handshake's counters for the same window (`render_worker::take_stats`).
-      const handshake = __wenilla_render_stats();
+      const handshake = __wow_render_stats();
       self.postMessage({ census: { ...snapshot(), refs, mib, handshake } });
     }, 5000);
   });
@@ -75,7 +75,7 @@ function guarded(f) {
     return f();
   } catch (e) {
     dead = true;
-    console.error('wenilla: the render worker stopped —', e);
+    console.error('wow: the render worker stopped —', e);
     return false;
   }
 }
@@ -84,11 +84,11 @@ function guarded(f) {
 /// event loop back from the task that rendered.
 const settler = new MessageChannel();
 settler.port1.onmessage = () => {
-  if (guarded(__wenilla_render_settle)) rendered();
+  if (guarded(__wow_render_settle)) rendered();
 };
 
 function poll() {
-  if (guarded(__wenilla_render_poll)) rendered();
+  if (guarded(__wow_render_poll)) rendered();
 }
 
 /// How many frames the GPU may still be working on when the worker takes the next extract. The
@@ -135,13 +135,13 @@ self.onmessage = (event) => {
     if (census) startCensus(exports);
   } catch (e) {
     dead = true;
-    console.error('wenilla: the render worker failed to initialise —', e);
+    console.error('wow: the render worker failed to initialise —', e);
     return;
   }
   try {
-    __wenilla_render_entry(canvas);
+    __wow_render_entry(canvas);
   } catch (e) {
     dead = true;
-    console.error('wenilla: the render worker stopped —', e);
+    console.error('wow: the render worker stopped —', e);
   }
 };

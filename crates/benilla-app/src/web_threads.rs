@@ -10,7 +10,7 @@
 //! ## Why the Worker is built in JS
 //!
 //! The same reason `benilla_formats::webpack::resident` reaches the pack store through
-//! `window.__wenilla_packs`: a plain page global, no wasm-bindgen module import, so the page can
+//! `window.__wow_packs`: a plain page global, no wasm-bindgen module import, so the page can
 //! ship it as an ordinary script. Here it also keeps `Worker`/`WorkerOptions` out of this crate's
 //! `web-sys` feature list, and it puts the module/memory handoff beside the `init()` call it has to
 //! match — `web/threads.js` and `web/threadworker.js` are two halves of one contract, and both are
@@ -56,8 +56,8 @@ mod imp {
     use wasm_bindgen::{JsCast, JsValue};
 
     /// The page global this module reaches, in the shape every other page seam here uses
-    /// (`__wenilla_env`, `__wenilla_packs`, `__wenilla_progress`, `__wenilla_boottrace`).
-    const GLOBAL: &str = "__wenilla_threads";
+    /// (`__wow_env`, `__wow_packs`, `__wow_progress`, `__wow_boottrace`).
+    const GLOBAL: &str = "__wow_threads";
 
     /// How many worker threads to ask for, given what the browser says the machine has.
     ///
@@ -96,7 +96,7 @@ mod imp {
     ///
     /// `Box<dyn FnOnce()>` is a *fat* pointer — data plus vtable — and `postMessage` carries
     /// numbers. Boxing the box gives a thin pointer to it; the worker hands that same integer back
-    /// to [`wenilla_thread_entry`], which is the only thing that ever reads it, exactly once.
+    /// to [`__wow_thread_entry`], which is the only thing that ever reads it, exactly once.
     type Body = Box<dyn FnOnce() + Send + 'static>;
 
     /// Start one Web Worker running `body`, or hand `body` back if the page would not.
@@ -162,12 +162,12 @@ mod imp {
     /// The entry point a spawned worker calls once it has instantiated the module against the
     /// page's shared memory. **Not for anything else to call.**
     ///
-    /// Exported into the main bundle's glue (`wenilla.js`) because that is the module a worker
+    /// Exported into the main bundle's glue (`wow.js`) because that is the module a worker
     /// imports; `web/threadworker.js` is the only caller, and it passes back the integer it was
     /// given. Returns when the pool that owns this thread is dropped, at which point the worker
     /// closes itself.
     #[wasm_bindgen::prelude::wasm_bindgen]
-    pub fn __wenilla_thread_entry(ptr: u32) {
+    pub fn __wow_thread_entry(ptr: u32) {
         // SAFETY: `ptr` is the value `spawn` produced with `Box::into_raw`, delivered to exactly
         // one worker by exactly one `postMessage`, and this consumes it. A second call with the
         // same pointer would be a double free — which is why nothing but the worker script has the

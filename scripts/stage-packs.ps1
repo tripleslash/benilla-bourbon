@@ -186,11 +186,11 @@ function Read-Full($stream, [byte[]]$buf) {
     return $total
 }
 
-# Split the wasm module into 24 MiB *.wasm parts plus wenilla_bg.parts.json.
-$wasmAbs = [IO.Path]::Combine($siteAbs, 'wenilla_bg.wasm')
+# Split the wasm module into 24 MiB *.wasm parts plus wow.parts.json.
+$wasmAbs = [IO.Path]::Combine($siteAbs, 'wow_bg.wasm')
 if ([IO.File]::Exists($wasmAbs)) {
     $bytes = (New-Object IO.FileInfo $wasmAbs).Length
-    $stem = $wasmAbs.Substring(0, $wasmAbs.Length - 5)
+    $stem = [IO.Path]::Combine($siteAbs, 'wow')  # wow_bg.wasm ships as wow.partNN.wasm
     $buf = New-Object byte[] $WASM_PART_MAX
     $in = [IO.File]::OpenRead($wasmAbs)
     try {
@@ -208,12 +208,12 @@ if ([IO.File]::Exists($wasmAbs)) {
     # The link, not the build: web/dist keeps its inode.
     [IO.File]::Delete($wasmAbs)
     [string[]]$parts = @(Get-ChildItem -LiteralPath $siteAbs -File -Force |
-        Where-Object { $_.Name -clike 'wenilla_bg.part*.wasm' } | ForEach-Object { $_.Name })
+        Where-Object { $_.Name -clike 'wow.part*.wasm' } | ForEach-Object { $_.Name })
     [Array]::Sort($parts, [StringComparer]::Ordinal)
     $quoted = @($parts | ForEach-Object { '"' + $_ + '"' })
     $json = '{"bytes":' + $bytes + ',"parts":[' + ($quoted -join ',') + ']}' + "`n"
-    [IO.File]::WriteAllText([IO.Path]::Combine($siteAbs, 'wenilla_bg.parts.json'), $json, (New-Object Text.UTF8Encoding $false))
-    Write-Host "split wenilla_bg.wasm ($bytes B) into $($parts.Length) parts"
+    [IO.File]::WriteAllText([IO.Path]::Combine($siteAbs, 'wow.parts.json'), $json, (New-Object Text.UTF8Encoding $false))
+    Write-Host "split wow_bg.wasm ($bytes B) into $($parts.Length) parts"
 }
 
 # Nothing at the top of the site may exceed the cap; the packs are capped by the packer.

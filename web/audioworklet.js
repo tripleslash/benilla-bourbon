@@ -62,7 +62,7 @@ const H_UNDERRUNS = 4;
 /// Where the interleaved f32 payload starts, in bytes from `ringPtr`.
 const DATA_OFFSET = 24;
 
-class WenillaMixOut extends AudioWorkletProcessor {
+class WowMixOut extends AudioWorkletProcessor {
   constructor(options) {
     super();
     const { memory, ringPtr } = options.processorOptions;
@@ -123,4 +123,4 @@ class WenillaMixOut extends AudioWorkletProcessor {
   }
 }
 
-registerProcessor('wenilla-mix-out', WenillaMixOut);
+registerProcessor('wow-mix-out', WowMixOut);

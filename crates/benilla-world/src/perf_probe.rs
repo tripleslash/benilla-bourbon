@@ -7,8 +7,8 @@
 //! the frame-phase split, the whole-frame GPU meter, `FPS_PROBE`'s percentiles. None of it can be
 //! used to answer the question this module was built for, for two independent reasons:
 //!
-//! 1. **It is `#[cfg(feature = "dev")]`, and the web build is not.** `wenilla` takes `benilla-app`
-//!    with `default-features = false` (`crates/wenilla/Cargo.toml`) and the page asks for
+//! 1. **It is `#[cfg(feature = "dev")]`, and the web build is not.** `wow` takes `benilla-app`
+//!    with `default-features = false` (`crates/wow/Cargo.toml`) and the page asks for
 //!    `data-cargo-no-default-features` (`web/index.html`), deliberately, so the bundle everyone
 //!    visits carries no instruments. The consequence nobody wrote down: **the one platform
 //!    `FORK.md` calls the budget-setter ("Browser WebGPU sets the budget") is

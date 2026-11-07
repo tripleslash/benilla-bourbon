@@ -9,7 +9,7 @@ behind a seam the native build already had:
 | raw TCP to realmd/mangosd | a WebSocket to a gateway, which proxies it to the server (`benilla-protocol::transport::Conn`) |
 | the MPQ patch chain on disk | a **BENPACK container** — the same corpus repackaged into ~4,700 static objects plus a 1.6 MB index — fetched from any dumb object store (`benilla-formats::webpack` behind `Chain` on wasm) |
 | Lua 5.1 in C, `longjmp` for errors | the same C, compiled against the wasi-sdk sysroot with LLVM's wasm SJLJ; 64-bit `lua_Integer` kept (`third_party/mlua-sys`) |
-| `WOW_USER`/`WOW_PASS`/`WOW_CHAR`/`WOW_HOST` env | a `window.__wenilla_env = {user, pass, host, …}` object the page sets before `init()`, else the query string `?user=…&pass=…&char=…&host=…` — but the three credential keys are read from the query only when the env object carries `dev_query_creds: "1"` (the dev `index.html` sets it; a page that fetched the credentials over its own session sets `__wenilla_env` instead and never puts them in a URL) |
+| `WOW_USER`/`WOW_PASS`/`WOW_CHAR`/`WOW_HOST` env | a `window.__wow_env = {user, pass, host, …}` object the page sets before `init()`, else the query string `?user=…&pass=…&char=…&host=…` — but the three credential keys are read from the query only when the env object carries `dev_query_creds: "1"` (the dev `index.html` sets it; a page that fetched the credentials over its own session sets `__wow_env` instead and never puts them in a URL) |
 | the window | `<canvas id="benilla">` in `web/index.html` |
 
 ## Requirements
@@ -171,9 +171,9 @@ web/site/   what a static host serves    hardlinks to dist/, plus data -> ../pac
 ```
 
 One file does not survive the trip as itself. A static host refuses any static asset over **25 MiB**
-and `wenilla_bg.wasm` is 77 MB — already `-O3 --strip-debug`'d down from ~90 MB, with one 184-byte
+and `wow_bg.wasm` is 77 MB — already `-O3 --strip-debug`'d down from ~90 MB, with one 184-byte
 custom section left, so there is nothing in it to cut. `stage-packs.sh` splits it into 24 MiB
-`wenilla_bg.part*.wasm` and writes `wenilla_bg.parts.json` naming them; `boot.js` fetches every part
+`wow.part*.wasm` and writes `wow.parts.json` naming them; `boot.js` fetches every part
 at once and concatenates them into one stream, so the browser still compiles the module while it
 downloads. `web/dist` keeps the whole file — `trunk serve` and `wenilla-host --www` have no such
 limit — and the manifest's presence is how the page knows which layout it is on. The staging script
@@ -318,7 +318,7 @@ whole of its security: two ports, one loopback address.
   and undoing it used to happen in Rust on the frame thread, once per pack, inside the first
   update's catalog task — so a "prefetched" pack still cost the frame its decode. `web/packworker.js`
   moves both halves off that thread: it fetches the object, decodes it with its own small wasm module
-  (`crates/wenilla-packdecode` — `benilla-pack`'s reader alone, ~106 KB, because the browser cannot
+  (`crates/wow-packdecode` — `benilla-pack`'s reader alone, ~106 KB, because the browser cannot
   decompress zstd and a JS re-implementation of the frame format would drift into silent corruption),
   and posts the body back as a transferable `ArrayBuffer` — zero copy into the resident map. By the
   time the client's first synchronous read runs, its pack is decoded and resident. It is an
@@ -369,7 +369,7 @@ whole of its security: two ports, one loopback address.
   static assets, and the gateway relays to loopback for whoever asks. Accounts are the realm's own
   (mangos `account create`), which is the only gate on the site. A page that wanted to hand the
   client credentials it fetched over its own session still can — set
-  `window.__wenilla_env = {user, pass, host}` before `init()`, the seam in the table at the top.
+  `window.__wow_env = {user, pass, host}` before `init()`, the seam in the table at the top.
 - **Sound** starts on the first click or key in the page — browsers suspend every AudioContext
   until a user gesture; `index.html` resumes it then.
 - **Full screen** — the page's "full screen" button (`web/platform.js`) is not just
@@ -402,7 +402,7 @@ whole of its security: two ports, one loopback address.
     and the wasm in the HTTP cache, so a restart is seconds. Each tier caps the canvas's backing
     store to a pixel budget — the same transform, now with the committed box *smaller* than the
     viewport, which is "render at 1080p on a 4K panel" — and hands the client a lower `renderScale`
-    through `__wenilla_env` (`gpu_render_scale`) as a fallback: it never writes itself into the
+    through `__wow_env` (`gpu_render_scale`) as a fallback: it never writes itself into the
     player's saved settings, a saved render scale outranks it, and moving the Render Scale slider
     takes the setting back. Each tier also caps `lightingQuality` (High, Medium, Low down the
     ladder) through `gpu_lighting_quality` — a ceiling, so it holds a saved Cinematic down as well,
@@ -412,9 +412,9 @@ whole of its security: two ports, one loopback address.
     `GPUInternalError`s — the device in trouble but still alive — takes the budget down one rung
     live, without a reload. A tier nobody has needed for three days walks itself back up, and
     one the player overrules goes at once: applying Graphics settings in the game calls
-    `__wenilla_gpu.reset()`, which persists tier 0, lifts the budget and hands the render scale and lighting quality back.
+    `__wow_gpu.reset()`, which persists tier 0, lifts the budget and hands the render scale and lighting quality back.
   - `?gputier=N` pins a tier (`0` clears one), `?gpubudget=<megapixels>` overrides its budget alone,
-    and `window.__wenilla_gpu` reports the tier and the backing-store size a session actually ran
+    and `window.__wow_gpu` reports the tier and the backing-store size a session actually ran
     at — which is the one thing no other line in a pasted console log can imply. It also carries
     `simulateLoss()`, because a real TDR cannot be provoked on demand (`device.destroy()` reports
     `"destroyed"`, which is teardown and correctly ignored) and the overlay, the ladder and the

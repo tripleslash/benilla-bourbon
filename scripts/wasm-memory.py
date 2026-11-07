@@ -18,7 +18,7 @@ Three things have to be true and all three are printed:
 `wasm-dis` would answer the first question too, but it disassembles the whole module to do it, and
 a debug build of this client is 2 GB. This walks the section table and reads three fields.
 
-    python scripts/wasm-memory.py web/dist/wenilla_bg.wasm
+    python scripts/wasm-memory.py web/dist/wow_bg.wasm
 """
 
 import sys

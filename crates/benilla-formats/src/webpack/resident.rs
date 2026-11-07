@@ -12,8 +12,8 @@
 //!    `packs.js` is also where the prefetcher and Cache Storage live, so the LRU belongs beside them
 //!    rather than split across the wasm boundary.
 //!
-//! The page contract is `window.__wenilla_packs`, the same shape as every other page seam this
-//! client uses (`__wenilla_env`, `__wenilla_progress`, `__wenilla_boottrace`): a plain global
+//! The page contract is `window.__wow_packs`, the same shape as every other page seam this
+//! client uses (`__wow_env`, `__wow_progress`, `__wow_boottrace`): a plain global
 //! object, no wasm-bindgen module import, so the page can ship it as an ordinary script. **A page
 //! that ships none still runs** — the resident map is then always empty and the async lane falls
 //! back to a plain `fetch` — because degrading to "correct but slow" is what keeps `wenilla-host`
@@ -23,7 +23,7 @@ use js_sys::{Array, Function, Reflect, Uint8Array};
 use wasm_bindgen::{JsCast, JsValue};
 
 /// The page global everything here hangs off.
-const GLOBAL: &str = "__wenilla_packs";
+const GLOBAL: &str = "__wow_packs";
 
 /// The bridge's functions, resolved once. wasm is single-threaded, so a `thread_local` is simply a
 /// global with the right lifetime — and holding `JsValue`s in the `PackStore` itself is not an
@@ -277,7 +277,7 @@ pub async fn fetch_frame(
     })
     .flatten();
     let Some(p) = promise else {
-        return Err("no __wenilla_packs.fetchFrame on this page".into());
+        return Err("no __wow_packs.fetchFrame on this page".into());
     };
     let value = wasm_bindgen_futures::JsFuture::from(p)
         .await

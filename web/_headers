@@ -13,7 +13,7 @@
   # So these two lines are now load-bearing, and they are the FIRST thing to check if the threaded
   # bundle stops booting. A page that is not cross-origin isolated cannot construct a
   # SharedArrayBuffer, the module's linear memory IS one, and the failure is a bare
-  # `WebAssembly.Memory` TypeError that names nothing. `wenilla-host::static_site` and `Trunk.toml`'s
+  # `WebAssembly.Memory` TypeError that names nothing. The native web host's `static_site` and `Trunk.toml`'s
   # `[serve] headers` set the same pair so local dev and the site agree.
   #
   # The fetch/decode worker (`web/packworker.js`) still wants none of this — every asset it loads

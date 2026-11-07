@@ -316,7 +316,7 @@ pub(super) fn attach_entity_visuals(
         // The appear ramp's origin: the unit's arrival, however long its visual waited to build.
         let arrived = arrival.map_or(now, |a| a.0);
         // A player attaches once its equipment settles, so it never flashes naked - or once
-        // `EQUIPMENT_SETTLE_WAIT` has passed since it arrived. wenilla carry: a TurtleWoW server
+        // `EQUIPMENT_SETTLE_WAIT` has passed since it arrived. fork carry: a TurtleWoW server
         // can leave a `PLAYER_VISIBLE_ITEM` template unanswered for good, and the plain gate then
         // withheld that body for the session - in a battleground crowd, half of it (benilla-octo
         // 3247bc76 removed the gate outright). Past the wait the compositor paints the armour it

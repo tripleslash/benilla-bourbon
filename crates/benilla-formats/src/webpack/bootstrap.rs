@@ -6,7 +6,7 @@
 //! the index off the sync path: `crate::web::fetch_sync_range` is a *blocking* fetch with no async
 //! seam at `Chain::open` to move it to, and the index is 1.6 MB of it.
 //!
-//! The page hands them over as ordinary properties on `window.__wenilla_packs` (a `Uint8Array` for
+//! The page hands them over as ordinary properties on `window.__wow_packs` (a `Uint8Array` for
 //! the index, a string for the listfile), so copying them in costs one `Uint8Array::to_vec` and no
 //! parse at all — the index is binary-searched in place from there on.
 //!

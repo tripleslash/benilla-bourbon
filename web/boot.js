@@ -9,7 +9,7 @@
 //   1. SHOW what is happening: a byte-counted wasm download bar (the counting stream is
 //      re-wrapped in a Response so `WebAssembly.instantiateStreaming` still streams), a
 //      "game data N/M MB" line for the container prefetch, then indeterminate "Starting…" states
-//      driven by the client's own `window.__wenilla_progress(stage)` calls
+//      driven by the client's own `window.__wow_progress(stage)` calls
 //      (benilla-app/src/webprogress.rs) until "ready" — the first glue screen — fades it out.
 //   2. HAND THE CLIENT ITS DATA. `packs.js::bootstrap` installs the service worker that makes the
 //      container permanent (`web/sw.js`), fetches the index and listfile, and warms the packs a
@@ -28,10 +28,10 @@
 //
 // Page contract: `const w = await boot(init); bind(w.memory);` — bind must stay immediately
 // after (the Lua WASI shims need the module's linear memory). Query switches: `?boottrace=1`
-// arms window.__wenilla_boottrace and skips the pack prefetch (a manifest-capture boot must show
+// arms window.__wow_boottrace and skips the pack prefetch (a manifest-capture boot must show
 // the true read order); `?noprefetch=1` skips the prefetch only (the A/B lever); `?nosw=1`
 // unregisters the service worker, putting the page back on the pre-worker fetch path from the next
-// load, which is how the Range/HTTP-cache fallback (and `wenilla-host --no-ranges`) stays
+// load, which is how the Range/HTTP-cache fallback (and the native web host's `--no-ranges`) stays
 // exercisable; `?noworker=1` skips the fetch/decode worker, putting every pack decode back on the
 // frame thread. None of them skips the index — without it nothing is readable at all.
 //
@@ -43,7 +43,7 @@
 //     deduplicated result out of the console. It is the only way that works against a CONTAINER,
 //     because a container serves pack objects and a pack id does not say which name inside it was
 //     wanted.
-//  2. `wenilla-host --data "<WoW>/Data" --log-reads web/boot-manifest.json`: the per-name route
+//  2. the native web host's `--data "<WoW>/Data" --log-reads web/boot-manifest.json`: the per-name route
 //     carries the name in the URL, so the HOST can record the read set with no console at all.
 //     Boot, get to the character screen, Ctrl-C the host, and the manifest is written in the shape
 //     `benilla-pack` parses. Add `WOW_HD_MODELS=1` to capture against the updated character models.
@@ -58,7 +58,7 @@ import { bootstrap, prefetchWorld, fetchRetry } from './packs.js';
 // build and that is cosmetic — the bar is clamped at 99% until the stream actually ends.
 //
 // Only the single-file path needs the estimate. The split site reads the module's true size out
-// of `wenilla_bg.parts.json` (see fetchWasm) and this constant never enters it.
+// of `wow.parts.json` (see fetchWasm) and this constant never enters it.
 const BR_RATIO = 5.0;
 const READY_TIMEOUT_MS = 20000;
 
@@ -66,14 +66,14 @@ export async function boot(init, opts = {}) {
   const q = new URLSearchParams(location.search);
   const ui = createBootUi();
   if (q.get('boottrace') === '1') {
-    window.__wenilla_boottrace = [];
+    window.__wow_boottrace = [];
     // The layer half of the capture (`benilla_formats::web::trace_hd`). A separate array, so the
     // pasteable manifest stays a flat name list, and the thing it answers is the one a re-capture
     // has to: with the updated-character-model option ON, WHICH names the layer served — and
     // therefore whether it is being read at all. Empty with the option off, which is correct;
     // empty with it on means the layer is mounted and nothing wants it, which is a bug the base
     // trace cannot show you.
-    window.__wenilla_boottrace_hd = [];
+    window.__wow_boottrace_hd = [];
   }
   const skipPrefetch = q.get('boottrace') === '1' || q.get('noprefetch') === '1';
   installProgressHook(ui, skipPrefetch);
@@ -92,11 +92,11 @@ export async function boot(init, opts = {}) {
     // A container that failed to bootstrap is very likely a fatal misconfiguration, but say so
     // through the client's own error path rather than guessing here: `Chain::open` will fetch the
     // index itself, and if that fails too its message names the URL and the cause.
-    console.warn('wenilla: container bootstrap failed —', e);
+    console.warn('wow: container bootstrap failed —', e);
     ui.setData(0, 0);
   });
 
-  const wasm = fetchWasm(new URL('./wenilla_bg.wasm', import.meta.url), (got, total) =>
+  const wasm = fetchWasm(new URL('./wow_bg.wasm', import.meta.url), (got, total) =>
     ui.setWasmProgress(got, total)
   );
   // The prefetch is AWAITED before init(), and that is the whole trick. init() runs the app's
@@ -120,7 +120,7 @@ export async function boot(init, opts = {}) {
     // cause. Checking after the failure rather than before it keeps the PLAIN build unaffected:
     // that one has ordinary memory, needs no isolation, and must not be refused for lacking it.
     //
-    // `web/_headers` sets COOP/COEP on the site, `wenilla-host::static_site` for `--www` and
+    // `web/_headers` sets COOP/COEP on the site, the native web host's `static_site` for `--www` and
     // `Trunk.toml`'s `[serve]` for `trunk serve`. If this fires, one of those three is not in play
     // — most likely the page is being served by something else entirely.
     if (typeof crossOriginIsolated !== 'undefined' && !crossOriginIsolated) {
@@ -148,8 +148,8 @@ export async function boot(init, opts = {}) {
 /// The module arrives in one of two layouts and this is the only place that knows it. On the
 /// split layout it is N parts: a static host may refuse ANY static asset over 25 MiB and the module is
 /// 77 MB with nothing left in it to strip, so `scripts/stage-packs.sh` splits it at 24 MiB and
-/// writes `wenilla_bg.parts.json` beside the pieces. Everywhere else — `trunk serve` and
-/// `wenilla-host --www`, both serving `web/dist`, where no such limit exists — it is the single
+/// writes `wow.parts.json` beside the pieces. Everywhere else — `trunk serve` and
+/// the native web host's `--www`, both serving `web/dist`, where no such limit exists — it is the single
 /// file and the manifest is simply not there.
 ///
 /// Concatenating the parts into ONE stream is what keeps the split cheap: a wasm module is a byte
@@ -221,7 +221,7 @@ async function fetchWasm(url, onBytes) {
   });
 }
 
-/// `wenilla_bg.parts.json` -> `{bytes, parts}`, or null when the module is not split.
+/// `wow.parts.json` -> `{bytes, parts}`, or null when the module is not split.
 ///
 /// A 404 IS an answer here and is not logged: unsplit is what every local run serves. Anything
 /// else — a parse error, an offline fetch — also answers null, because the single-file path is
@@ -229,7 +229,7 @@ async function fetchWasm(url, onBytes) {
 /// about a manifest the reader has never heard of.
 async function fetchPartsManifest(url) {
   try {
-    const r = await fetchRetry(new URL('./wenilla_bg.parts.json', url));
+    const r = await fetchRetry(new URL('./wow.parts.json', url));
     if (!r.ok) return null;
     const m = await r.json();
     return Array.isArray(m.parts) && m.parts.length ? m : null;
@@ -238,7 +238,7 @@ async function fetchPartsManifest(url) {
   }
 }
 
-/// `/config.json` -> `window.__wenilla_config`, read by `benilla_app::webenv::config`.
+/// `/config.json` -> `window.__wow_config`, read by `benilla_app::webenv::config`.
 ///
 /// Two keys, `ws` and `realmlist`, and what each one is for is in `web/README.md` under
 /// "the site's whole configuration" — the file itself is data an operator edits, so it carries
@@ -256,7 +256,7 @@ async function fetchPartsManifest(url) {
 /// from a game install, and a setting kept there would be a setting that lives in a directory
 /// nobody edits and `.gitignore` cannot track.
 ///
-/// Deliberately its OWN global rather than a merge into `window.__wenilla_env`. The env object
+/// Deliberately its OWN global rather than a merge into `window.__wow_env`. The env object
 /// outranks the query string in `webenv::lookup`, so folding a hosted default into it would let
 /// `config.json` beat a hand-written `?ws=…` — backwards. And `realmlist` must not travel as
 /// `host` either: that key marks the session env-pinned, which is a statement about a harness run
@@ -266,13 +266,13 @@ async function fetchPartsManifest(url) {
 async function loadConfig(origin) {
   try {
     const r = await fetchRetry(`${origin}/config.json`, { cache: 'no-cache' });
-    window.__wenilla_config = r.ok ? await r.json() : {};
+    window.__wow_config = r.ok ? await r.json() : {};
   } catch (_) {
-    window.__wenilla_config = {};
+    window.__wow_config = {};
   }
 }
 
-/// `window.__wenilla_progress(stage)` — the client's calls land here (webprogress.rs).
+/// `window.__wow_progress(stage)` — the client's calls land here (webprogress.rs).
 ///
 /// `ready` also starts the SECOND prefetch: the world-entry pack set. Entering the world used
 /// to be one frozen frame of ~200 synchronous sprite reads (184 `Interface\…\*.blp` on the
@@ -282,14 +282,14 @@ async function loadConfig(origin) {
 /// it is visible but never in the way. Whatever is still in flight when they click Enter World
 /// just loads the slow way.
 function installProgressHook(ui, skipPrefetch) {
-  window.__wenilla_progress = (stage) => {
+  window.__wow_progress = (stage) => {
     if (stage === 'startup') ui.setStage('Loading interface…');
     else if (stage === 'ready') {
       ui.hide();
       // A trace capture ends at the first glue screen, which is exactly what the BOOT read set is.
       // Posting it here rather than at unload is deliberate: `beforeunload` is not guaranteed to
       // run a fetch to completion, and a capture that is sometimes lost is a capture nobody trusts.
-      // Ask again later (`__wenilla_post_boottrace()` from the console) to fold in the world set.
+      // Ask again later (`__wow_post_boottrace()` from the console) to fold in the world set.
       postBootTrace();
       if (!skipPrefetch) {
         const corner = createCornerLine();
@@ -303,7 +303,7 @@ function installProgressHook(ui, skipPrefetch) {
   };
 }
 
-/// Hand the boot trace to `wenilla-host --log-reads`, which writes `web/boot-manifest.json` from it.
+/// Hand the boot trace to the native web host's `--log-reads`, which writes `web/boot-manifest.json` from it.
 ///
 /// The alternative this replaces is a person opening devtools, deduplicating an array by eye and
 /// pasting it into a file — which works, and which nobody does often enough to keep the manifest
@@ -316,10 +316,10 @@ function installProgressHook(ui, skipPrefetch) {
 /// that was not started with `--log-reads` answers 404, which is the ordinary case for every run
 /// that is not a capture.
 ///
-/// Exposed as `window.__wenilla_post_boottrace()` so a session can post again after walking into
+/// Exposed as `window.__wow_post_boottrace()` so a session can post again after walking into
 /// the world; `ReadLog` merges in first-need order, so a second post appends what is new.
 function postBootTrace() {
-  const names = window.__wenilla_boottrace;
+  const names = window.__wow_boottrace;
   if (!Array.isArray(names) || !names.length) return Promise.resolve(false);
   // Deduplicated HERE, keeping first-need order, so the host receives the manifest's own shape and
   // the two sides cannot disagree about what "first need" meant.
@@ -331,10 +331,10 @@ function postBootTrace() {
     seen.add(key);
     ordered.push(n);
   }
-  const hd = window.__wenilla_boottrace_hd;
+  const hd = window.__wow_boottrace_hd;
   if (Array.isArray(hd)) {
     console.log(
-      `wenilla: boot trace — ${ordered.length} names, ${new Set(hd).size} of them served by the ` +
+      `wow: boot trace — ${ordered.length} names, ${new Set(hd).size} of them served by the ` +
         `updated-character-model layer`,
     );
   }
@@ -344,19 +344,19 @@ function postBootTrace() {
     body: JSON.stringify(ordered),
   })
     .then((r) => {
-      if (r.ok) console.log(`wenilla: posted ${ordered.length} names to the host's read log`);
+      if (r.ok) console.log(`wow: posted ${ordered.length} names to the host's read log`);
       return r.ok;
     })
     .catch(() => false);
 }
-window.__wenilla_post_boottrace = postBootTrace;
+window.__wow_post_boottrace = postBootTrace;
 
 const mb = (n) => (n / (1024 * 1024)).toFixed(0);
 
 /// The unobtrusive bottom-left status line the world prefetch reports on.
 function createCornerLine() {
   const el = document.createElement('div');
-  el.id = 'wenilla-corner';
+  el.id = 'wow-corner';
   el.style.cssText =
     'position:fixed;left:.6rem;bottom:.5rem;z-index:15;font:12px system-ui,sans-serif;' +
     'color:#888;background:rgba(0,0,0,.55);padding:.2rem .5rem;border-radius:4px;' +
@@ -377,23 +377,23 @@ function createCornerLine() {
 /// The overlay itself. Same dark theme as the pages' own chrome; no dependencies, no images.
 function createBootUi() {
   const root = document.createElement('div');
-  root.id = 'wenilla-boot';
+  root.id = 'wow-boot';
   root.innerHTML = `
     <style>
-      #wenilla-boot { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center;
+      #wow-boot { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center;
         background: #000; color: #ccc; font: 15px system-ui, sans-serif;
         transition: opacity .4s ease; }
-      #wenilla-boot.gone { opacity: 0; pointer-events: none; }
-      #wenilla-boot .box { width: min(420px, 80vw); }
-      #wenilla-boot .stage { margin-bottom: .6rem; text-align: center; }
-      #wenilla-boot .bar { height: 6px; background: #222; border-radius: 3px; overflow: hidden; }
-      #wenilla-boot .bar > i { display: block; height: 100%; width: 0; background: #c9a227;
+      #wow-boot.gone { opacity: 0; pointer-events: none; }
+      #wow-boot .box { width: min(420px, 80vw); }
+      #wow-boot .stage { margin-bottom: .6rem; text-align: center; }
+      #wow-boot .bar { height: 6px; background: #222; border-radius: 3px; overflow: hidden; }
+      #wow-boot .bar > i { display: block; height: 100%; width: 0; background: #c9a227;
         border-radius: 3px; transition: width .15s linear; }
-      #wenilla-boot .bar.pulse > i { width: 30% !important; animation: wboot-slide 1.2s ease-in-out infinite; }
+      #wow-boot .bar.pulse > i { width: 30% !important; animation: wboot-slide 1.2s ease-in-out infinite; }
       @keyframes wboot-slide { 0% { margin-left: 0 } 50% { margin-left: 70% } 100% { margin-left: 0 } }
-      #wenilla-boot .data { margin-top: .5rem; text-align: center; font-size: 12px; color: #888;
+      #wow-boot .data { margin-top: .5rem; text-align: center; font-size: 12px; color: #888;
         min-height: 1.2em; }
-      #wenilla-boot .err { color: #e07070; text-align: center; }
+      #wow-boot .err { color: #e07070; text-align: center; }
     </style>
     <div class="box">
       <div class="stage">Loading…</div>

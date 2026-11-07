@@ -58,7 +58,7 @@ pub fn room_pvs_visible(
 /// a portal opening, so only a body within `radius` of the shared portal's box can show in the
 /// neighbour.
 ///
-/// **The hop used to admit every body of every neighbouring room** - wenilla carry. The camera's
+/// **The hop used to admit every body of every neighbouring room** - fork carry. The camera's
 /// own room is always in the PVS, so standing inside a WMO facing a wall still drew and animated
 /// everyone in the rooms next door: the owner saw the frame drop with nobody on screen. The
 /// reference has no hop at all (`0x6834e0` submits a group's members only while the group

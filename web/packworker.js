@@ -10,7 +10,7 @@
 // the frame still paid for it.
 //
 // Here that work moves. The worker fetches a pack, hands it to its own small wasm module
-// (`crates/wenilla-packdecode`, the same `benilla_pack` reader the client links) and posts the
+// (`crates/wow-packdecode`, the same `benilla_pack` reader the client links) and posts the
 // DECODED body back as a transferable `ArrayBuffer` — zero copy, straight into the resident map.
 // By the time the client's first synchronous `Chain::read` runs, its pack is decoded and resident
 // and the read is a memcpy.
@@ -23,7 +23,7 @@
 //
 // This worker is untouched by that, and it is not redundant. Threads move work that is `Send`;
 // fetching a pack is not. The read path awaits `JsFuture`s and reaches `window` — the resident map
-// is `window.__wenilla_packs` on the main thread's JS heap — so `TaskPool::spawn` on wasm is still
+// is `window.__wow_packs` on the main thread's JS heap — so `TaskPool::spawn` on wasm is still
 // the microtask queue and `bevy_asset`'s loads still run on the thread that draws. A worker that
 // owns its own `fetch` and its own decoder is how that work gets off the frame, with or without
 // atomics. See `third_party/bevy_tasks/BENILLA.md` for where the `spawn`/`spawn_pooled` line falls.
@@ -50,12 +50,12 @@
 // page has to handle specially: `packs.js` settles every pending warm as "not resident" and the
 // read path does exactly what it did before this file existed.
 
-importScripts('./wenilla-packdecode.js');
+importScripts('./wow-packdecode.js');
 
 /// The wasm module, initialising in parallel with the page's own boot. Awaited by the first message
 /// that needs it rather than gated behind a "ready" handshake: the page's `open` arrives after two
 /// network round trips (`boot-packs.json`, `index.bpi`), so this is finished long before.
-const wasmReady = wasm_bindgen({ module_or_path: './wenilla-packdecode_bg.wasm' });
+const wasmReady = wasm_bindgen({ module_or_path: './wow-packdecode_bg.wasm' });
 
 /// The open container — `index.bpi` parsed, plus the base URL. Null until `open` succeeds; every
 /// job before that is refused rather than queued, because the page does not send one until it has

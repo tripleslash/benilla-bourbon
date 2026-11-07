@@ -41,24 +41,20 @@
 //
 // ## Scope
 //
-// `/data/`, `/data-hd/`, `/data-turtle/` and `/data-reforged/` only. Everything else — the page, `wenilla.js`, the 77 MB wasm, and `/config.json`
+// `/data/`, `/data-hd/`, `/data-turtle/` and `/data-reforged/` only. Everything else — the page, `wow.js`, the 77 MB wasm, and `/config.json`
 // (the gateway address and the realmlist, which must never be held: re-uploading it is how a client
 // gets repointed) — is not passed to `respondWith` at all, so it keeps its ordinary `no-cache`
 // behaviour and a rebuilt bundle still lands on a reload. A service worker that made the dev loop
 // sticky would be trading it for the wrong thing. `?nosw=1` on the page unregisters this entirely
-// (see `packs.js`), which is how the pre-worker path — and `wenilla-host --no-ranges`, the
+// (see `packs.js`), which is how the pre-worker path — and the native web host's `--no-ranges`, the
 // Range-less host emulation — stays exercisable.
 
 /// One cache for the container. Not namespaced by build id in its NAME: the id is not known when
 /// the worker starts, and a fetch can arrive before the page has said. Instead the id is stored
 /// inside as a marker and the whole cache is dropped when it changes — see `syncBuild`.
-const CACHE = 'wenilla-data';
+const CACHE = 'wow-data';
 /// The marker's key. A URL under the origin so it is a legal Request, and one nothing ever fetches.
-const BUILD_KEY = '/__wenilla_build_id';
-/// The caches `packs.js` used to write before this worker existed. Dropped on activate: with the
-/// worker in control the page stops writing its own, and leaving them would hold a second copy of
-/// the corpus against the same quota.
-const LEGACY_PREFIX = 'wenilla-packs-';
+const BUILD_KEY = '/__wow_build_id';
 
 /// Stop storing at this fraction of the origin's quota. Going over does not fail loudly — the
 /// browser evicts something, possibly the packs just written — so headroom is how the cache stays
@@ -103,9 +99,11 @@ self.addEventListener('activate', (event) => {
     (async () => {
       await self.clients.claim();
       const names = await caches.keys();
-      await Promise.all(
-        names.filter((n) => n.startsWith(LEGACY_PREFIX)).map((n) => caches.delete(n))
-      );
+      // Every cache but this worker's own: the ones `packs.js` wrote before this worker existed
+      // (with the worker in control the page stops writing its own), and, fork, any left under an
+      // old name, since the site renames the bundle's identifiers, cache names included
+      // (scripts/stage-packs.sh). Either is a second copy of the corpus against the same quota.
+      await Promise.all(names.filter((n) => n !== CACHE).map((n) => caches.delete(n)));
     })()
   );
 });
@@ -132,7 +130,7 @@ self.addEventListener('fetch', (event) => {
 /// a stale cache is dropped BEFORE the first read that could be answered out of it.
 self.addEventListener('message', (event) => {
   const data = event.data;
-  if (!data || data.type !== 'wenilla-build') return;
+  if (!data || data.type !== 'wow-build') return;
   const port = event.ports && event.ports[0];
   event.waitUntil(
     syncBuild(data.buildId).then(
@@ -271,7 +269,7 @@ function body(buf, headers, cacheControl) {
       'Content-Length': String(buf.byteLength),
       'Cache-Control': cacheControl || 'public, max-age=31536000, immutable',
       'Accept-Ranges': 'bytes',
-      'X-Wenilla-Source': 'sw',
+      'X-Wow-Source': 'sw',
     },
   });
 }
@@ -297,7 +295,7 @@ function slice(buf, header) {
       'Content-Range': `bytes ${start}-${end}/${total}`,
       'Cache-Control': 'public, max-age=31536000, immutable',
       'Accept-Ranges': 'bytes',
-      'X-Wenilla-Source': 'sw',
+      'X-Wow-Source': 'sw',
     },
   });
 }

@@ -13,7 +13,7 @@
 #                root — see web/index.html's copy-file link.)
 #   web/site/  what a static host serves: hardlinks to the build, plus `data` -> ../packs. The one
 #                file that is NOT a link is the wasm module: it is 77 MB against a static host's
-#                25 MiB per-asset limit, so it is split here into 24 MiB `wenilla_bg.part*.wasm`
+#                25 MiB per-asset limit, so it is split here into 24 MiB `wow.part*.wasm`
 #                and `web/boot.js` streams them back together. See the split step below.
 #
 # Both links are cheap on purpose. Hardlinking the build is O(1) per file against a ~90 MB wasm
@@ -82,7 +82,7 @@ echo "staging from ${DIST}"
 # import map, which works for the page and **does not work for a Web Worker**: import maps are a
 # document feature, a worker does not inherit the page's, and there is no way to give one its own.
 #
-# So a worker that imports `./wenilla.js` — which is every task-pool thread (`web/threadworker.js`)
+# So a worker that imports `./wow.js` — which is every task-pool thread (`web/threadworker.js`)
 # — fails at module resolution before it runs a line. The failure surfaces as an `error` event on
 # the Worker with no message, no filename and no line number, which is as close to undebuggable as
 # the platform gets. Measured 2026-09-06: 15 workers, 15 opaque error events, empty pools.
@@ -161,40 +161,41 @@ fi
 # a synthetic Response to count its bytes; the browser still compiles while it downloads.
 #
 # `web/dist` is NOT split — `trunk serve` and `wenilla-host --www` serve that directory and have no
-# such limit. So both layouts exist at once, and `wenilla_bg.parts.json` is how the page tells them
+# such limit. So both layouts exist at once, and `wow.parts.json` is how the page tells them
 # apart: written here, absent there.
 #
 # 24 MiB, the same cap `benilla-pack build` holds a pack object to. One number for both is one
 # number to remember, and the MiB of headroom is there for the same reason it is there.
 WASM_PART_MAX=$((24 * 1024 * 1024))
-if [ -f "${SITE}/wenilla_bg.wasm" ]; then
-  bytes=$(wc -c < "${SITE}/wenilla_bg.wasm")
+# The build's `wow_bg.wasm` ships as `wow.part00.wasm`, ... and `wow.parts.json`.
+if [ -f "${SITE}/wow_bg.wasm" ]; then
+  bytes=$(wc -c < "${SITE}/wow_bg.wasm")
   # `--additional-suffix=.wasm` is load-bearing, not tidiness: A static host types an asset by its
   # extension and compresses on the fly BY TYPE, so a part named `.part00` would be
   # `application/octet-stream` and could ship uncompressed — 77 MB on the wire against the ~15 MB
   # the module costs today. Named `*.wasm` it is the same kind of object the whole file is.
   # Not `split -d --additional-suffix`: those are GNU-only and BSD split (macOS) refuses them. The
-  # default `aa`, `ab`, ... suffixes both share are renamed in order: wenilla_bg.part00.wasm, ...
-  split -b "${WASM_PART_MAX}" "${SITE}/wenilla_bg.wasm" "${SITE}/wenilla_bg.split."
+  # default `aa`, `ab`, ... suffixes both share are renamed in order: wow.part00.wasm, ...
+  split -b "${WASM_PART_MAX}" "${SITE}/wow_bg.wasm" "${SITE}/wow.split."
   i=0
-  for chunk in "${SITE}"/wenilla_bg.split.*; do
-    mv "${chunk}" "$(printf '%s/wenilla_bg.part%02d.wasm' "${SITE}" "${i}")"
+  for chunk in "${SITE}"/wow.split.*; do
+    mv "${chunk}" "$(printf '%s/wow.part%02d.wasm' "${SITE}" "${i}")"
     i=$((i + 1))
   done
   # The hardlink, not the build: removing a link never touches the inode `web/dist` still names.
-  rm "${SITE}/wenilla_bg.wasm"
+  rm "${SITE}/wow_bg.wasm"
   # Unconditional, even if the module ever fits: one layout per directory is one code path in
   # `fetchWasm`, and a split that only sometimes happens is a path that only sometimes runs.
   {
     printf '{"bytes":%s,"parts":[' "${bytes}"
     sep=""
-    for part in "${SITE}"/wenilla_bg.part*.wasm; do
+    for part in "${SITE}"/wow.part*.wasm; do
       printf '%s"%s"' "${sep}" "$(basename "${part}")"
       sep=","
     done
     printf ']}\n'
-  } > "${SITE}/wenilla_bg.parts.json"
-  echo "split wenilla_bg.wasm (${bytes} B) into $(ls "${SITE}"/wenilla_bg.part*.wasm | wc -l) parts"
+  } > "${SITE}/wow.parts.json"
+  echo "split wow_bg.wasm (${bytes} B) into $(ls "${SITE}"/wow.part*.wasm | wc -l) parts"
 fi
 
 # The class of bug, not the instance: anything else that grows past the cap fails the same way, and

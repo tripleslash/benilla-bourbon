@@ -10,7 +10,7 @@
      which is why the crate is reached with `../`.
 
      `data-bindgen-target="web"` is mandatory: Trunk defaults to `no-modules`, which breaks both
-     the import map below and `import init from './wenilla.js'`.
+     the import map below and `import init from './wow.js'`.
 
      `data-cargo-profile-release="ship"` (Trunk 0.21's per-link profile attribute; `trunk build
      --release` is what selects the `-release` one) builds both modules under the workspace `ship`
@@ -43,24 +43,24 @@
      0.036%, which is what an already-converged module looks like; that is the check to repeat if a
      Trunk upgrade ever makes these attributes stop being honoured, because the failure mode is
      silent. -->
-<link data-trunk rel="rust" href="../crates/wenilla/Cargo.toml"
+<link data-trunk rel="rust" href="../crates/wow/Cargo.toml"
       data-cargo-profile-release="ship"
       data-bindgen-target="web"
       data-cargo-no-default-features data-cargo-features="webgpu"
-      data-target-name="wenilla" data-wasm-opt="3"
+      data-target-name="wow" data-wasm-opt="3"
       data-wasm-opt-params="--enable-bulk-memory --enable-threads --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --enable-simd --strip-debug --strip-producers"
       data-no-demangle />
 <!-- The pack fetch/decode Web Worker's wasm half (phase 6): `benilla-pack`'s reader on its own, so
      a pack's zstd stream is undone off the frame thread. `data-type="worker"` is what lets a second
      `rel="rust"` link exist at all — Trunk allows exactly one `main` — and it emits the
      `no-modules` bundle a classic worker's `importScripts` can take. The files land as
-     `wenilla-packdecode.js` + `wenilla-packdecode_bg.wasm` — Trunk names the emitted pair after
+     `wow-packdecode.js` + `wow-packdecode_bg.wasm` — Trunk names the emitted pair after
      the PACKAGE, not the `[lib] name` the cargo artifact carries (verified on the build output:
-     `target/.../packdecode.wasm` in, `wenilla-packdecode*` out) — which `web/packworker.js` names;
+     `target/.../packdecode.wasm` in, `wow-packdecode*` out) — which `web/packworker.js` names;
      with
      `filehash = false` those names are stable and are part of that contract. Same wasm-opt flags as
      the client for the same reason (the feature list must match what rustc emitted). -->
-<link data-trunk rel="rust" href="../crates/wenilla-packdecode/Cargo.toml"
+<link data-trunk rel="rust" href="../crates/wow-packdecode/Cargo.toml"
       data-type="worker" data-target-name="packdecode" data-wasm-opt="3"
       data-cargo-profile-release="ship"
       data-wasm-opt-params="--enable-bulk-memory --enable-threads --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --enable-simd --strip-debug --strip-producers" />
@@ -69,17 +69,17 @@
 <link data-trunk rel="copy-file" href="packs.js" />
 <link data-trunk rel="copy-file" href="packworker.js" />
 <!-- The task pools' thread spawner and the worker it starts. `threads.js` installs the page
-     contract `window.__wenilla_threads`; `threadworker.js` is one pool thread, and it imports
-     `./wenilla.js` by name, so both must land beside it at the dist root. Shipped in EVERY
+     contract `window.__wow_threads`; `threadworker.js` is one pool thread, and it imports
+     `./wow.js` by name, so both must land beside it at the dist root. Shipped in EVERY
      build: a module without shared memory simply never asks for a thread, and a page that
      carries two unused scripts is cheaper than two index.html files to keep in step. -->
 <link data-trunk rel="copy-file" href="threads.js" />
 <link data-trunk rel="copy-file" href="threadworker.js" />
 <!-- The render worker (`benilla_app::render_worker`): `threads.js` starts it with the canvas
-     transferred to it, and like `threadworker.js` it imports `./wenilla.js` by name. -->
+     transferred to it, and like `threadworker.js` it imports `./wow.js` by name. -->
 <link data-trunk rel="copy-file" href="renderworker.js" />
 <link data-trunk rel="copy-file" href="gpucensus.js" />
-<!-- The output. `audio.js` installs `window.__wenilla_audio`; `audioworklet.js` is loaded by
+<!-- The output. `audio.js` installs `window.__wow_audio`; `audioworklet.js` is loaded by
      `audioWorklet.addModule` at a URL resolved relative to `audio.js`, so both must land beside
      each other at the dist root. Shipped in EVERY build, like the thread pair above: a module
      that cannot use them (no shared memory, no AudioContext) simply falls back to kira's cpal
@@ -91,7 +91,7 @@
      whole memory sixty times a second, and the device-lost watchdog that recovers from the TDR
      that used to cause. Loaded by the page ahead of `boot(init)` — it has to wrap `requestDevice`
      before wgpu asks for a device, own the canvas box before winit reads it, and put its recovery
-     tier into `__wenilla_env` before the client looks. See `web/gpu.js`'s own header. -->
+     tier into `__wow_env` before the client looks. See `web/gpu.js`'s own header. -->
 <link data-trunk rel="copy-file" href="gpu.js" />
 <!-- Must land at the DIST ROOT, not in a subdirectory: a worker's default scope is its own
      directory, and this one has to see `/data/*` from `/` and from the realm's `/play` alike. -->
@@ -161,7 +161,7 @@
 <!-- A FALLBACK now, not the mechanism. `wasm-bindgen` emits the Lua VM's WASI imports as the
      bare specifier `wasi_snapshot_preview1` (it is the wasm import module's name), and this map
      is what used to resolve it. It only ever worked for the page: import maps are a document
-     feature and a Web Worker inherits none, so every task-pool thread importing `./wenilla.js`
+     feature and a Web Worker inherits none, so every task-pool thread importing `./wow.js`
      died at module resolution with an error event carrying no message. `scripts/stage-packs.sh`
      now rewrites the specifier to `./wasi_stubs.js` in the built glue, which the page and a
      worker resolve identically. Kept for a build driven by cargo + wasm-bindgen by hand, with
@@ -251,24 +251,24 @@
 <canvas id="benilla"></canvas>
 <script>
   // Dev page: allow `?user=&pass=&char=` links to log in. A hosting page that fetched the
-  // credentials itself sets `window.__wenilla_env = {user, pass, host}` here instead, and the
+  // credentials itself sets `window.__wow_env = {user, pass, host}` here instead, and the
   // client then never reads credentials from the URL (`benilla_app::webenv`).
-  window.__wenilla_env = { dev_query_creds: '1' };
+  window.__wow_env = { dev_query_creds: '1' };
 </script>
 <script type="module">
-  import init from './wenilla.js';
+  import init from './wow.js';
   import { bind } from './wasi_stubs.js';
   import { boot } from './boot.js';
   // `boot(init)` is the loading overlay + parallel data prefetch (see boot.js's header); it calls
   // `init()` with a byte-counted Response, and `init()` instantiates the wasm module, which runs
-  // `#[wasm_bindgen(start)] start()` as part of instantiation (`wenilla/src/lib.rs`) — that's the
+  // `#[wasm_bindgen(start)] start()` as part of instantiation (`wow/src/lib.rs`) — that's the
   // whole boot, canvas included (`boot.rs` binds to `#benilla` by id, so no query/lookup belongs
   // here). `bind(w.memory)` comes AFTER on purpose: the wasm Lua VM's WASI shims
   // (`wasi_stubs.js`'s own header) can only zero a WASI caller's out-pointers once the module's
   // linear memory exists to write into, and `init()` is what creates it.
   // **First, and before `boot(init)`.** The guard wraps `GPUAdapter.prototype.requestDevice`
   // (which wgpu calls from inside `init()`), commits the canvas's size (which winit reads when it
-  // creates the window), and writes its recovery tier into `__wenilla_env` (which `webenv` reads
+  // creates the window), and writes its recovery tier into `__wow_env` (which `webenv` reads
   // once). All three are one-shot and all three land inside `init()`, so "before" is the whole
   // contract. Awaited rather than fired off: a guard installed a frame late would miss the device
   // it exists to watch.
@@ -295,7 +295,7 @@
   const { installThreads } = await import('./threads.js');
   installThreads();
   // Beside the threads and for the same reason: the mixer is built inside the plugin graph
-  // `init()` constructs, so `window.__wenilla_audio` has to be on the page before the module
+  // `init()` constructs, so `window.__wow_audio` has to be on the page before the module
   // starts. A bridge installed afterwards would find the device already opened kira's cpal way —
   // the main-thread `ScriptProcessorNode` that makes every frame hitch audible.
   const { installAudio } = await import('./audio.js');

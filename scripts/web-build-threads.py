@@ -130,9 +130,9 @@ def main():
         return rc
 
     # Verify the module actually came out threaded, from the build's own output.
-    wasms = sorted(glob.glob("web/dist/wenilla_bg*.wasm"))
+    wasms = sorted(glob.glob("web/dist/wow_bg*.wasm"))
     if not wasms:
-        err("no wenilla_bg*.wasm in web/dist - the build did not get that far")
+        err("no wow_bg*.wasm in web/dist - the build did not get that far")
         return 1
     wasm = wasms[0]
 
@@ -167,7 +167,7 @@ def main():
     # name Rust functions. For localhost and a console, never a site.
     if os.environ.get("BENILLA_KEEP_NAMES", "") == "1":
         say("== BENILLA_KEEP_NAMES=1: re-emitting unoptimized, named glue")
-        artifact = os.environ["CARGO_TARGET_DIR"] + "/wasm32-unknown-unknown/ship/wenilla.wasm"
+        artifact = os.environ["CARGO_TARGET_DIR"] + "/wasm32-unknown-unknown/ship/wow.wasm"
         if not os.path.isfile(artifact):
             err("   no cargo artifact at " + artifact)
             return 1
@@ -187,13 +187,13 @@ def main():
         if not wbg:
             err("   no wasm-bindgen 0.2.126 found (Trunk caches one; or cargo install wasm-bindgen-cli)")
             return 1
-        rc, _ = run([wbg, "--target", "web", "--out-dir", "web/dist", "--out-name", "wenilla", "--no-demangle", artifact])
+        rc, _ = run([wbg, "--target", "web", "--out-dir", "web/dist", "--out-name", "wow", "--no-demangle", artifact])
         if rc:
             return rc
         # Same rewrite stage-packs.py does: workers have no import map.
-        rewrite_specifier("web/dist/wenilla.js")
+        rewrite_specifier("web/dist/wow.js")
         say("   web/dist now carries the NAMED module (%s); web/site still has the optimized one."
-            % du_h("web/dist/wenilla_bg.wasm"))
+            % du_h("web/dist/wow_bg.wasm"))
 
     say(CLOSING)
     return 0

@@ -444,7 +444,7 @@ pub use target::Interact;
 /// probe); in a shipped one the log is gone either way and `?diag=1` is what turns the probe on.
 ///
 /// Native is never touched: [`webdiag::armed`] is false off wasm32, so a `cargo run` logs as it always
-/// has. Panics still reach the console either way — `wenilla`'s shim sets `console_error_panic_hook`
+/// has. Panics still reach the console either way — `wow`'s shim sets `console_error_panic_hook`
 /// itself, before this crate is entered.
 fn quiet_console_on_web(plugins: bevy::app::PluginGroupBuilder) -> bevy::app::PluginGroupBuilder {
     // **A shipped browser build writes nothing to the console.** Two reasons it is off rather than
@@ -553,7 +553,7 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     //
     // Native only (fork: web build). A page has no `benilla-config/Diagnostics/` to write a report
     // into, `std::time::Instant`/`SystemTime` panic on wasm32 (a panic *inside* the hook is an
-    // abort), and `wenilla`'s shim already routes panics to the browser console through
+    // abort), and `wow`'s shim already routes panics to the browser console through
     // `console_error_panic_hook` — which is where a web bug report's backtrace comes from.
     #[cfg(not(target_arch = "wasm32"))]
     crash::install(build);
@@ -687,7 +687,7 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     // from the page's own origin, which was right while `wenilla-host` served the bundle and
     // proxied `/ws/{port}` from one process. On a static site those separate: the page comes from
     // an object store with no sockets, and the gateway is a box elsewhere whose address is supplied
-    // after the client is built — hence `?ws=` / `__wenilla_env.ws` / `/config.json`, and not a
+    // after the client is built — hence `?ws=` / `__wow_env.ws` / `/config.json`, and not a
     // constant compiled into 90 MB of wasm. Absent, the origin default stands and local dev is
     // unchanged. (This is `set_ws_base`'s first caller; it had none before.)
     #[cfg(target_arch = "wasm32")]

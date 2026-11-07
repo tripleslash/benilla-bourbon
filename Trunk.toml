@@ -18,7 +18,7 @@ dist = "web/dist"
 release = true
 # `release = true` selects each `rust` link's `data-cargo-profile-release` in `web/index.html`, which
 # names the `ship` profile (fat LTO); the cargo artifact is under `wasm32-unknown-unknown/ship/`.
-# The page imports `./wenilla.js` by name and `_headers` matches on paths, so a content hash in the
+# The page imports `./wow.js` by name and `_headers` matches on paths, so a content hash in the
 # filename would break both on every build. The bundle is served `no-cache` for exactly this reason
 # (`wenilla-host::static_site`), and on the site it is the one thing under `/*` rather than the
 # immutable `/data/p/*` rule.

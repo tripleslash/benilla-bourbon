@@ -30,7 +30,7 @@ pub fn start() {
     //
     // The test is `document`, not `window`: a `DedicatedWorkerGlobalScope` has neither, but
     // `document` is the one that means "there is a page here" rather than "there is a global here".
-    // A worker returns immediately and its real entry point takes over — `__wenilla_thread_entry`,
+    // A worker returns immediately and its real entry point takes over — `__wow_thread_entry`,
     // which the same message that carried the module hands it.
     if !js_sys::Reflect::has(&js_sys::global(), &JsValue::from_str("document")).unwrap_or(false) {
         return;

@@ -6,9 +6,9 @@
 // `unsupported` backend, atomics or no atomics. A thread here is a Web Worker running the same
 // module against the same `SharedArrayBuffer`, and only the page can make one.
 //
-// **Page contract: `window.__wenilla_threads`** — a plain global with one method, the same shape as
-// every other seam this client uses (`__wenilla_env`, `__wenilla_packs`, `__wenilla_progress`,
-// `__wenilla_boottrace`). No wasm-bindgen import, so this stays an ordinary script that the Rust
+// **Page contract: `window.__wow_threads`** — a plain global with one method, the same shape as
+// every other seam this client uses (`__wow_env`, `__wow_packs`, `__wow_progress`,
+// `__wow_boottrace`). No wasm-bindgen import, so this stays an ordinary script that the Rust
 // side reaches through `Reflect`.
 //
 // **A page that never calls `installThreads()` still runs.** Rust then finds no bridge, every pool
@@ -61,7 +61,7 @@ function startPageCensus() {
 /// `init()` and a spawner that arrives afterwards has nothing left to spawn for.
 export function installThreads() {
   if (new URLSearchParams(location.search).get('nothreads') === '1') {
-    console.warn('wenilla: ?nothreads=1 — task pools will come up with no workers (serial).');
+    console.warn('wow: ?nothreads=1 — task pools will come up with no workers (serial).');
     return;
   }
   if (!self.crossOriginIsolated) {
@@ -69,16 +69,16 @@ export function installThreads() {
     // instantiate at all without isolation, so `boot.js` will say so with a better message in a
     // moment. Saying nothing would be worse — if this is a PLAIN build the page runs fine and the
     // absence of workers is expected, and this line is what tells the two cases apart.
-    console.warn('wenilla: page is not cross-origin isolated — no worker threads.');
+    console.warn('wow: page is not cross-origin isolated — no worker threads.');
     return;
   }
 
   let started = 0;
   let render = null;
   // `?rwtrace=1`: the page's animation frames for the render worker's timeline
-  // (`__wenilla_render_trace`): `[callback entry, frame time]`, both `timeOrigin + now()` in ms.
+  // (`__wow_render_trace`): `[callback entry, frame time]`, both `timeOrigin + now()` in ms.
   if (new URLSearchParams(location.search).get('rwtrace') === '1') {
-    const frames = (window.__wenilla_rwframes = []);
+    const frames = (window.__wow_rwframes = []);
     const raf = window.requestAnimationFrame.bind(window);
     window.requestAnimationFrame = (cb) =>
       raf((t) => {
@@ -92,7 +92,7 @@ export function installThreads() {
   if (CENSUS && new URLSearchParams(location.search).get('renderworker') === '0') {
     startPageCensus();
   }
-  window.__wenilla_threads = {
+  window.__wow_threads = {
     /// Start one pool thread. Returns true only if the Worker was constructed and given its work;
     /// anything else is false, and Rust takes its closure back rather than leaking it.
     spawn(name, ptr, stackSize, module, memory) {
@@ -111,7 +111,7 @@ export function installThreads() {
         worker.onerror = (e) => {
           const mib = Math.round(memory.buffer.byteLength / 1048576);
           console.error(
-            `wenilla: thread worker "${name}" failed (linear memory ${mib} MiB) —`,
+            `wow: thread worker "${name}" failed (linear memory ${mib} MiB) —`,
             e.message || e,
           );
         };
@@ -119,7 +119,7 @@ export function installThreads() {
         started += 1;
         return true;
       } catch (e) {
-        console.error('wenilla: could not start a thread worker —', e);
+        console.error('wow: could not start a thread worker —', e);
         return false;
       }
     },
@@ -140,7 +140,7 @@ export function installThreads() {
         worker.onerror = (e) => {
           const mib = Math.round(memory.buffer.byteLength / 1048576);
           console.error(
-            `wenilla: the render worker failed (linear memory ${mib} MiB) —`,
+            `wow: the render worker failed (linear memory ${mib} MiB) —`,
             e.message || e,
           );
         };
@@ -148,7 +148,7 @@ export function installThreads() {
         // and errors here, and the guard acts on them as on its own.
         worker.onmessage = (e) => {
           const msg = e.data || {};
-          const gpu = window.__wenilla_gpu;
+          const gpu = window.__wow_gpu;
           if (msg.gpu === 'lost') gpu?.deviceLost?.(msg);
           else if (msg.gpu === 'error') gpu?.deviceError?.(msg.kind || '');
           else if (msg.census) printCensus('worker', msg.census);
@@ -158,7 +158,7 @@ export function installThreads() {
           offscreen,
         ]);
       } catch (e) {
-        console.error('wenilla: could not start the render worker —', e);
+        console.error('wow: could not start the render worker —', e);
         worker?.terminate();
         return false;
       }
@@ -175,7 +175,7 @@ export function installThreads() {
 
     /// How many workers were handed out. Read by nothing; here because "did threads actually
     /// happen" is the first question of every performance report about this build, and the answer
-    /// should not require a debugger. `__wenilla_threads.started()` in the console.
+    /// should not require a debugger. `__wow_threads.started()` in the console.
     started: () => started,
   };
 }
