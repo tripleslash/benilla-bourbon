@@ -167,9 +167,56 @@ pub(crate) struct UiQuads {
     /// The append lane as of the last rebuild.
     last_overlays: Vec<UiQuad>,
     pub dirty: bool,
+    /// Base-lane quads whose colour alone changed since the last rebuild, by index, with the new
+    /// colour: the extract's answer to a frame that moved nothing but a tint (a pulsing glow).
+    /// [`rebuild_ui_mesh`] writes them into the pooled runs without a rebuild; `dirty` wins.
+    pub colour_patch: Vec<(usize, [f32; 4])>,
 }
 
 impl UiQuad {
+    /// Equal in everything but [`Self::color`], with no corner colours on either side: a change
+    /// the pooled runs can take as a colour patch, since each of its four vertices then carries
+    /// `color` (a clip's reprojection of one colour is that colour). Destructured, so a new field
+    /// is a compile error here until it is compared.
+    pub(crate) fn eq_but_colour(&self, o: &Self) -> bool {
+        let UiQuad {
+            rect,
+            z_key,
+            texture,
+            uv,
+            color: _,
+            corner_colors,
+            blend,
+            circular,
+            desaturated,
+            premultiplied,
+            gamma_texel,
+            alpha_test,
+            uv_clamp,
+            clip,
+            rotation,
+            mask,
+            corners,
+        } = self;
+        corner_colors.is_none()
+            && o.corner_colors.is_none()
+            && *rect == o.rect
+            && *z_key == o.z_key
+            && *texture == o.texture
+            && *uv == o.uv
+            && *blend == o.blend
+            && *circular == o.circular
+            && *desaturated == o.desaturated
+            && *premultiplied == o.premultiplied
+            && *gamma_texel == o.gamma_texel
+            && *alpha_test == o.alpha_test
+            && *uv_clamp == o.uv_clamp
+            && *clip == o.clip
+            && *rotation == o.rotation
+            && *mask == o.mask
+            && *corners == o.corners
+    }
+
     /// The screen-space move taking `base` to `self` when that is all that changed: every other
     /// field equal and the rect the same size to [`PAN_SIZE_EPS`] (a rect rebuilt about a moving
     /// centre drifts in its last bits). A clipped or cornered quad never qualifies, as its
@@ -701,6 +748,12 @@ struct BatchPools {
     /// The append lane as of the last rebuild, and per entry its slot when it is a run alone.
     overlay_base: Vec<UiQuad>,
     overlay_slot: Vec<Option<u32>>,
+    /// Per slot: each vertex's own colour as the quads asked, before a one-colour run moves it
+    /// onto the tag; the colour patch edits these.
+    src_colors: Vec<Vec<[f32; 4]>>,
+    /// Base-lane quad index to its slot and first vertex, from the last rebuild; `None` for a quad
+    /// clipped to nothing.
+    quad_map: Vec<Option<(u32, u32)>>,
     /// The window size, scale factor and interface stretch the last rebuild mapped to world space
     /// with.
     screen: (Vec2, f32, f32),
@@ -793,6 +846,64 @@ fn retire_batches(pools: &mut BatchPools, commands: &mut Commands) {
     pools.slot_base.clear();
     pools.overlay_base.clear();
     pools.overlay_slot.clear();
+    pools.src_colors.clear();
+    pools.quad_map.clear();
+}
+
+/// Write a colour-only change into the pooled runs, no rebuild: each patched quad's four vertex
+/// colours, then per touched slot the same one-colour split a rebuild makes, so a run that stays
+/// one colour changes only its tag and any other rewrites only its colour attribute.
+fn apply_colour_patch(
+    pools: &mut BatchPools,
+    meshes: &mut Assets<Mesh>,
+    commands: &mut Commands,
+    patch: &[(usize, [f32; 4])],
+) {
+    let mut touched: Vec<usize> = Vec::new();
+    for &(i, color) in patch {
+        let Some(&Some((slot, vertex))) = pools.quad_map.get(i) else {
+            continue; // clipped to nothing: no vertex holds it
+        };
+        let (slot, vertex) = (slot as usize, vertex as usize);
+        let Some(src) = pools.src_colors.get_mut(slot) else {
+            continue;
+        };
+        if let Some(quad) = src.get_mut(vertex..vertex + 4) {
+            quad.fill(color);
+            touched.push(slot);
+        }
+    }
+    touched.sort_unstable();
+    touched.dedup();
+    for slot in touched {
+        let src = &pools.src_colors[slot];
+        let one_colour = src
+            .first()
+            .filter(|&&c| src.iter().all(|&o| o == c))
+            .copied();
+        let tag = tint_tag(one_colour.unwrap_or([1.0; 4]));
+        let colors = match one_colour {
+            Some(_) => vec![[1.0; 4]; src.len()],
+            None => src.clone(),
+        };
+        if let Some(stored) = pools.stored.get_mut(slot) {
+            if stored.colors != colors {
+                stored.colors.clone_from(&colors);
+                let handle = pools.meshes.get(slot).filter(|_| !ui_mesh_frozen());
+                if let Some(mut mesh) = handle.and_then(|h| meshes.get_mut(h)) {
+                    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+                }
+            }
+        }
+        if pools.tags.get(slot).copied().flatten() != Some(tag) {
+            if let Some(t) = pools.tags.get_mut(slot) {
+                *t = Some(tag);
+            }
+            if let Some(&entity) = pools.entities.get(slot) {
+                commands.entity(entity).insert(MeshTag(tag));
+            }
+        }
+    }
 }
 
 /// The overlay pan: when the append lane differs from the last rebuild's only by quads that each
@@ -957,8 +1068,14 @@ fn rebuild_ui_mesh(
         if q.overlays != q.last_overlays {
             q.last_overlays.clone_from(&q.overlays);
         }
+        if !q.colour_patch.is_empty() {
+            let patch = std::mem::take(&mut q.colour_patch);
+            apply_colour_patch(&mut pools, meshes, &mut commands, &patch);
+        }
         return;
     }
+    // A rebuild writes every colour from the quads themselves.
+    q.colour_patch.clear();
     // `WOW_UI_DIFF=1`: names what re-triggered the rebuild, the base lane's dirty flag or the
     // first differing overlay quad.
     if *UI_DIFF {
@@ -1027,6 +1144,16 @@ fn rebuild_ui_mesh(
             .contains(&at)
             .then(|| (at as usize - q.overlays.as_ptr() as usize) / std::mem::size_of::<UiQuad>())
     };
+    // A base quad's index in its lane, the same way.
+    let base_at = |p: &UiQuad| {
+        let at = std::ptr::from_ref(p);
+        q.quads
+            .as_ptr_range()
+            .contains(&at)
+            .then(|| (at as usize - q.quads.as_ptr() as usize) / std::mem::size_of::<UiQuad>())
+    };
+    // Base quad → (run, first vertex), turned into slots once the empty runs are dropped.
+    let mut placed: Vec<Option<(u32, u32)>> = vec![None; q.quads.len()];
     // Per run: its quad count, and the one overlay when that is the whole run.
     let mut run_members: Vec<(u32, Option<usize>)> = Vec::new();
     let us_sort = lap();
@@ -1095,6 +1222,12 @@ fn rebuild_ui_mesh(
             m.0 += 1;
             m.1 = if m.0 == 1 { overlay_at(q) } else { None };
         }
+        if let Some(i) = base_at(q) {
+            placed[i] = Some((
+                (runs.len() - 1) as u32,
+                runs.last().map_or(0, |r| r.positions.len()) as u32,
+            ));
+        }
         let run = runs.last_mut().unwrap();
         match (q.corners, plain) {
             (Some(c), _) => {
@@ -1129,10 +1262,12 @@ fn rebuild_ui_mesh(
     let mut used = 0usize;
     let mut n_rewrites = 0usize;
     let mut overlay_slots: Vec<Option<u32>> = vec![None; q.overlays.len()];
+    let mut run_slot: Vec<Option<u32>> = vec![None; runs.len()];
     for (i, run) in runs.into_iter().enumerate() {
         if run.indices.is_empty() {
             continue;
         }
+        run_slot[i] = Some(used as u32);
         let z = -450.0 + (i as f32 / run_count) * 900.0;
         let scale = window.scale_factor();
         let (mask_rect, mask) = match &run.mask {
@@ -1179,6 +1314,10 @@ fn rebuild_ui_mesh(
             .filter(|&&c| run.colors.iter().all(|&o| o == c))
             .copied();
         let tag = tint_tag(one_colour.unwrap_or([1.0; 4]));
+        while pools.src_colors.len() <= used {
+            pools.src_colors.push(Vec::new());
+        }
+        pools.src_colors[used].clone_from(&run.colors);
         let colors = match one_colour {
             Some(_) => vec![[1.0; 4]; run.colors.len()],
             None => run.colors,
@@ -1361,6 +1500,11 @@ fn rebuild_ui_mesh(
     pools.stored.truncate(used);
     pools.offsets.truncate(used);
     pools.slot_base.truncate(used);
+    pools.src_colors.truncate(used);
+    pools.quad_map = placed
+        .into_iter()
+        .map(|p| p.and_then(|(run, vertex)| run_slot[run as usize].map(|slot| (slot, vertex))))
+        .collect();
     pools.overlay_slot = overlay_slots;
     pools.overlay_base.clone_from(&q.overlays);
     pools.screen = (
@@ -1426,6 +1570,90 @@ mod tests {
             Vec2::new(1409.0, 1332.0),
         ] {
             assert!(!accepts(out, vp), "{out:?} is not on screen");
+        }
+    }
+
+    /// Each batch's colour attribute and tag, in slot (z) order.
+    fn batch_paint(app: &mut App) -> Vec<(Vec<[f32; 4]>, u32, f32)> {
+        let rows: Vec<(Handle<Mesh>, u32, f32)> = app
+            .world_mut()
+            .query_filtered::<(&Mesh2d, &MeshTag, &Transform), With<UiQuadBatch>>()
+            .iter(app.world())
+            .map(|(m, t, tf)| (m.0.clone(), t.0, tf.translation.z))
+            .collect();
+        let meshes = app.world().resource::<Assets<Mesh>>();
+        let mut rows: Vec<(Vec<[f32; 4]>, u32, f32)> = rows
+            .into_iter()
+            .map(|(h, tag, z)| {
+                let colors = match meshes
+                    .get(&h)
+                    .and_then(|m| m.attribute(Mesh::ATTRIBUTE_COLOR))
+                {
+                    Some(bevy::mesh::VertexAttributeValues::Float32x4(c)) => c.clone(),
+                    _ => Vec::new(),
+                };
+                (colors, tag, z)
+            })
+            .collect();
+        rows.sort_by(|a, b| a.2.total_cmp(&b.2));
+        rows
+    }
+
+    /// A colour-only frame patches the pooled runs to exactly what a rebuild of the same quads
+    /// paints: a mixed run turning one colour moves onto the tag, and back.
+    #[test]
+    fn a_colour_patch_paints_what_a_rebuild_paints() {
+        let red = [1.0, 0.0, 0.0, 1.0];
+        let green = [0.0, 1.0, 0.0, 0.5];
+        let quads_with = |colors: [[f32; 4]; 3]| -> Vec<UiQuad> {
+            colors
+                .iter()
+                .enumerate()
+                .map(|(i, &color)| UiQuad {
+                    rect: Rect::new(i as f32 * 40.0, 0.0, i as f32 * 40.0 + 32.0, 32.0),
+                    z_key: i as u128,
+                    color,
+                    ..default()
+                })
+                .collect()
+        };
+        let fresh = |colors| {
+            let mut app = rebuild_app();
+            let mut q = app.world_mut().resource_mut::<UiQuads>();
+            q.quads = quads_with(colors);
+            q.dirty = true;
+            app.update();
+            batch_paint(&mut app)
+        };
+        let mut app = rebuild_app();
+        {
+            let mut q = app.world_mut().resource_mut::<UiQuads>();
+            q.quads = quads_with([red, red, green]);
+            q.dirty = true;
+        }
+        app.update();
+        for (step, colors) in [[red, red, red], [red, green, red], [green, green, green]]
+            .into_iter()
+            .enumerate()
+        {
+            {
+                let mut q = app.world_mut().resource_mut::<UiQuads>();
+                let patch: Vec<(usize, [f32; 4])> = colors
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, c)| q.quads[*i].color != **c)
+                    .map(|(i, c)| (i, *c))
+                    .collect();
+                for &(i, c) in &patch {
+                    q.quads[i].color = c;
+                }
+                q.colour_patch = patch;
+                assert!(!q.dirty);
+            }
+            app.update();
+            // The tag lands through a command, applied at the frame's end.
+            app.update();
+            assert_eq!(batch_paint(&mut app), fresh(colors), "step {step}");
         }
     }
 
