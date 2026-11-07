@@ -1066,12 +1066,13 @@ const BODY_RIPPLE_SHADE: f32 = 0.2;
 // fork: **the caustic net** (the benilla-watershader fork's lens estimate). A ray of the sun entering
 // the surface at `x` lands on a bed `D` deep along its refracted path at `x + D·κ·∇h(x)`, κ = 1 − 1/n,
 // so the bed's irradiance is the sun's over |det(I + D·κ·H)|, `H` the surface's Hessian. The lenses
-// are two sets of six analytic ripples, a fine one (1.2-0.5 yd) sharp in the first yard or two and a
+// are two sets of eight analytic ripples, a fine one (1.6-0.65 yd) sharp in the first yard or two and a
 // coarse one (3.8-1.8 yd) focusing `CAUSTIC_COARSE` times deeper, laid on the wind's headings at the
-// swell's deep-water pace so the net moves with the water. Six plane waves alone tile the bed with a
-// crystal lattice, so each ripple's wavefronts wander along its heading and its strength sways, both
-// by its own mix of the slow noise volume (`caustic_wobble`); the wander's slope stays near a tenth,
-// so the Hessian keeps the unwarped heading. The intensity is regularised
+// swell's deep-water pace, alternate ripples running opposite ways so the net shimmers in place
+// rather than reading as a current. A few plane waves alone tile the bed with
+// a crystal lattice, so each ripple's wavefronts wander along its heading and its strength sways, both
+// by its own mix of the slow noise volume (`caustic_wobble`) over cells under two wavelengths wide;
+// the wander's slope stays near a quarter, so the Hessian keeps the unwarped heading. The intensity is regularised
 // (`CAUSTIC_EPS`) and divided by its mean at that depth, so only the sun's direct share is
 // redistributed and the bed keeps its energy; neither set is drawn past its sharpest, where it would
 // break into speckle, and each ripple fades as the bed's pixel footprint nears its wavelength.
@@ -1094,20 +1095,24 @@ const CAUSTIC_TURB: f32 = 0.6;
 /// of it wide, so under 8 px it would alias, and at 16 it draws whole.
 const CAUSTIC_RIPPLE_PX: vec2<f32> = vec2<f32>(8.0, 16.0);
 /// The noise volume's frequency (repeats per yd) under the fine set's wander, and the coarse set's:
-/// its coarsest cells are a quarter of a repeat, 2.5 and 5.5 yd.
-const CAUSTIC_WOBBLE_FREQ: vec2<f32> = vec2<f32>(0.1, 0.045);
+/// its coarsest cells are a quarter of a repeat, 1.8 and 4.2 yd.
+const CAUSTIC_WOBBLE_FREQ: vec2<f32> = vec2<f32>(0.14, 0.06);
 /// How far (yd) a ripple's wavefronts wander along its heading per unit of its noise mix, fine and
-/// coarse: a few radians of phase on the shortest ripple of each set.
-const CAUSTIC_WANDER_YD: vec2<f32> = vec2<f32>(0.3, 0.7);
+/// coarse: several radians of phase on the shortest ripple of each set.
+const CAUSTIC_WANDER_YD: vec2<f32> = vec2<f32>(0.5, 1.0);
 /// How far a ripple's strength sways per unit of its noise mix, about `0.85`, capped at 1 so no
 /// patch is drawn past the set's sharpest.
-const CAUSTIC_SWAY: f32 = 0.3;
+const CAUSTIC_SWAY: f32 = 0.4;
+/// Ripples per set; each one's curvature is scaled by `sqrt(6 / N)` so the set's rms curvature, and
+/// with it the fit `caustic_mean` reads, stays the six-ripple set's.
+const CAUSTIC_RIPPLES: u32 = 8u;
 
 /// The signed noise (about ±1 at its extremes) that bends one set's ripples at world `p`: the
-/// volume's three independent channels, drifting downwind and morphing slowly through its slices.
+/// volume's three independent channels, fixed on the bed and morphing slowly through its slices (a
+/// drift would carry the whole net one way).
 fn caustic_wobble(p: vec2<f32>, t: f32, coarse: bool) -> vec3<f32> {
     let f = select(CAUSTIC_WOBBLE_FREQ.x, CAUSTIC_WOBBLE_FREQ.y, coarse);
-    let uv = (p - sunshadow::wind_dir() * (t * 0.15)) * f + select(vec2<f32>(0.0), vec2<f32>(0.37, 0.71), coarse);
+    let uv = p * f + select(vec2<f32>(0.0), vec2<f32>(0.37, 0.71), coarse);
     let slice = fract(t * 0.004 + select(0.0, 0.5, coarse));
     let n = textureSampleLevel(noise_vol, art_samp, vec3<f32>(uv, slice), 0.0).rgb;
     return (n - vec3<f32>(0.5)) * 4.0;
@@ -1119,26 +1124,32 @@ fn caustic_hessian(p: vec2<f32>, t: f32, foot: f32, coarse: bool, s: vec3<f32>) 
     let wd = sunshadow::wind_dir();
     let wander_yd = select(CAUSTIC_WANDER_YD.x, CAUSTIC_WANDER_YD.y, coarse);
     var h = vec4<f32>(0.0);
-    for (var i = 0u; i < 6u; i = i + 1u) {
+    let n = f32(CAUSTIC_RIPPLES);
+    let curv = CAUSTIC_CURV * sqrt(6.0 / n);
+    for (var i = 0u; i < CAUSTIC_RIPPLES; i = i + 1u) {
         let fi = f32(i);
         // Geometric steps with an irrational jitter, so no two ripples beat in a simple ratio.
         let jitter = 1.0 + 0.09 * sin(fi * 5.1 + select(0.7, 2.3, coarse));
-        let wl = select(1.2 * exp2(-fi * 0.26), 3.8 * exp2(-fi * 0.22), coarse) * jitter;
-        // Headings scattered by the golden angle about the wind, every side reached.
-        let turn = 6.2831853 * fract(fi * 0.618034 + select(0.13, 0.41, coarse));
+        let wl = select(1.6 * exp2(-fi * 0.186), 3.8 * exp2(-fi * 0.154), coarse) * jitter;
+        // Headings scattered by the golden ratio over the half circle downwind: a ripple's Hessian is
+        // the same either way along it, so over the full circle the eight would pair up.
+        let turn = 3.14159265 * (fract(fi * 0.618034 + select(0.13, 0.41, coarse)) - 0.5);
         let d = vec2<f32>(wd.x * cos(turn) - wd.y * sin(turn), wd.x * sin(turn) + wd.y * cos(turn));
         let k = 6.2831853 / wl;
         let omega = sqrt(10.7 * k) * RIPPLE_PACE;
         // Each ripple's own mix of the three noise channels: one for its wander, one for its sway.
         let b = vec3<f32>(sin(fi * 2.1 + 0.4), sin(fi * 3.7 + 1.9), sin(fi * 5.3 + 3.1));
         let wander = dot(s, b) * wander_yd;
-        let sway = clamp(0.85 + CAUSTIC_SWAY * dot(s, b.zxy), 0.45, 1.0);
+        let sway = clamp(0.85 + CAUSTIC_SWAY * dot(s, b.zxy), 0.35, 1.0);
         let keep = smoothstep(CAUSTIC_RIPPLE_PX.x, CAUSTIC_RIPPLE_PX.y, wl / max(foot, 1e-5)) * sway;
-        let phase = (dot(d, p) + wander) * k - omega * t + fi * 2.39996 + select(0.0, 1.1, coarse);
-        let c = -sin(phase) * CAUSTIC_CURV * keep;
+        // Odd ripples run upwind: the golden-ratio headings split the half circle evenly between the
+        // two parities, so the net's travel cancels.
+        let run = select(1.0, -1.0, (i & 1u) == 1u);
+        let phase = (dot(d, p) + wander) * k - run * omega * t + fi * 2.39996 + select(0.0, 1.1, coarse);
+        let c = -sin(phase) * curv * keep;
         h = h + vec4<f32>(c * d.x * d.x, c * d.y * d.y, c * d.x * d.y, keep * keep);
     }
-    return vec4<f32>(h.xyz, h.w / 6.0);
+    return vec4<f32>(h.xyz, h.w / n);
 }
 
 /// The regularised intensity's mean over the pattern at focus ratio `rho`: a rational fit, within 11 %
