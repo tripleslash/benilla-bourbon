@@ -280,12 +280,14 @@ impl Default for VideoConfig {
             // baseline. `worldShadows` registers "1" to match, and the two are welded by
             // `cvars::tests`.
             world_shadows: true,
-            display: if windowed_env() {
+            // fork: desktop — a native client's registered `gxWindow`/`gxMaximize` are "1",
+            // borderless over the monitor; a run that sizes its own window stays unmaximized.
+            display: if windowed_env() || cfg!(not(target_arch = "wasm32")) {
                 DisplayMode::Windowed
             } else {
                 DisplayMode::default()
             },
-            maximize: false,
+            maximize: cfg!(not(target_arch = "wasm32")) && !windowed_env(),
             windowed: DEFAULT_WINDOWED,
         }
     }
@@ -1373,51 +1375,47 @@ mod tests {
         );
     }
 
-    /// The window is born in the mode its rows register at on this locale, a stored value over
-    /// that, and a run that sizes its own window over both. zhCN registers windowed and maximized
-    /// (`0x63a738`), which is borderless over the monitor; every other locale registers
-    /// fullscreen ([`fullscreen_mode`]: exclusive on Windows, the same borderless window
-    /// elsewhere). A stored "0" for `gxMaximize` leaves zhCN windowed where another locale stays
-    /// fullscreen.
+    /// The window is born in the mode its rows register at, a stored value over that, and a run
+    /// that sizes its own window over both. fork: desktop — a native client registers windowed
+    /// and maximized on every locale (zhCN's pair in the reference, `0x63a738`), borderless over
+    /// the monitor. A stored "0" for `gxMaximize` leaves it windowed.
     #[test]
-    fn the_window_is_born_at_the_locales_registered_modes() {
+    fn the_window_is_born_at_the_registered_modes() {
         let none = |_: &str| None;
-        let fullscreen = fullscreen_mode(MonitorSelection::Primary);
+        let borderless = WindowMode::BorderlessFullscreen(MonitorSelection::Primary);
         for locale in 0..8 {
-            let registered = if locale == 4 {
-                WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
-            } else {
-                fullscreen
-            };
             assert_eq!(
                 boot_window_mode_for(|| locale, none, false),
-                registered,
+                borderless,
                 "locale {locale}"
             );
         }
-        // zhCN with the player's stored windowed, unmaximized choice.
+        // The player's stored windowed, unmaximized choice.
         let stored = |name: &str| match name {
             "gxWindow" => Some("1".to_string()),
             "gxMaximize" => Some("0".to_string()),
             _ => None,
         };
-        assert_eq!(
-            boot_window_mode_for(|| 4, stored, false),
-            WindowMode::Windowed
-        );
-        assert_eq!(
-            boot_window_mode_for(|| 0, stored, false),
-            WindowMode::Windowed
-        );
-        // The player un-maximizes only the maximize row: zhCN's windowed default then stands
-        // unmaximized, enUS's fullscreen default stands fullscreen.
+        for locale in [4, 0] {
+            assert_eq!(
+                boot_window_mode_for(|| locale, stored, false),
+                WindowMode::Windowed
+            );
+        }
+        // The player un-maximizes only the maximize row: the windowed default then stands
+        // unmaximized.
         let unmaximized = |name: &str| (name == "gxMaximize").then(|| "0".to_string());
         assert_eq!(
-            boot_window_mode_for(|| 4, unmaximized, false),
+            boot_window_mode_for(|| 0, unmaximized, false),
             WindowMode::Windowed
         );
-        assert_eq!(boot_window_mode_for(|| 0, unmaximized, false), fullscreen);
-        // An instrumented run stays windowed whatever the locale registers.
+        // The player's stored fullscreen is the exclusive mode on Windows.
+        let fullscreen = |name: &str| (name == "gxWindow").then(|| "0".to_string());
+        assert_eq!(
+            boot_window_mode_for(|| 0, fullscreen, false),
+            fullscreen_mode(MonitorSelection::Primary)
+        );
+        // An instrumented run stays windowed whatever the rows register.
         assert_eq!(boot_window_mode_for(|| 4, none, true), WindowMode::Windowed);
     }
 

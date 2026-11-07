@@ -1764,9 +1764,10 @@ mod tests {
         }
     }
 
-    /// The three register sites that pick their default by locale (`0x603368`, `0x63a738`), at
-    /// all eight indices: AutoInteract is "1" on koKR (1) alone, violenceLevel "1" there and "2" elsewhere, gxWindow and gxMaximize "1" on
-    /// zhCN (4) alone, and every other row boots the same on every locale. The table and `Cvars`
+    /// The register sites that pick their default by locale (`0x603368`), at all eight indices:
+    /// AutoInteract is "1" on koKR (1) alone, violenceLevel "1" there and "2" elsewhere, and every
+    /// other row boots the same on every locale. fork: desktop — gxWindow and gxMaximize, "1" on
+    /// zhCN alone in the reference (`0x63a738`), are "1" on every locale here. The table and `Cvars`
     /// agree at each index, and the default the registry restores is the locale's.
     #[test]
     fn the_locale_dependent_defaults_hold_at_every_index() {
@@ -1781,8 +1782,6 @@ mod tests {
         // `violenceLevel` is the locale's cap, koKR's "1" (`0x86c3f8`) and "2" elsewhere.
         let on_at = [
             ("AutoInteract", 1, "1", "0"),
-            ("gxWindow", 4, "1", "0"),
-            ("gxMaximize", 4, "1", "0"),
             ("violenceLevel", 1, "1", "2"),
         ];
         for locale in 0..8 {
@@ -1825,27 +1824,24 @@ mod tests {
                 res::<crate::player::Approach>(&app).enabled,
             )
         };
-        use crate::video::DisplayMode::{Fullscreen, Windowed};
-        assert_eq!(boot(0), (Fullscreen, false, false), "enUS");
-        assert_eq!(boot(1), (Fullscreen, false, true), "koKR: Click-to-Move");
-        assert_eq!(
-            boot(4),
-            (Windowed, true, false),
-            "zhCN: windowed and maximized"
-        );
-        assert_eq!(boot(5), (Fullscreen, false, false), "zhTW is not zhCN");
+        // fork: desktop — windowed and maximized on every locale.
+        use crate::video::DisplayMode::Windowed;
+        assert_eq!(boot(0), (Windowed, true, false), "enUS");
+        assert_eq!(boot(1), (Windowed, true, true), "koKR: Click-to-Move");
+        assert_eq!(boot(4), (Windowed, true, false), "zhCN");
+        assert_eq!(boot(5), (Windowed, true, false), "zhTW");
     }
 
     /// A session-owned row stays the session's: the announce does not overwrite the value an
     /// instrumented run pinned.
     #[test]
     fn a_session_owned_row_is_not_announced() {
-        let mut cvars = Cvars::for_locale(4);
-        cvars.own_for_session("gxWindow", Some("0"));
+        let mut cvars = Cvars::for_locale(1);
+        cvars.own_for_session("AutoInteract", Some("0"));
         cvars.announce_locale_defaults();
         let names: Vec<_> = cvars.take_events().into_iter().map(|e| e.name).collect();
-        assert_eq!(names, ["gxMaximize"]);
-        assert_eq!(cvars.get("gxWindow"), Some("0"));
+        assert_eq!(names, ["violenceLevel"]);
+        assert_eq!(cvars.get("AutoInteract"), Some("0"));
     }
 
     #[test]
@@ -1867,7 +1863,10 @@ mod tests {
                 "frillDensity",
                 "gxColorBits",
                 "gxDepthBits",
+                // fork: desktop — borderless over the monitor by default.
+                "gxMaximize",
                 "gxResolution",
+                "gxWindow",
                 // fork: terrain chunk LOD switches at 500 yd, the far clip being 1000.
                 "lodDist",
                 "realmList",
@@ -2148,17 +2147,17 @@ mod tests {
         let outcome = app
             .world_mut()
             .resource_mut::<Cvars>()
-            .set("gxMaximize", "1");
+            .set("gxMaximize", "0");
         assert_eq!(outcome, SetOutcome::Staged);
         let events = app.world_mut().resource_mut::<Cvars>().take_events();
         assert!(events.is_empty(), "a staged write fires no callback");
-        assert!(!res::<VideoConfig>(&app).maximize);
+        assert!(res::<VideoConfig>(&app).maximize);
         assert_eq!(app.world_mut().resource_mut::<Cvars>().commit_latched(), 1);
         let events = app.world_mut().resource_mut::<Cvars>().take_events();
         for event in events {
             app.world_mut().trigger(event);
         }
-        assert!(res::<VideoConfig>(&app).maximize, "the commit applies it");
+        assert!(!res::<VideoConfig>(&app).maximize, "the commit applies it");
     }
 
     /// A move marks only the knob its callback writes: the other callbacks see the event but take
@@ -3691,10 +3690,8 @@ mod tests {
         set_rx.recv().unwrap();
         go_tx.send(()).unwrap();
         let app = cvar_app();
-        assert_eq!(
-            res::<VideoConfig>(&app).display,
-            crate::video::DisplayMode::Fullscreen
-        );
+        // fork: desktop — the attended default is maximized, a windowed run's is not.
+        assert!(res::<VideoConfig>(&app).maximize);
         drop(app);
         capture.join().unwrap();
     }

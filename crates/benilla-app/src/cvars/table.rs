@@ -682,8 +682,22 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // (`0x63a865`-`0x63a86c`). The knob is [`crate::video::VideoConfig::display`]. Deviation: off
     // Windows "0" raises a borderless fullscreen window instead of mode-setting the display,
     // because Wayland and macOS offer no mode-set and X11's leaves the desktop changed after a
-    // crash; on Windows it is exclusive at the current mode ([`crate::video`]).
-    same_by_locale("gxWindow", "0", &[(ZH_CN, "1")]).latched(),
+    // crash; on Windows it is exclusive at the current mode ([`crate::video`]). fork: desktop — a
+    // native client boots windowed and, with `gxMaximize`, borderless over the monitor, on every
+    // locale (zhCN's own registered pair); the web build keeps the reference's rows.
+    if cfg!(target_arch = "wasm32") {
+        same_by_locale("gxWindow", "0", &[(ZH_CN, "1")]).latched()
+    } else {
+        deviates(
+            "gxWindow",
+            "1",
+            "0",
+            "with gxMaximize, boots borderless over the monitor (the maintainer's call): alt-tab \
+             and a second monitor work without a mode switch, and exclusive fullscreen buys \
+             nothing through a modern compositor",
+        )
+        .latched()
+    },
     // `gxResolution` (`0x63a7c1`, "640x480", flags 3, callback `0x63aa00`), a string row parsed by
     // `video::on_cvar` into the windowed size. In fullscreen it answers the borderless window's
     // device pixels, the size the screen runs at, over that windowed size, which is what it saves
@@ -913,8 +927,19 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `gxMaximize` (`0x63a8e0`: name `0x864edc`, "0" but "1" on zhCN like `gxWindow`
     // (`0x63a8b9`-`0x63a8c3`), callback `0x63b1f0` → `+0x09` `[0xc4eba1]`): the window rebuild `0x58cf10` makes a windowed, maximized
     // window a borderless popup (style `0x90000000`) at the screen's full size (`GetSystemMetrics`
-    // 0 and 1). The knob is [`crate::video::VideoConfig::maximize`].
-    same_by_locale("gxMaximize", "0", &[(ZH_CN, "1")]).latched(),
+    // 0 and 1). The knob is [`crate::video::VideoConfig::maximize`]. fork: desktop — "1" on a
+    // native client, with `gxWindow`'s.
+    if cfg!(target_arch = "wasm32") {
+        same_by_locale("gxMaximize", "0", &[(ZH_CN, "1")]).latched()
+    } else {
+        deviates(
+            "gxMaximize",
+            "1",
+            "0",
+            "with gxWindow, boots borderless over the monitor (the maintainer's call)",
+        )
+        .latched()
+    },
     // `gxTripleBuffer` (`0x63a80d`: name `0x864f88`, "0", callback `0x63afe0` → `+0x18`), whose
     // callback refuses any value but 0 or 1 ("TripleBuffer must be 0 or 1", `0x8650b8`). No effect
     // here: wgpu's present modes offer no triple-buffer choice.
