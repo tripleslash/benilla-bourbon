@@ -718,15 +718,20 @@
             },
         }
 
-        -- fork: desktop — a native client's display rows close the Display section, after Gamma;
-        -- the web build's page owns the window and lists none of them (the rows stay hidden).
-        if ( BENILLA_NATIVE ) then
+        -- fork: desktop — the display rows close the Display section, after Gamma: Multisampling
+        -- on every build, Display Mode and Resolution on a native client only, as the web
+        -- build's page owns its window (those two rows stay hidden there).
+        do
             local graphics = BENILLA_OPTIONS_PAGE_ROWS.Graphics
             for i, rkey in ipairs(graphics) do
                 if ( rkey == "RowGamma" ) then
-                    table.insert(graphics, i + 1, "RowDisplayMode")
-                    table.insert(graphics, i + 2, "RowResolution")
-                    table.insert(graphics, i + 3, "RowMultisample")
+                    if ( BENILLA_NATIVE ) then
+                        table.insert(graphics, i + 1, "RowDisplayMode")
+                        table.insert(graphics, i + 2, "RowResolution")
+                        table.insert(graphics, i + 3, "RowMultisample")
+                    else
+                        table.insert(graphics, i + 1, "RowMultisample")
+                    end
                     break
                 end
             end
@@ -2581,15 +2586,24 @@
                                                 if ( BENILLA_NATIVE ) then this:Show() end
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowMultisample" inherits="BenillaOptionsDropdownRowTemplate" hidden="true">
+                                        <!-- fork: shown on every build, under Gamma on the web
+                                             build and under the display rows on a native one. -->
+                                        <Frame name="$parentRowMultisample" inherits="BenillaOptionsDropdownRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowResolution" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowResolution" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowGamma" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowGamma" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
+                                                if ( BENILLA_NATIVE ) then
+                                                    local above = this:GetParent():GetName() .. "RowResolution"
+                                                    this:ClearAllPoints()
+                                                    this:SetPoint("TOPLEFT", above, "BOTTOMLEFT", 0, -9)
+                                                    this:SetPoint("TOPRIGHT", above, "BOTTOMRIGHT", 0, -9)
+                                                end
                                                 -- `gxMultisample`, a sample count the engine clamps
-                                                -- to the device's ceiling; 1 is none. The world
-                                                -- camera reads it as it spawns.
+                                                -- to the device's ceiling; 1 (Off) is the
+                                                -- reference's default. The world camera reads it
+                                                -- as it spawns.
                                                 BenillaOptionsRow_OnLoad(this, "gxMultisample", "Multisampling",
                                                     "BENILLA_TOOLTIP_MULTISAMPLE")
                                                 BenillaOptionsDropdownRow_Setup(this, {
@@ -2598,23 +2612,16 @@
                                                     { text = "4x", value = "4" },
                                                     { text = "8x", value = "8" },
                                                 })
-                                                if ( BENILLA_NATIVE ) then this:Show() end
                                             </OnLoad></Scripts>
                                         </Frame>
+                                        <!-- fork: under Multisampling, the Display section's last
+                                             row on every build, the section gap kept. -->
                                         <Frame name="$parentRowFarclip" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowGamma" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-33"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowGamma" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-33"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowMultisample" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-33"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowMultisample" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-33"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                -- fork: desktop — under the display rows where they
-                                                -- show, the section gap kept.
-                                                if ( BENILLA_NATIVE ) then
-                                                    local above = this:GetParent():GetName() .. "RowMultisample"
-                                                    this:ClearAllPoints()
-                                                    this:SetPoint("TOPLEFT", above, "BOTTOMLEFT", 0, -33)
-                                                    this:SetPoint("TOPRIGHT", above, "BOTTOMRIGHT", 0, -33)
-                                                end
                                                 BenillaOptionsRow_OnLoad(this, "farclip", "Terrain Distance",
                                                     "OPTION_TOOLTIP_FARCLIP")
                                                 local info = BenillaGraphicsSliderInfo(2)
@@ -4183,14 +4190,14 @@
                 -- clutter's own rows carry the ground cover.
                 ENVIRONMENT_DETAIL = 1,
             }
-            -- fork: desktop — the display mode, its resolution and multisampling are the page's
-            -- on the web build; a native client (`BENILLA_NATIVE`) has a window of its own to set
-            -- them on, through Turtle's own rows.
+            -- fork: desktop — the display mode and its resolution are the page's on the web
+            -- build; a native client (`BENILLA_NATIVE`) has a window of its own to set them on,
+            -- through Turtle's own rows. Multisampling stays on every build: it is the world
+            -- camera's, not the window's.
             if ( not BENILLA_NATIVE ) then
                 cut.RESOLUTION = 1
                 cut.WINDOWED_MODE = 1
                 cut.WINDOWED_MAXIMIZED = 1
-                cut.MULTISAMPLE = 1
             end
             for i = getn(GameOptions), 1, -1 do
                 local category = GameOptions[i]

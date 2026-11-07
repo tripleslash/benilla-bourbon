@@ -1340,6 +1340,7 @@ pub(crate) const GRAPHICS_CVARS: &[&str] = &[
     // fork: the hour the world's day and night are drawn at.
     "serverTimeOffset",
     "renderScale",
+    "gxMultisample",
     // fork: fsr (FORK.md)
     "frameGeneration",
     "rcasSharpness",
