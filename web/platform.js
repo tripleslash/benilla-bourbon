@@ -116,16 +116,19 @@ export function holdMouseNavigationButtons(target = window) {
 // fork: desktop — the "Desktop client" link: download `wow-reforged.exe`, which the site holds as
 // 24 MiB parts named by `wow-reforged.exe.parts.json` (scripts/split-parts.sh), read back by
 // `web/parts.js` as for the wasm module. The link stays hidden unless that manifest is found, so a
-// site without the exe (or `trunk serve`) shows nothing. A click fetches the parts, shows the
-// progress in the link's label, checks the byte count against the manifest and saves the joined
-// bytes as one file through a blob URL. `parts.js` is imported here, not at the top, so a page
-// without it loses only this link.
+// site without the exe (or `trunk serve`) shows nothing. A click fetches the parts, checks the
+// byte count against the manifest and saves the joined bytes as one file through a blob URL. The
+// browser only sees that last save, so its own download progress never shows the transfer: the
+// page's `progress` panel does (bar, MB so far of the total, percent, speed, time left, a cancel
+// button); without the panel the percent goes in the link's label. `parts.js` is imported here,
+// not at the top, so a page without it loses only this link.
 //
 // `focusTarget` (the canvas) gets focus back afterwards, for the reason `installFullscreenToggle`
 // gives.
 export async function installDesktopDownload(link, {
   manifest = 'wow-reforged.exe.parts.json',
   filename = 'wow-reforged.exe',
+  progress = null,
   focusTarget = null,
 } = {}) {
   if (!link) return;
@@ -134,26 +137,43 @@ export async function installDesktopDownload(link, {
   const manifestUrl = new URL(manifest, document.baseURI);
   // `no-cache`: the parts are rewritten in place under the same names by every build, and a part
   // from one build joined to another's would be a corrupt exe that only fails when it is run.
-  const init = { cache: 'no-cache' };
-  if (await fetchPartsManifest(manifestUrl, init)) link.hidden = false;
+  const noCache = { cache: 'no-cache' };
+  if (await fetchPartsManifest(manifestUrl, noCache)) link.hidden = false;
 
-  let busy = false;
+  const panel = desktopProgressPanel(progress, link, label, filename);
+  // The download in flight, or null. Cancel drops it at once: `fetchRetry` retries an aborted
+  // fetch through its backoff before it gives up, so its rejection may come seconds later, and by
+  // then a new click may own the panel.
+  let run = null;
+  panel.onCancel(() => {
+    if (!run) return;
+    run.abort();
+    run = null;
+    panel.hide();
+    focusTarget?.focus?.();
+  });
+
   link.addEventListener('click', async (e) => {
     e.preventDefault();
-    if (busy) return;
-    busy = true;
-    let failed = false;
+    if (run) return;
+    const me = new AbortController();
+    run = me;
+    const init = { ...noCache, signal: me.signal };
     try {
+      panel.start();
       const m = await fetchPartsManifest(manifestUrl, init);
+      if (run !== me) return;
       if (!m) throw new Error(`${manifest}: not found`);
-      const show = (got) => {
-        link.textContent = `${label} ${Math.min(100, Math.floor((got * 100) / m.bytes))}%`;
-      };
-      show(0);
-      const r = await readParts(manifestUrl, m, { init, onBytes: show });
+      panel.update(0, m.bytes);
+      const r = await readParts(manifestUrl, m, {
+        init,
+        onBytes: (got, total) => { if (run === me) panel.update(got, total); },
+      });
       if (!r.ok) throw new Error(`${r.url || manifest}: HTTP ${r.status}`);
       const blob = await r.blob();
+      if (run !== me) return;
       if (blob.size !== m.bytes) throw new Error(`got ${blob.size} B, the manifest says ${m.bytes} B`);
+      panel.done(blob.size);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -165,14 +185,118 @@ export async function installDesktopDownload(link, {
       // The save dialog reads the URL asynchronously; a minute is far past it.
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch (err) {
-      failed = true;
+      if (run !== me) return; // cancelled: the panel is already gone
       console.warn('desktop client download:', err);
-      link.textContent = `${label}: download failed`;
-      setTimeout(() => { link.textContent = label; }, 5_000);
+      panel.fail(err);
     } finally {
-      if (!failed) link.textContent = label;
-      busy = false;
-      focusTarget?.focus?.();
+      if (run === me) {
+        run = null;
+        focusTarget?.focus?.();
+      }
     }
   });
+}
+
+/// The download's progress UI: the page's `#desktop-progress` panel (index.html) when it has one,
+/// else the link's own label, as a page from before the panel had it.
+function desktopProgressPanel(root, link, label, filename) {
+  const mb = (b) => (b / (1024 * 1024)).toFixed(1);
+  const pctOf = (got, total) => (total > 0 ? Math.min(100, Math.floor((got * 100) / total)) : 0);
+  let hideTimer = 0;
+
+  if (!root) {
+    return {
+      onCancel() {},
+      start() { clearTimeout(hideTimer); link.textContent = `${label} 0%`; },
+      update(got, total) { link.textContent = `${label} ${pctOf(got, total)}%`; },
+      done() { link.textContent = label; },
+      fail() {
+        link.textContent = `${label}: download failed`;
+        hideTimer = setTimeout(() => { link.textContent = label; }, 5_000);
+      },
+      hide() { link.textContent = label; },
+    };
+  }
+
+  const title = root.querySelector('.title');
+  const bar = root.querySelector('.bar');
+  const fill = root.querySelector('.bar > i');
+  const data = root.querySelector('.data');
+  const cancel = root.querySelector('.cancel');
+  const titleText = title.textContent;
+  // Speed over the last five seconds, not since the start, so a stall shows as one; one sample per
+  // 250 ms. The DOM is touched at most every 100 ms: `onBytes` fires per network chunk, thousands
+  // of times for one exe.
+  let samples = [];
+  let shownAt = 0;
+  let shownBytes = 0;
+
+  const rate = (now, got) => {
+    const last = samples[samples.length - 1];
+    if (!last || now - last.t >= 250) samples.push({ t: now, got });
+    while (samples.length > 2 && now - samples[0].t > 5_000) samples.shift();
+    const dt = (now - samples[0].t) / 1000;
+    return dt >= 0.5 ? (got - samples[0].got) / dt : 0;
+  };
+  const left = (secs) => {
+    if (!Number.isFinite(secs) || secs <= 0) return '';
+    const s = Math.ceil(secs);
+    return s < 60 ? `${s} s left` : `${Math.floor(s / 60)} min ${String(s % 60).padStart(2, '0')} s left`;
+  };
+  const setPct = (pct) => {
+    fill.style.width = `${pct}%`;
+    bar.setAttribute('aria-valuenow', String(pct));
+  };
+  const settle = (ms) => {
+    if (cancel) cancel.hidden = true;
+    link.removeAttribute('aria-busy');
+    hideTimer = setTimeout(() => { root.hidden = true; }, ms);
+  };
+
+  return {
+    onCancel(fn) { cancel?.addEventListener('click', fn); },
+    start() {
+      clearTimeout(hideTimer);
+      samples = [];
+      shownAt = 0;
+      shownBytes = 0;
+      root.classList.remove('err');
+      title.textContent = titleText;
+      if (cancel) cancel.hidden = false;
+      setPct(0);
+      data.textContent = 'Starting…';
+      root.hidden = false;
+      link.setAttribute('aria-busy', 'true');
+    },
+    update(got, total) {
+      const now = performance.now();
+      const speed = rate(now, got);
+      if (got < total && now - shownAt < 100) return;
+      shownAt = now;
+      shownBytes = got;
+      const pct = pctOf(got, total);
+      setPct(pct);
+      const line = [`${mb(got)} / ${mb(total)} MB`, `${pct}%`];
+      if (speed > 0 && got < total) line.push(`${mb(speed)} MB/s`, left((total - got) / speed));
+      data.textContent = line.filter(Boolean).join(' · ');
+    },
+    done(bytes) {
+      setPct(100);
+      title.textContent = 'Download complete';
+      data.textContent = `${mb(bytes)} MB · saving ${filename}`;
+      settle(4_000);
+    },
+    fail(err) {
+      root.classList.add('err');
+      title.textContent = 'Download failed';
+      const at = shownBytes > 0 ? ` (at ${mb(shownBytes)} MB)` : '';
+      data.textContent = `${err?.message || err}${at}`;
+      settle(8_000);
+    },
+    hide() {
+      clearTimeout(hideTimer);
+      root.hidden = true;
+      link.removeAttribute('aria-busy');
+    },
+  };
 }

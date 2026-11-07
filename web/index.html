@@ -120,6 +120,22 @@
   #bar > button, #bar > a { padding: .3rem .6rem; color: #ddd; background: none; border: 0;
         cursor: pointer; font: 12px system-ui, sans-serif; text-decoration: underline; }
   #bar > [hidden] { display: none; }
+  /* fork: desktop — the desktop client download's progress, under the bar. The parts are fetched
+     by the page and saved as one blob, so the browser's own download progress never sees them. */
+  #desktop-progress { position: fixed; top: 2.2rem; right: .5rem; z-index: 10;
+        width: min(320px, calc(100vw - 2rem)); padding: .6rem .75rem; box-sizing: border-box;
+        background: rgba(0,0,0,.8); border-radius: 6px; color: #ccc;
+        font: 12px system-ui, sans-serif; }
+  #desktop-progress[hidden] { display: none; }
+  #desktop-progress .head { display: flex; justify-content: space-between; align-items: baseline;
+        margin-bottom: .45rem; }
+  #desktop-progress .head button { padding: 0; color: #aaa; background: none; border: 0;
+        cursor: pointer; font: inherit; text-decoration: underline; }
+  #desktop-progress .bar { height: 6px; background: #222; border-radius: 3px; overflow: hidden; }
+  #desktop-progress .bar > i { display: block; height: 100%; width: 0; background: #c9a227;
+        border-radius: 3px; transition: width .15s linear; }
+  #desktop-progress .data { margin-top: .4rem; color: #888; font-variant-numeric: tabular-nums; }
+  #desktop-progress.err .data { color: #e07070; }
 </style>
 <script>
   // Sound: the browser suspends any AudioContext created before the first user gesture (autoplay
@@ -259,6 +275,13 @@
      title="Download the Windows desktop client, wow-reforged.exe.">desktop client</a>
   <button type="button" id="fs" title="Full screen. Captures Esc, Tab and Ctrl+W for the game — press and hold Esc to leave.">full screen</button>
 </div>
+<!-- fork: desktop — filled by `installDesktopDownload` while the parts download. -->
+<div id="desktop-progress" hidden role="status" aria-live="polite">
+  <div class="head"><span class="title">Downloading wow-reforged.exe</span>
+    <button type="button" class="cancel">cancel</button></div>
+  <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i></i></div>
+  <div class="data"></div>
+</div>
 <canvas id="benilla"></canvas>
 <script>
   // Dev page: allow `?user=&pass=&char=` links to log in. A hosting page that fetched the
@@ -296,6 +319,7 @@
       });
       // Optional-called, like the line below.
       installDesktopDownload?.(document.getElementById('desktop'), {
+        progress: document.getElementById('desktop-progress'),
         focusTarget: document.getElementById('benilla'),
       })?.catch?.((e) => console.warn('desktop client link:', e));
       // Optional-called: a cached platform.js from before this export must not throw here.
