@@ -130,6 +130,7 @@ mod npc_text;
 /// Ships in part (the FPS journal and the clocks it reads); the rest is `dev`.
 mod perf;
 mod pipe_warm;
+mod pipeline_cache_file;
 mod player;
 mod player_commands;
 mod player_shadow;
@@ -593,6 +594,8 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     // reads the site's gateway and realmlist, all before the install is resolved below.
     #[cfg(not(target_arch = "wasm32"))]
     desktop::prepare();
+    // fork: native — the GPU pipeline cache's file, named before the render plugin finishes.
+    pipeline_cache_file::install();
 
     // Fonts, art and the stock interface all come from the install, so without one the client
     // ends here, before any window or plugin exists (`no_install`).

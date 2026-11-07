@@ -51,6 +51,9 @@ pub mod gpu_component_array_buffer;
 pub mod gpu_readback;
 pub mod mesh;
 pub mod occlusion_culling;
+// **benilla fork (twelfth delta).** The on-disk wgpu pipeline cache, native only — see the module
+// header.
+pub mod pipeline_disk_cache;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pipelined_rendering;
 // **benilla fork.** A `ComputeTaskPool::scope` that stays on the calling thread where a worker
@@ -448,6 +451,13 @@ impl Plugin for RenderPlugin {
                     reset_render_asset_bytes_per_frame.in_set(RenderSystems::Cleanup),
                 ),
             );
+            // benilla fork (twelfth delta): the pipeline cache goes to disk once new pipelines
+            // settle.
+            #[cfg(not(target_arch = "wasm32"))]
+            render_app.add_systems(
+                Render,
+                pipeline_disk_cache::save_settled.in_set(RenderSystems::Cleanup),
+            );
             // benilla fork (BENILLA.md, ninth delta): the browser frees a dropped GPU object only
             // when its JS wrapper is collected; destroy the frame's released ones once it is
             // submitted, after the temporary render entities are gone.
@@ -489,6 +499,10 @@ impl Plugin for RenderPlugin {
                 render.world_mut(),
                 self.synchronous_pipeline_compilation,
             );
+            // benilla fork (twelfth delta): and at exit, from the main world, which sees the
+            // `AppExit` first.
+            #[cfg(not(target_arch = "wasm32"))]
+            app.add_systems(bevy_app::Last, pipeline_disk_cache::save_on_exit);
         }
     }
 }

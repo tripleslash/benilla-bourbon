@@ -214,6 +214,9 @@ pub struct PipelineCache {
     pub(crate) synchronous_pipeline_compilation: bool,
     /// If `true`, the shader cache needs to be repopulated from the main world's `Assets<Shader>`.
     needs_shader_reload: bool,
+    /// benilla fork (twelfth delta): the on-disk wgpu pipeline cache every pipeline is created
+    /// with, native only; empty until `RenderResources::unpack_into` opens one.
+    pub(crate) disk_cache: crate::pipeline_disk_cache::SharedPipelineCache,
 }
 
 impl PipelineCache {
@@ -266,6 +269,7 @@ impl PipelineCache {
             global_shader_defs,
             synchronous_pipeline_compilation,
             needs_shader_reload: true,
+            disk_cache: default(),
         }
     }
 
@@ -482,6 +486,8 @@ impl PipelineCache {
         let shader_cache = self.shader_cache.clone();
         let layout_cache = self.layout_cache.clone();
         let sync = self.synchronous_pipeline_compilation;
+        // benilla fork (twelfth delta): the disk cache the pipeline is created with.
+        let disk_cache = self.disk_cache.clone();
         let mut bindgroup_layout_cache = self.bindgroup_layout_cache.lock().unwrap();
         let bind_group_layout = descriptor
             .layout
@@ -571,10 +577,13 @@ impl PipelineCache {
                             // TODO: Should this be the same as the vertex compilation options?
                             compilation_options,
                         }),
-                    cache: None,
+                    // benilla fork (twelfth delta): `None` upstream.
+                    cache: disk_cache.get(),
                 };
 
-                Ok(build_render_pipeline(&device, &descriptor, sync))
+                let pipeline = build_render_pipeline(&device, &descriptor, sync);
+                disk_cache.note_built();
+                Ok(pipeline)
             },
             self.synchronous_pipeline_compilation,
         )
@@ -589,6 +598,8 @@ impl PipelineCache {
         let shader_cache = self.shader_cache.clone();
         let layout_cache = self.layout_cache.clone();
         let sync = self.synchronous_pipeline_compilation;
+        // benilla fork (twelfth delta): the disk cache the pipeline is created with.
+        let disk_cache = self.disk_cache.clone();
         let mut bindgroup_layout_cache = self.bindgroup_layout_cache.lock().unwrap();
         let bind_group_layout = descriptor
             .layout
@@ -628,10 +639,13 @@ impl PipelineCache {
                         zero_initialize_workgroup_memory: descriptor
                             .zero_initialize_workgroup_memory,
                     },
-                    cache: None,
+                    // benilla fork (twelfth delta): `None` upstream.
+                    cache: disk_cache.get(),
                 };
 
-                Ok(build_compute_pipeline(&device, &descriptor, sync))
+                let pipeline = build_compute_pipeline(&device, &descriptor, sync);
+                disk_cache.note_built();
+                Ok(pipeline)
             },
             self.synchronous_pipeline_compilation,
         )

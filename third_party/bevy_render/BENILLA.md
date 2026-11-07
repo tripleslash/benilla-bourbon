@@ -220,6 +220,18 @@ that serves nothing in that drop. A `WOW_LIVE_FPS` run on an M1 sat at 0% CPU af
 saved-variables line (measured in benilla-wotlk). `benilla-app`'s `shutdown` tests exit on a
 non-Send render system, which hangs without the patch.
 
+## The twelfth delta: the pipeline cache persists on disk (native)
+
+`src/pipeline_disk_cache.rs` (new): where the adapter offers `Features::PIPELINE_CACHE` (wgpu has it
+on Vulkan alone) and the app has named a file for the adapter (`set_cache_file`, called before the
+render plugin finishes), `RenderResources::unpack_into` creates one `wgpu::PipelineCache` from that
+file's bytes, `fallback: true` so stale or foreign data starts it empty, and every render and
+compute pipeline `PipelineCache` creates gets `cache: Some(..)` where upstream passes `None`. The
+data goes back to the file, a temporary file renamed over the old one, once the count of created
+pipelines holds still for 3 s (at most 30 s after the first unsaved one), on an `AppExit`, and when
+the last handle drops. `initialize_renderer` requests the feature under either settings priority.
+DX12, Metal, GL and the browser get no cache; on wasm32 the handle is empty.
+
 ## The delta, and the command that proves it
 
 **A few lines changed in five upstream files, one module added.**
@@ -232,10 +244,12 @@ non-Send render system, which hangs without the patch.
 | `src/batching/gpu_preprocessing.rs` | two `ComputeTaskPool::get().scope(` (0.19.1 lines ~2355 and ~2657) become `crate::wasm_serial::compute_scope(`, and the now-unused `use bevy_tasks::ComputeTaskPool;` goes |
 | `src/render_asset.rs` | `RenderAsset::DEFERRABLE`, asked by `prepare_assets` before each of its two deferrals (above) |
 | `src/mesh/mod.rs` | `RenderMesh` sets `DEFERRABLE = false` (above) |
-| `src/render_resource/pipeline_cache.rs` | the web's async pipeline creation (fifth delta); `create_pipeline_task` drops its two macOS lines (tenth delta) |
+| `src/render_resource/pipeline_cache.rs` | the web's async pipeline creation (fifth delta); `create_pipeline_task` drops its two macOS lines (tenth delta); the `disk_cache` field, passed as each pipeline's `cache` (twelfth delta) |
 | `src/pipelined_rendering.rs` | `renderer_extract` holds the render app back on the exit frame (eleventh delta) |
 | `src/lib.rs` | `mod wasm_serial;`; the render worker's lines (eighth delta); `destroy_released_gpu_resources` and its counter (ninth delta) |
 | `src/wasm_serial.rs` | new — the scope itself. Has its own header |
+| `src/pipeline_disk_cache.rs` | new — the on-disk pipeline cache (twelfth delta). Has its own header |
+| `src/settings.rs`, `src/renderer/mod.rs`, `src/lib.rs` | `unpack_into` opens the disk cache; `initialize_renderer` requests `PIPELINE_CACHE`; `mod pipeline_disk_cache;` and its two save systems (twelfth delta) |
 | `src/render_worker.rs`, `src/settings.rs`, `src/view/window/mod.rs`, `src/renderer/{wgpu_wrapper,render_device,mod}.rs`, `src/render_resource/buffer.rs` | the render worker (eighth delta, its own table) |
 
 **The bodies of both systems are byte-for-byte upstream's**, which is the whole design of the fix:

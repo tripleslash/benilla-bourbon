@@ -359,6 +359,13 @@ pub async fn initialize_renderer(
         limits = adapter.limits();
     }
 
+    // benilla fork (twelfth delta): the on-disk pipeline cache (`pipeline_disk_cache`) needs
+    // `PIPELINE_CACHE` under either priority, wherever the adapter offers it (Vulkan).
+    #[cfg(not(target_arch = "wasm32"))]
+    if adapter.features().contains(wgpu::Features::PIPELINE_CACHE) {
+        features |= wgpu::Features::PIPELINE_CACHE;
+    }
+
     // Enforce the disabled features
     if let Some(disabled_features) = options.disabled_features {
         features.remove(disabled_features);

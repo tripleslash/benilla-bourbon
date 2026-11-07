@@ -211,11 +211,25 @@ impl RenderResources {
         }
 
         render_world.insert_resource(instance);
-        render_world.insert_resource(PipelineCache::new(
+        let pipeline_cache = PipelineCache::new(
             device.clone(),
             render_adapter.clone(),
             synchronous_pipeline_compilation,
-        ));
+        );
+        // benilla fork (twelfth delta): the on-disk pipeline cache, native only, opened for this
+        // device from the file the app names; both worlds hold it, to save it.
+        #[cfg(not(target_arch = "wasm32"))]
+        let pipeline_cache = {
+            let mut pipeline_cache = pipeline_cache;
+            if let Some(disk) = crate::pipeline_disk_cache::open(&device, &adapter_info) {
+                pipeline_cache.disk_cache =
+                    crate::pipeline_disk_cache::SharedPipelineCache::new(&disk);
+                main_world.insert_resource(disk.clone());
+                render_world.insert_resource(disk);
+            }
+            pipeline_cache
+        };
+        render_world.insert_resource(pipeline_cache);
         render_world.insert_resource(DeviceErrorHandler::new(&device));
         render_world.insert_resource(device);
         render_world.insert_resource(queue);
