@@ -19,7 +19,7 @@ use bevy::prelude::*;
 
 use crate::client_state::{ClientState, InWorldGated};
 
-use super::camera::{CameraControl, FlyCam, CAM_PITCH_LIMIT};
+use super::camera::{CameraControl, CollisionArm, FlyCam, CAM_PITCH_LIMIT};
 use super::camera_view::CameraViews;
 use super::camera_zoom::{CAM_DIST_DEFAULT, CAM_DIST_MAX, CAM_DIST_MIN};
 use super::Player;
@@ -112,7 +112,7 @@ fn load_camera_pose(
     // This character's pose starts from the shipped defaults, not from the last one's.
     rig.distance = CAM_DIST_DEFAULT;
     rig.target_distance = CAM_DIST_DEFAULT;
-    rig.collision_distance = CAM_DIST_DEFAULT;
+    rig.collision_arm = CollisionArm::at(CAM_DIST_DEFAULT);
     rig.new_camera();
     player.login_pitch = None;
 
@@ -131,7 +131,7 @@ fn load_camera_pose(
     if let Some(d) = distance {
         rig.distance = d;
         rig.target_distance = d;
-        rig.collision_distance = d;
+        rig.collision_arm = CollisionArm::at(d);
     }
     if let Some(p) = pitch {
         cam.pitch = p;
@@ -170,7 +170,7 @@ pub(crate) fn rebuild_camera(world: &mut World) {
         }
         rig.new_camera();
         rig.distance = rig.target_distance;
-        rig.collision_distance = rig.target_distance;
+        rig.collision_arm = CollisionArm::at(rig.target_distance);
     });
 }
 
@@ -251,7 +251,7 @@ mod tests {
             let mut rig = world.resource_mut::<CameraControl>();
             rig.distance = 3.0;
             rig.target_distance = 8.0;
-            rig.collision_distance = 2.0;
+            rig.collision_arm = CollisionArm::at(2.0);
             rig.flip_yaw = 1.0;
             rig.scoped = true;
             rig.view_blend.arm_pitch_for_test();
@@ -268,7 +268,7 @@ mod tests {
         rebuild_camera(&mut world);
         let rig = world.resource::<CameraControl>();
         assert_eq!(rig.distance, 8.0);
-        assert_eq!(rig.collision_distance, 8.0);
+        assert_eq!(rig.collision_arm.length(), 8.0);
         assert_eq!(rig.flip_yaw, 0.0);
         assert!(rig.view_moved);
         assert!(!rig.scoped);

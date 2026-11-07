@@ -74,7 +74,7 @@ pub(super) fn setup_player(
     commands.insert_resource(CameraControl {
         distance: CAM_DIST_DEFAULT,
         target_distance: CAM_DIST_DEFAULT,
-        collision_distance: CAM_DIST_DEFAULT,
+        collision_arm: super::camera::CollisionArm::at(CAM_DIST_DEFAULT),
         // Opaque until `control` first computes the fade.
         self_fade_alpha: 1.0,
         ..default()

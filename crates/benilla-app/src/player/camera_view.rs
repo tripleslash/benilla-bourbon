@@ -26,7 +26,9 @@ use benilla_world::view::WorldCamera;
 
 use crate::creature_anim::wrap_pi;
 
-use super::camera::{bound_smooth_time, CameraControl, FlyCam, FollowConfig, CAM_PITCH_LIMIT};
+use super::camera::{
+    bound_smooth_time, CameraControl, CollisionArm, FlyCam, FollowConfig, CAM_PITCH_LIMIT,
+};
 use super::camera_channel::{Arm, Armed, SmoothChannel};
 use super::camera_dynamics::CameraOptions;
 use super::camera_saved::{pitch_from_file, pitch_to_file};
@@ -563,7 +565,7 @@ fn set_view(
             // The pose at once, live and target (`0x5130d8`-`0x513111`), with the arm on it.
             rig.distance = pose.distance;
             rig.target_distance = pose.distance;
-            rig.collision_distance = pose.distance;
+            rig.collision_arm = CollisionArm::at(pose.distance);
             cam.pitch = pitch;
             cam.yaw = wrap_pi(face_yaw + pose.yaw);
             rig.smart_pivot.home();
@@ -854,7 +856,7 @@ mod tests {
         let rig = CameraControl {
             distance: pose.distance,
             target_distance: pose.distance,
-            collision_distance: pose.distance,
+            collision_arm: CollisionArm::at(pose.distance),
             ..Default::default()
         };
         let cam = FlyCam {
@@ -961,7 +963,11 @@ mod tests {
         let instant = style(STYLE_INSTANT);
         assert!(set_view(&mut views, &mut rig, &mut cam, 0.0, 3, &instant));
         assert_eq!(
-            (rig.distance, rig.target_distance, rig.collision_distance),
+            (
+                rig.distance,
+                rig.target_distance,
+                rig.collision_arm.length()
+            ),
             (to.distance, to.distance, to.distance)
         );
         assert_eq!(cam.pitch, to.pitch);
@@ -1351,7 +1357,7 @@ mod tests {
         assert!(!rig.scoped);
         assert_eq!(rig.distance, pose.distance);
         assert_eq!(rig.target_distance, pose.distance);
-        assert_eq!(rig.collision_distance, pose.distance);
+        assert_eq!(rig.collision_arm.length(), pose.distance);
         assert!(!rig.view_blend.distance_in_flight());
         assert_eq!(cam.pitch, pose.pitch);
         assert_eq!(cam.yaw, wrap_pi(0.5 + pose.yaw));
@@ -1367,7 +1373,7 @@ mod tests {
             let mut rig = world.resource_mut::<CameraControl>();
             rig.distance = 5.55;
             rig.target_distance = 5.55;
-            rig.collision_distance = 5.55;
+            rig.collision_arm = CollisionArm::at(5.55);
         }
         let eye = seat(world, 0, 1.0 / 60.0, true).translation;
         assert!((eye - Vec3::new(0.0, 1.8, 0.0)).length() < 1e-4, "{eye}");
