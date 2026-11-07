@@ -14,7 +14,8 @@
 //!   and draws the casters. Receivers sample through `benilla_modern::sunshadow`.
 
 use bevy::asset::RenderAssetUsages;
-use bevy::camera::Projection;
+use bevy::camera::{CameraProjection, Projection};
+use bevy::math::Vec3A;
 use bevy::image::{
     Image, ImageAddressMode, ImageCompareFunction, ImageFilterMode, ImageSampler,
     ImageSamplerDescriptor,
@@ -162,6 +163,10 @@ pub fn cascade_splits(quality: LightingQuality) -> &'static [f32] {
 pub struct ModernCascades {
     pub count: u32,
     pub clip_from_world: [Mat4; MAX_CASCADES],
+    /// The entity casters' cull per cascade: `clip_from_world` narrowed to the camera's footprint
+    /// in the map ([`narrowed_cull`]), or `clip_from_world` itself where nothing narrows it. CPU
+    /// only: not in [`Self::std430`].
+    pub cull_from_world: [Mat4; MAX_CASCADES],
     pub splits: [f32; MAX_CASCADES],
     pub texel_world: [f32; MAX_CASCADES],
     pub depth_bias: [f32; MAX_CASCADES],
@@ -436,6 +441,15 @@ fn update_cascades(
         debug: super::shadow_debug_mode(),
         ..default()
     };
+    // The camera frustum's corners, for the entity casters' narrowed cull. A water mirror's eye
+    // sees past the camera's frustum, so while one renders every cascade keeps its full map.
+    let narrow = !super::mirror_tier_everywhere()
+        && mirror.as_deref().is_none_or(|m| m.live_plane().is_none());
+    let corners = narrow.then(|| {
+        persp
+            .get_frustum_corners(-persp.near, -persp.far)
+            .map(|c| world_from_view.transform_point3a(c))
+    });
     let mut near = persp.near.max(0.1);
     // fork (perf): a re-aim redraws a cascade's whole static layer, so it reaches one cascade a
     // frame, nearest first, rather than all four (~12 ms on an Iris Xe) in one frame.
@@ -462,6 +476,12 @@ fn update_cascades(
         };
         let fit = cascade_from_sphere(center, radius, dir, SHADOW_MAP_SIZE);
         next.clip_from_world[i] = fit.clip_from_world;
+        let pad = (CULL_PAD_TEXELS + COVER_RADIUS_YD / fit.texel_world.max(f32::EPSILON)) * 2.0
+            / SHADOW_MAP_SIZE as f32;
+        next.cull_from_world[i] = corners
+            .as_ref()
+            .and_then(|c| narrowed_cull(&fit.clip_from_world, c, pad))
+            .unwrap_or(fit.clip_from_world);
         next.splits[i] = far;
         next.texel_world[i] = fit.texel_world;
         next.depth_bias[i] = fit.depth_bias;
@@ -731,6 +751,42 @@ pub fn slice_sphere(
     (center, radius)
 }
 
+/// Texels of padding around a narrowed cull rect: the receivers' filter taps (the 5-tap cross over
+/// the hardware 2x2 compare) and their normal offset ([`NORMAL_OFFSET_TEXELS`]).
+const CULL_PAD_TEXELS: f32 = 4.0;
+
+/// `sunshadow.wgsl`'s `COVER_RADIUS_YD`: a shaded receiver reads the map this far around itself.
+const COVER_RADIUS_YD: f32 = 1.5;
+
+/// A cascade's caster cull shrunk to the clip-space XY rect of the camera frustum's `corners`,
+/// padded by `pad` and clamped to the map; `None` when the camera's rect misses the map. The
+/// reference culls a map's casters this way under `shadowCull` (`0x7bafd0`) and renders with the
+/// full matrix: the light clip is orthographic, so a caster shades only receivers on its own clip
+/// XY, and a receiver on screen lies inside the frustum's rect. Depth and `w` are untouched.
+pub fn narrowed_cull(clip_from_world: &Mat4, corners: &[Vec3A; 8], pad: f32) -> Option<Mat4> {
+    let (mut lo, mut hi) = (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY));
+    for c in corners {
+        let p = clip_from_world.project_point3(Vec3::from(*c)).truncate();
+        lo = lo.min(p);
+        hi = hi.max(p);
+    }
+    let lo = (lo - pad).max(Vec2::NEG_ONE);
+    let hi = (hi + pad).min(Vec2::ONE);
+    if hi.x <= lo.x || hi.y <= lo.y {
+        return None;
+    }
+    // Clip XY [lo, hi] onto [-1, 1].
+    let scale = 2.0 / (hi - lo);
+    let offset = -(hi + lo) / (hi - lo);
+    let remap = Mat4::from_cols(
+        Vec4::new(scale.x, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, scale.y, 0.0, 0.0),
+        Vec4::new(0.0, 0.0, 1.0, 0.0),
+        Vec4::new(offset.x, offset.y, 0.0, 1.0),
+    );
+    Some(remap * *clip_from_world)
+}
+
 /// The texel-snapped reverse-Z orthographic light clip around a sphere.
 pub fn cascade_from_sphere(center: Vec3, radius: f32, dir: Vec3, size: u32) -> CascadeFit {
     let up = if dir.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
@@ -762,6 +818,29 @@ mod tests {
     fn the_block_matches_the_wgsl_layout() {
         assert_eq!(ModernCascades::default().std430().len(), CASCADES_BYTES);
         assert_eq!(CASCADES_BYTES, 400);
+    }
+
+    /// The narrowed cull maps the camera's rect, padded, onto the whole clip square, keeps depth,
+    /// and gives up when the camera's rect misses the map.
+    #[test]
+    fn the_narrowed_cull_spans_the_camera_rect() {
+        let rect = |x0: f32, y0: f32, x1: f32, y1: f32| -> [Vec3A; 8] {
+            std::array::from_fn(|i| {
+                let x = if i & 1 == 0 { x0 } else { x1 };
+                let y = if i & 2 == 0 { y0 } else { y1 };
+                Vec3A::new(x, y, if i & 4 == 0 { 0.2 } else { 0.8 })
+            })
+        };
+        let m = narrowed_cull(&Mat4::IDENTITY, &rect(-0.5, 0.0, 0.25, 0.5), 0.0).unwrap();
+        let lo = m.project_point3(Vec3::new(-0.5, 0.0, 0.3));
+        let hi = m.project_point3(Vec3::new(0.25, 0.5, 0.3));
+        assert!(lo.truncate().abs_diff_eq(Vec2::NEG_ONE, 1e-5), "{lo}");
+        assert!(hi.truncate().abs_diff_eq(Vec2::ONE, 1e-5), "{hi}");
+        assert!((lo.z - 0.3).abs() < 1e-6, "depth untouched");
+        // A rect past the map's edge clamps to it.
+        let clamped = narrowed_cull(&Mat4::IDENTITY, &rect(-3.0, -3.0, 3.0, 3.0), 0.0).unwrap();
+        assert!(clamped.abs_diff_eq(Mat4::IDENTITY, 1e-6));
+        assert!(narrowed_cull(&Mat4::IDENTITY, &rect(2.0, 2.0, 3.0, 3.0), 0.0).is_none());
     }
 
     #[test]

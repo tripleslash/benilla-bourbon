@@ -1359,6 +1359,16 @@ pub(crate) fn gx_shadow_pass(
             if !active || is_sky {
                 return;
             }
+            // The entity casters cull to the camera's footprint in the map (`0x7bafd0`,
+            // `ModernCascades::cull_from_world`) on the cascades whose entity pass runs every
+            // frame: a held layer keeps one frame's entities for the next, and the camera may turn
+            // in between. The static casters keep the full map, as their layer is cached across
+            // camera turns.
+            let entity_cull = if i < HELD_CASCADES_FROM {
+                cascades.cull_from_world[i]
+            } else {
+                clip_from_world
+            };
             let Some(entities) = world.get_resource::<EntityShadowFrame>() else {
                 return;
             };
@@ -1394,7 +1404,7 @@ pub(crate) fn gx_shadow_pass(
             // which is all next frame's restore puts back.
             let mut wrote = [0u32; RESTORE_TILES];
             for cmd in &entities.draws {
-                if !cmd.sun || outside_box(&clip_from_world, cmd.center, Vec3::splat(cmd.radius)) {
+                if !cmd.sun || outside_box(&entity_cull, cmd.center, Vec3::splat(cmd.radius)) {
                     continue;
                 }
                 let footprint = box_texels(
