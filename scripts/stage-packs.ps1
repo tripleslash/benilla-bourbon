@@ -17,7 +17,8 @@ $PACKS_HD = 'web/packs-hd'
 $PACKS_TURTLE = 'web/packs-turtle'
 $PACKS_REFORGED = 'web/packs-reforged'
 $SITE = 'web/site'
-$WASM_PART_MAX = 24 * 1024 * 1024
+# The one part cap, scripts/split-parts.sh's.
+$PART_MAX = 24 * 1024 * 1024
 
 # Byte-transparent: every byte maps to one char and back, so a rewrite never re-encodes the rest.
 $latin1 = [Text.Encoding]::GetEncoding(28591)
@@ -186,69 +187,72 @@ function Read-Full($stream, [byte[]]$buf) {
     return $total
 }
 
+# Remove a previous split of $stem from the site.
+function Clear-Parts([string]$stem) {
+    Get-ChildItem -LiteralPath $siteAbs -File -Force |
+        Where-Object { $_.Name.StartsWith($stem + '.part', [StringComparison]::Ordinal) } |
+        ForEach-Object { [IO.File]::Delete($_.FullName) }
+}
+
+# Split $srcAbs into 24 MiB `<stem>.partNN<suffix>` files plus `<stem>.parts.json` in the site,
+# {"bytes":N,<extra>,"parts":[...]}. The twin of scripts/split-parts.sh; $srcAbs is only read.
+function Split-Parts([string]$srcAbs, [string]$stem, [string]$suffix, [string]$extra = '') {
+    Clear-Parts $stem
+    $bytes = (New-Object IO.FileInfo $srcAbs).Length
+    $buf = New-Object byte[] $PART_MAX
+    $parts = New-Object Collections.Generic.List[string]
+    $in = [IO.File]::OpenRead($srcAbs)
+    try {
+        while ($true) {
+            $n = Read-Full $in $buf
+            if ($n -le 0) { break }
+            $name = '{0}.part{1:d2}{2}' -f $stem, $parts.Count, $suffix
+            $out = [IO.File]::Create([IO.Path]::Combine($siteAbs, $name))
+            try { $out.Write($buf, 0, $n) } finally { $out.Dispose() }
+            $parts.Add($name)
+        }
+    } finally {
+        $in.Dispose()
+    }
+    $quoted = @($parts | ForEach-Object { '"' + $_ + '"' })
+    $head = '{"bytes":' + $bytes + ','
+    if ($extra) { $head += $extra + ',' }
+    $json = $head + '"parts":[' + ($quoted -join ',') + ']}' + "`n"
+    [IO.File]::WriteAllText([IO.Path]::Combine($siteAbs, $stem + '.parts.json'), $json, (New-Object Text.UTF8Encoding $false))
+    Write-Host "split $([IO.Path]::GetFileName($srcAbs)) ($bytes B) into $($parts.Count) parts in $SITE"
+}
+
 # Split the wasm module into 24 MiB *.wasm parts plus wow.parts.json.
 $wasmAbs = [IO.Path]::Combine($siteAbs, 'wow_bg.wasm')
 if ([IO.File]::Exists($wasmAbs)) {
-    $bytes = (New-Object IO.FileInfo $wasmAbs).Length
-    $stem = [IO.Path]::Combine($siteAbs, 'wow')  # wow_bg.wasm ships as wow.partNN.wasm
-    $buf = New-Object byte[] $WASM_PART_MAX
-    $in = [IO.File]::OpenRead($wasmAbs)
-    try {
-        $i = 0
-        while ($true) {
-            $n = Read-Full $in $buf
-            if ($n -le 0) { break }
-            $out = [IO.File]::Create(('{0}.part{1:d2}.wasm' -f $stem, $i))
-            try { $out.Write($buf, 0, $n) } finally { $out.Dispose() }
-            $i++
-        }
-    } finally {
-        $in.Dispose()
-    }
+    Split-Parts $wasmAbs 'wow' '.wasm'  # wow_bg.wasm ships as wow.partNN.wasm
     # The link, not the build: web/dist keeps its inode.
     [IO.File]::Delete($wasmAbs)
-    [string[]]$parts = @(Get-ChildItem -LiteralPath $siteAbs -File -Force |
-        Where-Object { $_.Name -clike 'wow.part*.wasm' } | ForEach-Object { $_.Name })
-    [Array]::Sort($parts, [StringComparer]::Ordinal)
-    $quoted = @($parts | ForEach-Object { '"' + $_ + '"' })
-    $json = '{"bytes":' + $bytes + ',"parts":[' + ($quoted -join ',') + ']}' + "`n"
-    [IO.File]::WriteAllText([IO.Path]::Combine($siteAbs, 'wow.parts.json'), $json, (New-Object Text.UTF8Encoding $false))
-    Write-Host "split wow_bg.wasm ($bytes B) into $($parts.Length) parts"
 }
 
-# fork: desktop - the desktop client split the same way into 24 MiB `wow-reforged.exe.partNN` files
-# plus `wow-reforged.exe.parts.json`, for the page's "Desktop client" link. The twin of
-# scripts/stage-desktop.sh; absent exe is an ordinary state.
-Get-ChildItem -LiteralPath $siteAbs -File -Force |
-    Where-Object { $_.Name -clike 'wow-reforged.exe.part*' } | ForEach-Object { [IO.File]::Delete($_.FullName) }
+# fork: desktop - wow-reforged.exe as `wow-reforged.exe.partNN` plus its manifest, carrying the
+# exe's SHA-1 and the build's commit time (the `.version` file beside it) for the client's
+# self-update. The twin of scripts/stage-desktop.sh; absent exe is an ordinary state.
+Clear-Parts 'wow-reforged.exe'
 $exeAbs = Resolve-Repo 'target/desktop/wow-reforged.exe'
 if ([IO.File]::Exists($exeAbs)) {
-    $bytes = (New-Object IO.FileInfo $exeAbs).Length
-    $buf = New-Object byte[] $WASM_PART_MAX
-    $exeParts = New-Object Collections.Generic.List[string]
-    $in = [IO.File]::OpenRead($exeAbs)
-    try {
-        while ($true) {
-            $n = Read-Full $in $buf
-            if ($n -le 0) { break }
-            $name = 'wow-reforged.exe.part{0:d2}' -f $exeParts.Count
-            $out = [IO.File]::Create([IO.Path]::Combine($siteAbs, $name))
-            try { $out.Write($buf, 0, $n) } finally { $out.Dispose() }
-            $exeParts.Add($name)
-        }
-    } finally {
-        $in.Dispose()
+    $extra = '"sha1":"' + (Get-FileHash -LiteralPath $exeAbs -Algorithm SHA1).Hash.ToLowerInvariant() + '"'
+    $version = ''
+    if ([IO.File]::Exists($exeAbs + '.version')) {
+        $version = [IO.File]::ReadAllText($exeAbs + '.version') -replace '[^0-9]', ''
     }
-    $quoted = @($exeParts | ForEach-Object { '"' + $_ + '"' })
-    $json = '{"bytes":' + $bytes + ',"parts":[' + ($quoted -join ',') + ']}' + "`n"
-    [IO.File]::WriteAllText([IO.Path]::Combine($siteAbs, 'wow-reforged.exe.parts.json'), $json, (New-Object Text.UTF8Encoding $false))
-    Write-Host "split wow-reforged.exe ($bytes B) into $($exeParts.Count) parts"
+    if ($version) {
+        $extra = '"version":' + $version + ',' + $extra
+    } else {
+        Write-Err 'note: no target/desktop/wow-reforged.exe.version - clients will not update to this exe'
+    }
+    Split-Parts $exeAbs 'wow-reforged.exe' '' $extra
 } else {
     Write-Err 'note: no target/desktop/wow-reforged.exe - staging without the desktop client (scripts/build-desktop.sh)'
 }
 
 # Nothing at the top of the site may exceed the cap; the packs are capped by the packer.
-$oversize = @(Get-ChildItem -LiteralPath $siteAbs -File -Force | Where-Object { $_.Length -gt $WASM_PART_MAX })
+$oversize = @(Get-ChildItem -LiteralPath $siteAbs -File -Force | Where-Object { $_.Length -gt $PART_MAX })
 if ($oversize.Count -gt 0) {
     Write-Err "error: asset over a static host's 25 MiB limit (cap here is 24 MiB):"
     foreach ($f in $oversize) { Write-Err "$SITE/$($f.Name)" }

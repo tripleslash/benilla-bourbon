@@ -67,6 +67,9 @@
 <link data-trunk rel="copy-file" href="wasi_stubs.js" />
 <link data-trunk rel="copy-file" href="boot.js" />
 <link data-trunk rel="copy-file" href="packs.js" />
+<!-- The reader of the site's split files (`*.parts.json`): boot.js's wasm, platform.js's desktop
+     client download. -->
+<link data-trunk rel="copy-file" href="parts.js" />
 <link data-trunk rel="copy-file" href="packworker.js" />
 <!-- The task pools' thread spawner and the worker it starts. `threads.js` installs the page
      contract `window.__wow_threads`; `threadworker.js` is one pool thread, and it imports
@@ -251,7 +254,7 @@
 </script>
 <div id="bar">
   <!-- fork: desktop — shown once `wow-reforged.exe.parts.json` is found on the site
-       (scripts/stage-desktop.sh); web/platform.js's `installDesktopDownload` assembles the parts. -->
+       (scripts/stage-desktop.sh); web/platform.js's `installDesktopDownload` joins the parts. -->
   <a id="desktop" href="wow-reforged.exe.parts.json" download="wow-reforged.exe" hidden
      title="Download the Windows desktop client, wow-reforged.exe.">desktop client</a>
   <button type="button" id="fs" title="Full screen. Captures Esc, Tab and Ctrl+W for the game — press and hold Esc to leave.">full screen</button>
@@ -294,7 +297,7 @@
       // Optional-called, like the line below.
       installDesktopDownload?.(document.getElementById('desktop'), {
         focusTarget: document.getElementById('benilla'),
-      });
+      })?.catch?.((e) => console.warn('desktop client link:', e));
       // Optional-called: a cached platform.js from before this export must not throw here.
       holdMouseNavigationButtons?.();
     })

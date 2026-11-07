@@ -14,7 +14,7 @@
 #   web/site/  what a static host serves: hardlinks to the build, plus `data` -> ../packs. The one
 #                file that is NOT a link is the wasm module: it is 77 MB against a static host's
 #                25 MiB per-asset limit, so it is split here into 24 MiB `wow.part*.wasm`
-#                and `web/boot.js` streams them back together. See the split step below.
+#                and `web/parts.js` streams them back together. See the split step below.
 #
 # Both links are cheap on purpose. Hardlinking the build is O(1) per file against a ~90 MB wasm
 # module that changes on every build, and `data` is a link rather than a copy because copying
@@ -156,50 +156,33 @@ fi
 
 # Split the wasm module. A static host refuses ANY static asset over 25 MiB and the module is
 # 77 MB — already `-O3 --strip-debug --strip-producers`, one 184-byte custom section left, so there
-# is nothing in it to remove and no flag that closes a 3x gap. `web/boot.js` concatenates the parts
-# back into ONE stream, which it can do for free because it was already re-wrapping the download in
-# a synthetic Response to count its bytes; the browser still compiles while it downloads.
+# is nothing in it to remove and no flag that closes a 3x gap. `web/parts.js` concatenates the parts
+# back into ONE stream, the same counting stream `web/boot.js` re-wraps the single file in; the
+# browser still compiles while it downloads.
 #
 # `web/dist` is NOT split — `trunk serve` and `wenilla-host --www` serve that directory and have no
 # such limit. So both layouts exist at once, and `wow.parts.json` is how the page tells them
 # apart: written here, absent there.
 #
-# 24 MiB, the same cap `benilla-pack build` holds a pack object to. One number for both is one
-# number to remember, and the MiB of headroom is there for the same reason it is there.
-WASM_PART_MAX=$((24 * 1024 * 1024))
+# The cap and the splitter are `scripts/split-parts.sh`'s, shared with the desktop client's split.
+# shellcheck source=split-parts.sh
+. scripts/split-parts.sh
 # The build's `wow_bg.wasm` ships as `wow.part00.wasm`, ... and `wow.parts.json`.
 if [ -f "${SITE}/wow_bg.wasm" ]; then
-  bytes=$(wc -c < "${SITE}/wow_bg.wasm")
-  # `--additional-suffix=.wasm` is load-bearing, not tidiness: A static host types an asset by its
-  # extension and compresses on the fly BY TYPE, so a part named `.part00` would be
+  # The `.wasm` suffix is load-bearing, not tidiness: A static host types an asset by its extension
+  # and compresses on the fly BY TYPE, so a part named `.part00` would be
   # `application/octet-stream` and could ship uncompressed — 77 MB on the wire against the ~15 MB
   # the module costs today. Named `*.wasm` it is the same kind of object the whole file is.
-  # Not `split -d --additional-suffix`: those are GNU-only and BSD split (macOS) refuses them. The
-  # default `aa`, `ab`, ... suffixes both share are renamed in order: wow.part00.wasm, ...
-  split -b "${WASM_PART_MAX}" "${SITE}/wow_bg.wasm" "${SITE}/wow.split."
-  i=0
-  for chunk in "${SITE}"/wow.split.*; do
-    mv "${chunk}" "$(printf '%s/wow.part%02d.wasm' "${SITE}" "${i}")"
-    i=$((i + 1))
-  done
-  # The hardlink, not the build: removing a link never touches the inode `web/dist` still names.
-  rm "${SITE}/wow_bg.wasm"
   # Unconditional, even if the module ever fits: one layout per directory is one code path in
   # `fetchWasm`, and a split that only sometimes happens is a path that only sometimes runs.
-  {
-    printf '{"bytes":%s,"parts":[' "${bytes}"
-    sep=""
-    for part in "${SITE}"/wow.part*.wasm; do
-      printf '%s"%s"' "${sep}" "$(basename "${part}")"
-      sep=","
-    done
-    printf ']}\n'
-  } > "${SITE}/wow.parts.json"
-  echo "split wow_bg.wasm (${bytes} B) into $(ls "${SITE}"/wow.part*.wasm | wc -l) parts"
+  split_parts "${SITE}/wow_bg.wasm" "${SITE}" wow .wasm
+  # The hardlink, not the build: removing a link never touches the inode `web/dist` still names.
+  rm "${SITE}/wow_bg.wasm"
 fi
 
 # fork: desktop — the desktop client, `target/desktop/wow-reforged.exe`, split the same way into
-# `wow-reforged.exe.partNN` + `wow-reforged.exe.parts.json` for the page's "Desktop client" link.
+# `wow-reforged.exe.partNN` + `wow-reforged.exe.parts.json` for the page's "Desktop client" link
+# and the client's self-update.
 # The clear above removed the last staging, so this restores it; absent exe is an ordinary state.
 bash scripts/stage-desktop.sh
 
@@ -207,7 +190,7 @@ bash scripts/stage-desktop.sh
 # it fails inside an upload to the static host minutes into an upload rather than here. `-maxdepth 1` on
 # purpose — the packs under `data/` are capped by the packer (measured max 9.49 MiB) and walking a
 # junction over 4,700 files to re-prove that is not worth the seconds.
-oversize=$(find "${SITE}" -maxdepth 1 -type f -size +"${WASM_PART_MAX}"c)
+oversize=$(find "${SITE}" -maxdepth 1 -type f -size +"${PART_MAX}"c)
 if [ -n "${oversize}" ]; then
   echo "error: asset over a static host's 25 MiB limit (cap here is 24 MiB):" >&2
   echo "${oversize}" >&2

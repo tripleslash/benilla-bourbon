@@ -9,7 +9,7 @@ The Python twin of scripts/stage-packs.sh; that header holds the why, and the tw
     LOOSE_DATA, LOOSE_DATA_TURTLE   installs whose loose *.html files are staged into the containers.
 """
 
-import fnmatch
+import hashlib
 import os
 import shutil
 import stat
@@ -25,7 +25,8 @@ PACKS_TURTLE = "web/packs-turtle"
 PACKS_REFORGED = "web/packs-reforged"
 SITE = "web/site"
 ADDONS = "third_party/addons"
-WASM_PART_MAX = 24 * 1024 * 1024
+# The one part cap, scripts/split-parts.sh's.
+PART_MAX = 24 * 1024 * 1024
 KEEP = ("data", "data-hd", "data-turtle", "data-reforged")
 
 
@@ -37,31 +38,60 @@ def out(text):
     print(text, flush=True)
 
 
-def stage_desktop():
-    """fork: desktop — split wow-reforged.exe into 24 MiB `wow-reforged.exe.partNN` files plus
-    `wow-reforged.exe.parts.json`, for the page's "Desktop client" link. The twin of
-    scripts/stage-desktop.sh; absent exe is an ordinary state."""
+def clear_parts(stem):
+    """Remove a previous split of `stem` from the site."""
     for name in os.listdir(SITE):
-        if name.startswith(DESKTOP_NAME + ".part"):
+        if name.startswith(stem + ".part"):
             os.remove(os.path.join(SITE, name))
-    if not os.path.isfile(DESKTOP_EXE):
-        err("note: no %s — staging without the desktop client (scripts/build-desktop.sh)" % DESKTOP_EXE)
-        return
-    size = os.path.getsize(DESKTOP_EXE)
+
+
+def split_parts(src, stem, suffix, extra=""):
+    """Split `src` into 24 MiB `<stem>.partNN<suffix>` files plus `<stem>.parts.json` in the site,
+    `{"bytes":N,<extra>,"parts":[...]}`. The twin of scripts/split-parts.sh; `src` is only read."""
+    clear_parts(stem)
+    size = os.path.getsize(src)
     parts = []
-    with open(DESKTOP_EXE, "rb") as f:
+    with open(src, "rb") as f:
         while True:
-            buf = f.read(WASM_PART_MAX)
+            buf = f.read(PART_MAX)
             if not buf:
                 break
-            name = "%s.part%02d" % (DESKTOP_NAME, len(parts))
+            name = "%s.part%02d%s" % (stem, len(parts), suffix)
             with open(os.path.join(SITE, name), "wb") as part:
                 part.write(buf)
             parts.append(name)
-    manifest = '{"bytes":%d,"parts":[%s]}\n' % (size, ",".join('"%s"' % p for p in parts))
-    with open(os.path.join(SITE, DESKTOP_NAME + ".parts.json"), "wb") as f:
+    manifest = '{"bytes":%d,%s"parts":[%s]}\n' % (
+        size,
+        extra + "," if extra else "",
+        ",".join('"%s"' % p for p in parts),
+    )
+    with open(os.path.join(SITE, stem + ".parts.json"), "wb") as f:
         f.write(manifest.encode("utf-8"))
-    out("split %s (%d B) into %d parts" % (DESKTOP_NAME, size, len(parts)))
+    out("split %s (%d B) into %d parts in %s" % (os.path.basename(src), size, len(parts), SITE))
+
+
+def stage_desktop():
+    """fork: desktop — wow-reforged.exe as `wow-reforged.exe.partNN` plus its manifest, carrying the
+    exe's SHA-1 and the build's commit time for the client's self-update. The twin of
+    scripts/stage-desktop.sh; absent exe is an ordinary state."""
+    clear_parts(DESKTOP_NAME)
+    if not os.path.isfile(DESKTOP_EXE):
+        err("note: no %s — staging without the desktop client (scripts/build-desktop.sh)" % DESKTOP_EXE)
+        return
+    sha1 = hashlib.sha1()
+    with open(DESKTOP_EXE, "rb") as f:
+        for buf in iter(lambda: f.read(1 << 20), b""):
+            sha1.update(buf)
+    extra = '"sha1":"%s"' % sha1.hexdigest()
+    version = ""
+    if os.path.isfile(DESKTOP_EXE + ".version"):
+        with open(DESKTOP_EXE + ".version", "rb") as f:
+            version = "".join(c for c in f.read().decode("ascii", "replace") if c.isdigit())
+    if version:
+        extra = '"version":%s,%s' % (version, extra)
+    else:
+        err("note: no %s.version — clients will not update to this exe" % DESKTOP_EXE)
+    split_parts(DESKTOP_EXE, DESKTOP_NAME, "", extra)
 
 
 def err(text):
@@ -245,24 +275,9 @@ def main():
     # Split the wasm module into 24 MiB *.wasm parts plus wow.parts.json.
     wasm = os.path.join(SITE, "wow_bg.wasm")
     if os.path.isfile(wasm):
-        size = os.path.getsize(wasm)
-        stem = os.path.join(SITE, "wow")  # wow_bg.wasm ships as wow.partNN.wasm
-        i = 0
-        with open(wasm, "rb") as f:
-            while True:
-                buf = f.read(WASM_PART_MAX)
-                if not buf:
-                    break
-                with open("%s.part%02d.wasm" % (stem, i), "wb") as part:
-                    part.write(buf)
-                i += 1
+        split_parts(wasm, "wow", ".wasm")  # wow_bg.wasm ships as wow.partNN.wasm
         # The link, not the build: web/dist keeps its inode.
         os.remove(wasm)
-        parts = sorted(n for n in os.listdir(SITE) if fnmatch.fnmatchcase(n, "wow.part*.wasm"))
-        manifest = '{"bytes":%d,"parts":[%s]}\n' % (size, ",".join('"%s"' % p for p in parts))
-        with open(os.path.join(SITE, "wow.parts.json"), "wb") as f:
-            f.write(manifest.encode("utf-8"))
-        out("split wow_bg.wasm (%d B) into %d parts" % (size, len(parts)))
 
     # fork: desktop — the desktop client split the same way (scripts/stage-desktop.sh, the bash twin).
     stage_desktop()
@@ -271,7 +286,7 @@ def main():
     with os.scandir(SITE) as it:
         oversize = [
             e.name for e in it
-            if e.is_file(follow_symlinks=False) and e.stat(follow_symlinks=False).st_size > WASM_PART_MAX
+            if e.is_file(follow_symlinks=False) and e.stat(follow_symlinks=False).st_size > PART_MAX
         ]
     if oversize:
         err("error: asset over a static host's 25 MiB limit (cap here is 24 MiB):")

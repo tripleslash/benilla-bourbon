@@ -5,46 +5,48 @@
 #   scripts/stage-desktop.sh [exe]      (default: target/desktop/wow-reforged.exe)
 #
 # Run by `scripts/build-desktop.sh` once the exe is built, and by `scripts/stage-packs.sh` (which
-# clears web/site/ on every web build) so a later web build keeps it. Its twins in
-# `stage-packs.py` and `stage-packs.ps1` change with it.
+# clears web/site/ on every web build) so a later web build keeps it. Its twins are the desktop
+# steps in `stage-packs.py` and `stage-packs.ps1`, which change with it.
 #
-# The exe is larger than a static host's 25 MiB per-asset limit, so it is split into 24 MiB
-# `wow-reforged.exe.partNN` files plus `wow-reforged.exe.parts.json` ({"bytes":N,"parts":[...]}),
-# the same layout as the wasm module's. The page's "Desktop client" link (`web/platform.js`,
-# `installDesktopDownload`) reads the manifest, fetches the parts and saves them back as one
-# `wow-reforged.exe`. Absent exe is an ordinary state: the site has no manifest and the page hides
-# the link.
+# The exe is larger than a static host's 25 MiB per-asset limit, so `scripts/split-parts.sh` splits it
+# into `wow-reforged.exe.partNN` files plus `wow-reforged.exe.parts.json`, the wasm module's layout.
+# The manifest also carries the exe's SHA-1 and, from the `<exe>.version` file `build-desktop.sh`
+# writes beside it, the build's commit time as `version`: the client's self-update
+# (`crates/benilla-desktop/src/update.rs`) replaces an older build with a newer one only, and only
+# with a copy that matches the hash. The page's "Desktop client" link (`web/platform.js`) reads the
+# same manifest. Absent exe is an ordinary state: the site has no manifest, the page hides the
+# link and no client updates.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# shellcheck source=split-parts.sh
+. scripts/split-parts.sh
 
 EXE="${1:-target/desktop/wow-reforged.exe}"
 SITE=web/site
-PART_MAX=$((24 * 1024 * 1024))
 NAME=wow-reforged.exe
 
 mkdir -p "${SITE}"
-rm -f "${SITE}/${NAME}".part* "${SITE}/${NAME}.parts.json" "${SITE}/${NAME}.split."*
+clear_parts "${SITE}" "${NAME}"
 
 if [ ! -f "${EXE}" ]; then
   echo "note: no ${EXE} — staging without the desktop client (scripts/build-desktop.sh)" >&2
   exit 0
 fi
 
-bytes=$(wc -c < "${EXE}")
-# BSD split (macOS) has no `-d`; the default `aa`, `ab`, ... suffixes sort in order and are renamed.
-split -b "${PART_MAX}" "${EXE}" "${SITE}/${NAME}.split."
-i=0
-for chunk in "${SITE}/${NAME}".split.*; do
-  mv "${chunk}" "$(printf '%s/%s.part%02d' "${SITE}" "${NAME}" "${i}")"
-  i=$((i + 1))
-done
-{
-  printf '{"bytes":%s,"parts":[' "${bytes}"
-  sep=""
-  for part in "${SITE}/${NAME}".part*; do
-    printf '%s"%s"' "${sep}" "$(basename "${part}")"
-    sep=","
-  done
-  printf ']}\n'
-} > "${SITE}/${NAME}.parts.json"
-echo "split ${NAME} (${bytes} B) into ${i} parts in ${SITE}"
+if command -v sha1sum >/dev/null 2>&1; then
+  sha1=$(sha1sum "${EXE}" | cut -d' ' -f1)
+else
+  sha1=$(shasum -a 1 "${EXE}" | cut -d' ' -f1)
+fi
+extra="\"sha1\":\"${sha1}\""
+# An exe with no recorded commit time ships without `version`, which no client updates to.
+version=""
+if [ -f "${EXE}.version" ]; then
+  version=$(tr -dc '0-9' < "${EXE}.version")
+fi
+if [ -n "${version}" ]; then
+  extra="\"version\":${version},${extra}"
+else
+  echo "note: no ${EXE}.version — clients will not update to this exe" >&2
+fi
+split_parts "${EXE}" "${SITE}" "${NAME}" "" "${extra}"

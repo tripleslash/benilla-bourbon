@@ -173,9 +173,9 @@ web/site/   what a static host serves    hardlinks to dist/, plus data -> ../pac
 One file does not survive the trip as itself. A static host refuses any static asset over **25 MiB**
 and `wow_bg.wasm` is 77 MB — already `-O3 --strip-debug`'d down from ~90 MB, with one 184-byte
 custom section left, so there is nothing in it to cut. `stage-packs.sh` splits it into 24 MiB
-`wow.part*.wasm` and writes `wow.parts.json` naming them; `boot.js` fetches every part
-at once and concatenates them into one stream, so the browser still compiles the module while it
-downloads. `web/dist` keeps the whole file — `trunk serve` and `wenilla-host --www` have no such
+`wow.part*.wasm` and writes `wow.parts.json` naming them (`scripts/split-parts.sh`, which splits the
+desktop client's `wow-reforged.exe` the same way); `parts.js` fetches every part at once and
+concatenates them into one stream, so the browser still compiles the module while it downloads. `web/dist` keeps the whole file — `trunk serve` and `wenilla-host --www` have no such
 limit — and the manifest's presence is how the page knows which layout it is on. The staging script
 fails the build if any other asset crosses the cap.
 
