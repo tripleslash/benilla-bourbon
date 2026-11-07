@@ -146,6 +146,20 @@ impl SmoothChannel {
         self.flight = None;
     }
 
+    /// Seats the live value at `from` and tweens it to the standing target over `duration`
+    /// seconds, with the armer's `memo` as given: the pull-in recentre's write (`0x50eed5`-
+    /// `0x50eef8`), which leaves the target alone.
+    pub(super) fn glide_from(&mut self, from: f32, duration: f32, memo: (f32, f32)) {
+        self.live = from;
+        self.from = from;
+        self.flight = Some(Flight {
+            elapsed: 0.0,
+            delay: 0.0,
+            duration,
+            memo,
+        });
+    }
+
     /// The armer, in the reference's order.
     pub(super) fn arm(&mut self, arm: &Arm) -> Armed {
         // The rewrap is stored back, not only compared (`0x512abe`).

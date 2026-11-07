@@ -737,6 +737,19 @@ impl PivotGlide {
     pub(super) fn probe(&self) -> (f32, f32) {
         self.channel.probe()
     }
+
+    /// The recentre after a drop (`0x50eeb0`-`0x50eef8`): a live height more than
+    /// [`CAM_RETURN_SLACK`] above the height the solver returned snaps to that height plus
+    /// [`CAM_RETURN_LEAD`] and glides back to the target, left alone, over [`CAM_RETURN_SECS`],
+    /// restarted every frame the test holds. An unordered compare skips it (`0x50eec4`). The memo
+    /// is [`Self::advance`]'s own arm, no delay and factor 1, which the write leaves standing, so
+    /// the next frame's arm reads a repeat and the glide runs whole.
+    pub(super) fn recentre(&mut self, solved: f32) {
+        if self.channel.live() - solved > CAM_RETURN_SLACK {
+            self.channel
+                .glide_from(solved + CAM_RETURN_LEAD, CAM_RETURN_SECS, (0.0, 1.0));
+        }
+    }
 }
 
 /// The camera rig's state: the zoom, the collided arm, the mouse-look session and the pose
@@ -1751,6 +1764,10 @@ pub(super) fn seat_on_subject(
         super::camera_water::corridor_off(live_pivot)
     };
     let orbit_pivot = super::camera_water::pivot_height(&corridor, pivot_target, live_pivot, 1.0);
+    // The height's pull-in, after the eye's inputs are taken as the reference's runs after the eye
+    // is stored (`0x50ede0`), so the snap seeds next frame's corridor. With the head-room probe
+    // unbuilt, only the submerge band's drop sets it off.
+    rig.pivot.recentre(orbit_pivot);
     // The corridor floor also lifts the sweep origin, which keeps the arm off the water. The
     // reference starts the boom at the clamped pivot height (`0x50e786`), `surface + 2/9` in the
     // surface band; ours starts at the head, `surface + 0.171` on a surface-swimming human male.
@@ -2219,6 +2236,45 @@ mod tests {
 
     use benilla_world::billboard::BillboardCard;
     use benilla_world::mesh_tag::alpha_bits;
+
+    /// A dive's 19/18 yd drop pulls the height in under its solved value plus the lead, and it
+    /// glides back to the standing target over two seconds; a drop inside the slack does nothing.
+    #[test]
+    fn the_height_pulls_in_on_a_drop_and_glides_back_over_two_seconds() {
+        let mut glide = PivotGlide::default();
+        assert_eq!(
+            glide.advance(Some(2.0), 0.01),
+            2.0,
+            "the first height snaps"
+        );
+        glide.recentre(2.0 - CAM_RETURN_SLACK * 0.5);
+        assert_eq!(
+            glide.advance(Some(2.0), 0.01),
+            2.0,
+            "inside the slack: no pull-in"
+        );
+
+        let solved = 2.0 - 19.0 / 18.0;
+        glide.recentre(solved);
+        let from = solved + CAM_RETURN_LEAD;
+        assert_eq!(
+            glide.probe(),
+            (from, 2.0),
+            "snapped in, the target left alone"
+        );
+        let at_half = glide.advance(Some(2.0), CAM_RETURN_SECS / 2.0);
+        assert!(
+            (at_half - (from + 2.0) / 2.0).abs() < 1.0e-5,
+            "the frame's own arm is a repeat, so the glide runs on its 2 s: {at_half}"
+        );
+        assert_eq!(
+            glide.advance(Some(2.0), CAM_RETURN_SECS / 2.0),
+            2.0,
+            "landed"
+        );
+        glide.recentre(f32::NAN);
+        assert_eq!(glide.probe().0, 2.0, "an unordered compare skips it");
+    }
 
     /// The arm's two speeds: in at once on a hit, out over the fixed span on the cosine.
     #[test]
