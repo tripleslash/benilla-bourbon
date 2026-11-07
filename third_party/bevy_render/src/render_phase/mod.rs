@@ -72,7 +72,6 @@ use bevy_log::warn;
 pub use bevy_material::labels::DrawFunctionId;
 pub use bevy_material_macros::DrawFunctionLabel;
 pub use bevy_material_macros::ShaderLabel;
-use bevy_render::renderer::RenderAdapterInfo;
 use core::{
     fmt::Debug,
     hash::Hash,
@@ -1088,12 +1087,13 @@ where
         let mut draw_functions = draw_functions.write();
 
         let render_device = world.resource::<RenderDevice>();
-        let render_adapter_info = world.resource::<RenderAdapterInfo>();
+        // BENILLA: upstream excluded DX12 here (gfx-rs/wgpu#7974: its count draws read
+        // `instance_index` from 0), while `bevy_pbr`'s indirect-parameter shader still compacts
+        // for the count path on DX12. The vendored wgpu-core and wgpu-hal give count draws their
+        // own `first_instance` and `base_vertex` on DX12 (`third_party/wgpu-core/BENILLA.md`).
         let multi_draw_indirect_count_supported = render_device
             .features()
-            .contains(Features::MULTI_DRAW_INDIRECT_COUNT)
-            // TODO: https://github.com/gfx-rs/wgpu/issues/7974
-            && !matches!(render_adapter_info.backend, wgpu::Backend::Dx12);
+            .contains(Features::MULTI_DRAW_INDIRECT_COUNT);
 
         match self.batch_sets {
             BinnedRenderPhaseBatchSets::DynamicUniforms(ref batch_sets) => {

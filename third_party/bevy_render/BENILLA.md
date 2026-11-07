@@ -232,6 +232,21 @@ pipelines holds still for 3 s (at most 30 s after the first unsaved one), on an 
 the last handle drops. `initialize_renderer` requests the feature under either settings priority.
 DX12, Metal, GL and the browser get no cache; on wasm32 the handle is empty.
 
+## The thirteenth delta: multi-draw-indirect-count on DX12
+
+`src/render_phase/mod.rs`, `render_batchable_meshes`: `multi_draw_indirect_count_supported` is the
+device feature alone. Upstream also required the backend not to be DX12 (a `TODO` naming
+[gfx-rs/wgpu#7974](https://github.com/gfx-rs/wgpu/issues/7974): there, count draws ran every draw
+with `@builtin(instance_index)` from 0, so every mesh of a batch set read the first one's
+uniforms). The vendored `third_party/wgpu-core` and `third_party/wgpu-hal` give count draws their
+own `first_instance` and `base_vertex` on DX12, so the exclusion goes, and with it the import of
+`RenderAdapterInfo` it was the only user of. It also ends a mismatch: `bevy_pbr`'s
+`build_indirect_params` pipeline keys `MULTI_DRAW_INDIRECT_COUNT_SUPPORTED` on the feature alone,
+so on DX12 the shader compacted batch sets for count draws (skipping their zero-instance
+entries) while this phase drew them without a count. No other bevy 0.19.1 crate tests for DX12
+(`bevy_pbr`, `bevy_core_pipeline` and the rest grepped for `Dx12`). benilla's cameras draw directly
+unless `WOW_INDIRECT=1`, so the path runs only there.
+
 ## The delta, and the command that proves it
 
 **A few lines changed in five upstream files, one module added.**
@@ -246,6 +261,7 @@ DX12, Metal, GL and the browser get no cache; on wasm32 the handle is empty.
 | `src/mesh/mod.rs` | `RenderMesh` sets `DEFERRABLE = false` (above) |
 | `src/render_resource/pipeline_cache.rs` | the web's async pipeline creation (fifth delta); `create_pipeline_task` drops its two macOS lines (tenth delta); the `disk_cache` field, passed as each pipeline's `cache` (twelfth delta) |
 | `src/pipelined_rendering.rs` | `renderer_extract` holds the render app back on the exit frame (eleventh delta) |
+| `src/render_phase/mod.rs` | `render_batchable_meshes` no longer excludes DX12 from multi-draw-indirect-count (thirteenth delta) |
 | `src/lib.rs` | `mod wasm_serial;`; the render worker's lines (eighth delta); `destroy_released_gpu_resources` and its counter (ninth delta) |
 | `src/wasm_serial.rs` | new — the scope itself. Has its own header |
 | `src/pipeline_disk_cache.rs` | new — the on-disk pipeline cache (twelfth delta). Has its own header |
