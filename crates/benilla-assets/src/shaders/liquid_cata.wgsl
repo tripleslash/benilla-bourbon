@@ -399,6 +399,9 @@ const GRADE_NEAR_YD: f32 = 30.0;
 const GRADE_FAR_YD: f32 = 300.0;
 // fork: the vertical column (yd) over which the experimental tier's water comes in at the shore.
 const SHORE_FADE_YD: f32 = 0.3;
+// fork: the steepest bed (rise per yard) whose column change across a pixel the soft shore widens
+// its fade for; anything steeper is a depth discontinuity behind the water.
+const SHORE_MAX_BED_SLOPE: f32 = 2.0;
 
 /// fork: a reflected ray that a wave has turned under the surface, folded back just above it: a facet
 /// that would reflect into the water sends its light up off the next wave instead.
@@ -1298,7 +1301,10 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
     let foot_x = dpdx(in.world_position.xz);
     let foot_y = dpdy(in.world_position.xz);
     let foot = max(length(foot_x), length(foot_y));
-    let column_rate = fwidth(column_v);
+    // A bed can change the column across a pixel by its footprint times its slope at most; a bigger
+    // jump is a silhouette in the depth copy (a ridge in front of a deeper bed), not a shore, and
+    // left unbounded it would fade the water to clear along every such edge.
+    let column_rate = min(fwidth(column_v), foot * SHORE_MAX_BED_SLOPE);
     // fork: modern lighting — the experimental tier's wind ripples, read here in uniform control flow
     // for the pixel footprint's derivatives. Only the sea carries them, on its calm surface
     // (`look_c.w`) and on its highlight's normal (`look_d.z`); a river, a lake and a WMO's liquid keep
