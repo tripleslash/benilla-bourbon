@@ -1280,10 +1280,13 @@ mod tests {
             .init_resource::<crate::go_templates::GameObjectTemplates>()
             .insert_resource(CurrentMap(1))
             .insert_resource(benilla_world::terrain_stream::ViewFocus::body(at, true))
+            // A resident, scene-ready world, collidable under the focus: `presentable()` needs all
+            // three, so a cover raised over it clears by the screen's own rule alone.
             .insert_resource(WorldLoadProgress {
                 ready: 9,
                 total: 9,
                 focus_resident: true,
+                focus_collidable: true,
                 scene_ready: true,
                 ..Default::default()
             })

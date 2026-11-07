@@ -13,6 +13,7 @@
 - **benilla-buildstamp** (no Bevy) — The git build-id stamp shared by the launchers' build scripts
 - **benilla-bytes** (no Bevy) — Bounds-checked byte readers and IFF chunk iteration shared by the format parsers
 - **benilla-dbc** (no Bevy) — WDBC (client DBC) reader for WoW 1.12.1 (build 5875)
+- **benilla-desktop** (no Bevy) — fork: desktop — the self-contained Windows client: benilla's launcher with its game data fetched from wow.example.com and every file it keeps in wow-data/ beside the executable
 - **benilla-formats** (no Bevy) — WoW 1.12.1 asset-format adapters (MPQ/BLP/DBC/ADT/WDT) and the benilla-extract CLI
 - **benilla-lua** (no Bevy) — The Lua interpreter benilla's script host runs: 5.1.5 with the 1.12.1 client's grammar, its state as plain Rust data
 - **benilla-m2** (no Bevy) — M2 (MD20) model reader for WoW 1.12.1 (build 5875)
@@ -32,8 +33,8 @@
 - **benilla-worldview** (no Bevy) — The world viewer: the engine with no game attached, which keeps the engine and game split honest
 - **benilla** (no Bevy) — The launcher: build.rs stamps the git build id and main() hands it to benilla-app, so a new commit rebuilds this package and not the app crate
 - **wenilla-host** (no Bevy) — Native web host for the browser build: serves the wasm bundle, answers /data/* from the real MPQ chain, and proxies /ws/{port} to the world/login TCP sockets
-- **wenilla-packdecode** (no Bevy) — The pack Web Worker's other half: BENPACK header checks and zstd/deflate decoding, compiled to its own small wasm module so a pack is decoded off the frame thread (web/packworker.js)
-- **wenilla** (no Bevy) — The browser entry point: a wasm-bindgen `#[start]` that boots benilla-app inside the canvas `web/index.html` gives it — benilla's third launcher shim, after `benilla` and `benilla-worldview` (decision 1160), and like them just carries the build-id stamp so a commit dirties this ~20-line crate instead of the app
+- **wow-packdecode** (no Bevy) — The pack Web Worker's other half: BENPACK header checks and zstd/deflate decoding, compiled to its own small wasm module so a pack is decoded off the frame thread (web/packworker.js)
+- **wow** (no Bevy) — The browser entry point: a wasm-bindgen `#[start]` that boots benilla-app inside the canvas `web/index.html` gives it — benilla's third launcher shim, after `benilla` and `benilla-worldview` (decision 1160), and like them just carries the build-id stamp so a commit dirties this ~20-line crate instead of the app
 
 ## App subsystems — Bevy plugins in load order (`crates/benilla-app/src/lib.rs`)
 
@@ -114,9 +115,10 @@
 ## Modules (top-level, per crate)
 
 - **benilla-adt** (lib.rs): combined_alpha 
-- **benilla-app** (lib.rs): account_data addon_harness area area_poi area_trigger asset_churn aura_visual bindings blob_shadow bowstring camera_shake capture chat_bubble chr_classes cinematic client_state combat_log combat_text console crash creature_anim creature_type cursor cvars data_load_guard_tests death debug_panel dev doodad_events entities field_callbacks field_watch fishing_line flavor footprints game_plugins game_tip glue_session go_anim go_templates hd_models hover_log item_lane item_names item_watch items lanes loading_screen local_state memory_pressure minimap nameplates names net no_install npc_text perf pipe_warm player player_commands player_shadow poi_marker portrait preflight probe_shield query_cache quest_markers raid_marks ranged_flex realmlist render_worker run_mode screen_fade screenshot script_calls shaders shutdown smart_rect sound spell swing_refusal target test_support text_filter textinput transport tutorial ui_action ui_auction ui_aura ui_bank ui_battlefield ui_battlefield_positions ui_battlefield_score ui_billing ui_bind_confirm ui_binder ui_cast ui_char ui_chat ui_craft ui_dialog_verbs ui_dressup ui_duel ui_gamma ui_gm_ticket ui_gossip ui_guild ui_honor ui_inspect ui_instance ui_item_text ui_items ui_layout ui_logout ui_loot ui_loot_roll ui_macro ui_mail ui_memory ui_merchant ui_mirror ui_models ui_net ui_panes ui_party ui_pass ui_pet ui_pet_book ui_pet_stats ui_petition ui_quest ui_quest_log ui_quest_share ui_reputation ui_saved ui_script ui_session ui_shapeshift ui_social ui_spellbook ui_stable ui_summon ui_tabard ui_talent ui_talent_wipe ui_taxi ui_text ui_tooltip ui_trade ui_tradeskill ui_trainer ui_unit ui_world_enter ui_world_map video vm_pass vplates wasm_alloc wdb weapon_trail web_threads webdiag webenv webgpu webprogress world_backdrop world_console world_state world_state_ui 
+- **benilla-app** (lib.rs): account_data addon_harness area area_poi area_trigger asset_churn aura_visual bindings blob_shadow bowstring camera_shake capture chat_bubble chr_classes cinematic client_state combat_log combat_text console crash creature_anim creature_type cursor cvars data_load_guard_tests death debug_panel desktop dev doodad_events entities field_callbacks field_watch fishing_line flavor footprints game_plugins game_tip glue_session go_anim go_templates hd_models hover_log item_lane item_names item_watch items lanes loading_screen local_state memory_pressure minimap nameplates names net no_install npc_text perf pipe_warm pipeline_cache_file player player_commands player_shadow poi_marker portrait preflight probe_shield query_cache quest_markers raid_marks ranged_flex realmlist render_worker run_mode screen_fade screenshot script_calls shaders shutdown smart_rect sound spell swing_refusal target test_support text_filter textinput transport tutorial ui_action ui_auction ui_aura ui_bank ui_battlefield ui_battlefield_positions ui_battlefield_score ui_billing ui_bind_confirm ui_binder ui_cast ui_char ui_chat ui_craft ui_dialog_verbs ui_dressup ui_duel ui_gamma ui_gm_ticket ui_gossip ui_guild ui_honor ui_inspect ui_instance ui_item_text ui_items ui_layout ui_logout ui_loot ui_loot_roll ui_macro ui_mail ui_memory ui_merchant ui_mirror ui_models ui_net ui_panes ui_party ui_pass ui_pet ui_pet_book ui_pet_stats ui_petition ui_quest ui_quest_log ui_quest_share ui_reputation ui_saved ui_script ui_session ui_shapeshift ui_social ui_spellbook ui_stable ui_summon ui_tabard ui_talent ui_talent_wipe ui_taxi ui_text ui_tooltip ui_trade ui_tradeskill ui_trainer ui_unit ui_world_enter ui_world_map video vm_pass vplates wasm_alloc wdb weapon_trail web_threads webdiag webenv webgpu webprogress world_backdrop world_console world_state world_state_ui 
 - **benilla-assets** (lib.rs): adt anim_rng blp column_grid coords frame_budget gpu_blp m2 materials minimap_grid model spatial_cache terrain tex_filter tga_chain trace wdt wmo world_assets 
-- **benilla-formats** (lib.rs): anim_data area_poi area_sound area_table area_trigger auction_house bank_bag_slot_prices bundled_addons camera_shakes cfg_categories cfg_configs chain characters chat_channels chr_classes chr_races cinematics creature_families creature_sound creature_spell_data creature_types creatures dbc death_thud durability elevators emit_timing emote_text emotes environmental_damage exhaustion factions footsteps game_tips gameobjects garble gm_survey gm_ticket_category ground_effects install item_random_properties item_sounds item_visuals itembagfamily itemclass items itemsets itemsubclass languages layers lfg_dungeons light liquid loading_route loading_screen locale locale_routing lock lock_type loose macro_icons mail_template maps material minimap_translate models npc_greeting packages page_text_material particles pet_stats quest_headers quest_info race_creature_type race_pvp_team race_sound resistances ribbons server_messages sheathe skill_lines skill_tiers sound_entries sound_provider sound_water spell_focus spell_light spell_mechanic spell_visual spells stable_slot_prices stationery talents taxi taxi_nodes taxi_path terrain text_filter_lists tga transports unit_blood value_track vocal_ui_sounds wdl weapon_impact weapon_swing web webpack wmo_area world_map_area world_map_continent world_map_overlay world_state_ui wow_ini zone_map 
+- **benilla-desktop** (lib.rs): update 
+- **benilla-formats** (lib.rs): anim_data area_poi area_sound area_table area_trigger auction_house bank_bag_slot_prices bundled_addons camera_shakes cfg_categories cfg_configs chain characters chat_channels chr_classes chr_races cinematics creature_families creature_sound creature_spell_data creature_types creatures dbc death_thud durability elevators emit_timing emote_text emotes environmental_damage exhaustion factions footsteps game_tips gameobjects garble gm_survey gm_ticket_category ground_effects install item_random_properties item_sounds item_visuals itembagfamily itemclass items itemsets itemsubclass languages layers lfg_dungeons light liquid loading_route loading_screen locale locale_routing lock lock_type loose macro_icons mail_template maps material minimap_translate models netpack npc_greeting packages page_text_material particles pet_stats quest_headers quest_info race_creature_type race_pvp_team race_sound remote resistances ribbons server_messages sheathe skill_lines skill_tiers sound_entries sound_provider sound_water spell_focus spell_light spell_mechanic spell_visual spells stable_slot_prices stationery talents taxi taxi_nodes taxi_path terrain text_filter_lists tga transports unit_blood value_track vocal_ui_sounds wdl weapon_impact weapon_swing web webpack wmo_area world_map_area world_map_continent world_map_overlay world_state_ui wow_ini zone_map 
 - **benilla-lua** (lib.rs): api cfmt compile heap ld12 lex lib_base lib_math lib_string lib_table number parse pools proto reload strtod table value vm 
 - **benilla-m2** (lib.rs): error model skin tests track 
 - **benilla-mlua** (lib.rs): conv error 
@@ -128,7 +130,7 @@
 - **benilla-ui** (lib.rs): auction_sort bindings_xml civil color crt framexml justify layout loader markup messages order screencoord script source status strings test_support toc widget 
 - **benilla-visual** (lib.rs): relight 
 - **benilla-wasm-alloc-test** (lib.rs): wasm_alloc 
-- **benilla-world** (lib.rs): art_scope assets bgwin billboard boot build_id card_store clouds clutter collision decal dev_state doodad_anim entity_shade exterior_cull fanout far_wall ffx_glow final_pass frame_pace fsr ground_fx horizon instance_tint interact interior launch_env layout_keys lighting liquid log_ring mac_quit map_proj mat_anim_table mesh_tag model_fade model_forms model_render modern modkeys particles perf_probe ribbons ride_frame rig_anim rig_palette rig_rider schedule shaders sky sky_order skybox ssilvb static_gx static_merge straddle sun surface system_profile terrain_stream thread_qos view vis_chain water_fx wdl weather wind wmo_portal world_census world_flags world_map world_plugins world_point world_unit worldview zfill 
+- **benilla-world** (lib.rs): art_scope assets bgwin billboard boot build_id card_store clouds clutter collision decal dev_state doodad_anim entity_shade exterior_cull fanout far_wall ffx_glow final_pass frame_pace fsr ground_fx horizon instance_tint interact interior launch_env layout_keys lighting liquid log_ring mac_quit map_proj mat_anim_table mesh_tag model_fade model_forms model_render modern modkeys par_encode particles perf_probe ribbons ride_frame rig_anim rig_palette rig_rider schedule shaders sky sky_order skybox ssilvb static_gx static_merge straddle sun surface system_profile terrain_stream thread_qos view vis_chain water_fx wdl weather wind wmo_portal world_census world_flags world_map world_plugins world_point world_unit worldview zfill 
 - **wenilla-host** (lib.rs): data packs remote static_site ws 
 - **benilla-packer** (main.rs): append group inspect merge overlay plan sidecars sidn stack wdl 
 
@@ -315,7 +317,7 @@
 - `WOW_HIT_COST` — benilla-app/src/ui_script/input.rs
 - `WOW_HORIZON` — benilla-app/src/lib.rs, benilla-world/src/horizon.rs, benilla-world/src/world_flags.rs
 - `WOW_HORIZON_CENSUS` — benilla-app/src/lib.rs, benilla-world/src/horizon.rs
-- `WOW_HOST` — benilla-app/src/cvars/mod.rs, benilla-app/src/realmlist.rs, benilla-app/src/webenv.rs
+- `WOW_HOST` — benilla-app/src/cvars/mod.rs, benilla-app/src/desktop.rs, benilla-app/src/realmlist.rs, benilla-app/src/webenv.rs
 - `WOW_HOVER_LOG` — benilla-app/src/hover_log.rs
 - `WOW_HOVER_LOG_REPORT` — benilla-app/src/lib.rs
 - `WOW_HOVER_PROBE` — benilla-app/src/target/hover_probe.rs
@@ -545,6 +547,7 @@
 - `WOW_ROW_BLOAT` — benilla-app/src/perf/census.rs, benilla-app/src/perf/mod.rs
 - `WOW_RWTRACE` — benilla-app/src/render_worker.rs
 - `WOW_SCHED_CENSUS` — benilla-app/src/dev.rs, benilla-world/src/bgwin.rs
+- `WOW_SERIAL_ENCODE` — benilla-world/src/par_encode.rs
 - `WOW_SHADE_CENSUS` — benilla-world/src/entity_shade.rs
 - `WOW_SHADOW_TRACE` — benilla-app/src/player_shadow.rs
 - `WOW_SHOT_REQUIRE` — benilla-app/src/capture/live_shot.rs
@@ -563,6 +566,7 @@
 - `WOW_STALL_SAMPLE` — benilla-app/src/perf/stall.rs
 - `WOW_STATIC_GX` — benilla-app/src/lib.rs, benilla-world/src/static_gx/mod.rs
 - `WOW_STATIC_GX_FADE` — benilla-world/src/static_gx/mod.rs
+- `WOW_STATIC_GX_MDI` — benilla-world/src/static_gx/render/batch.rs
 - `WOW_STATIC_GX_PREPASS` — benilla-world/src/static_gx/render.rs
 - `WOW_STATIC_GX_PROP` — benilla-world/src/static_gx/mod.rs
 - `WOW_STATIC_GX_WMO` — benilla-world/src/static_gx/mod.rs
@@ -658,7 +662,7 @@
 - `WOW_WORLDVIEW_SHOT_COUNT` — benilla-world/src/worldview.rs
 - `WOW_WORLDVIEW_SHOT_EVERY` — benilla-world/src/worldview.rs
 - `WOW_WORLDVIEW_SURVEY` — benilla-world/src/worldview.rs
-- `WOW_WS` — benilla-app/src/webenv.rs
+- `WOW_WS` — benilla-app/src/desktop.rs, benilla-app/src/webenv.rs
 - `WOW_ZFILL` — benilla-assets/src/materials.rs
 
 ## Scripts (`scripts/`)
@@ -679,6 +683,7 @@
 - `web-build-threads.py` — The browser build WITH THREADS.
 - `web-setup.py` — One-time toolchain for the browser build (no sudo, nothing system-wide).
 - `api-coverage.sh` — Addon-API coverage: how much of the 1.12.1 client's global surface benilla's UI VM presents.
+- `build-desktop.sh` — fork: desktop — the self-contained Windows x64 client, one executable.
 - `check.sh` — The in-loop verify: fmt everywhere, clippy and test on the changed crates and their dependents.
 - `cine.sh` — Play one cinematic on the probe and print what happened, as a timeline.
 - `doc-links.sh` — fail on a doc link whose target is declared nowhere in the workspace.
@@ -690,6 +695,8 @@
 - `probe-identity.sh` — Who a scripted run logs in as; sourced by smoke.sh, cine.sh and summon-live.sh, never run alone.
 - `smoke.sh` — The clean-run gate: boot the real client, log out, re-enter, walk the realm list, check the log.
 - `soundprobe.sh` — Start the client in sound measuring mode: record the mix before and after the output limiter.
+- `split-parts.sh` — split one file into 24 MiB parts plus a manifest, for a static host's 25 MiB per-asset cap.
+- `stage-desktop.sh` — fork: desktop — stage wow-reforged.exe into web/site/ for an upload to the static host.
 - `stage-packs.sh` — assemble web/site/, the directory a static host serves.
 - `summon-live.sh` — Two-client live summon probe: a second account summons this checkout's character, which accepts.
 - `unit-tests.sh` — The test gates' runner: the tests of every target the cargo package and target flags it is given select, all run, a failure not stopping the rest.

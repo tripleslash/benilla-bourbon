@@ -88,7 +88,15 @@ pub fn inside_wall(farclip: f32, cam_pos: Vec3, cam_fwd: Vec3, center: Vec3, rad
 /// Mint a twin for each base material the world camera sees on a model part ([`takes_twin`]), and
 /// keep each twin a copy of its base.
 fn mint_far_wall_twins(
-    cam: Query<&VisibleEntities, With<WorldCamera>>,
+    // Disjoint from the water mirror's camera, whose list `liquid::reflect`'s thin pass rewrites
+    // in the same schedule: no camera is both, and the filter says so to the scheduler.
+    cam: Query<
+        &VisibleEntities,
+        (
+            With<WorldCamera>,
+            Without<crate::liquid::LiquidReflectionCamera>,
+        ),
+    >,
     parts: Query<&MeshMaterial3d<WowModelMaterial>, With<ModelPart>>,
     mut materials: ResMut<Assets<WowModelMaterial>>,
     mut edits: MessageReader<AssetEvent<WowModelMaterial>>,

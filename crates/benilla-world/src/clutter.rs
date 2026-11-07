@@ -167,8 +167,8 @@ pub const CLUTTER_SCALE_DEFAULT: f32 = 1.3;
 /// chunk times it (`frillDensity`), kept for `GetWorldDetail` and `GetCVar`.
 ///
 /// Deviation: the scatter does not read `density`. It runs at the High stop times `density_gain`
-/// ([`Self::scatter_density`]), so Ground Clutter Density alone sets how much ground cover there
-/// is, and Environment Detail no longer does (the director's call, 2026-11-06). A change
+/// ([`Self::scatter_density`]), because the director chose (2026-11-06) that Ground Clutter
+/// Density alone sets how much ground cover there is, and Environment Detail no longer does. A change
 /// re-scatters loaded tiles, as the 1.12 setter rebuilds its chunks. `fade_far` is the Ground
 /// Clutter Draw Distance and `scale` every tuft's size. Seeded from `$WOW_CLUTTER_DENSITY` (the
 /// gain; 0 is no clutter), `$WOW_CLUTTER_ALPHA` and `$WOW_CLUTTER_FADE`.

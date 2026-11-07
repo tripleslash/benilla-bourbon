@@ -405,8 +405,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // also writes `SmallCull` {0.07, 0.04, 0.01}, and `GetWorldDetail` reads only `SmallCull`,
     // whose registered 0.04 is stop 1: the reference's slider boots at Medium. Welded to
     // `ClutterConfig::default().density` (stop = density - 1). Ours boots at High (the director's
-    // call, 2026-09-08), `SmallCull` with it below. Deviation: no renderer reads the stop; the
-    // ground clutter runs at High times `groundClutterDensity` (the director's call, 2026-11-06).
+    // call, 2026-09-08), `SmallCull` with it below. Deviation: no renderer reads the stop, because
+    // the ground clutter runs at High times `groundClutterDensity` (the director's call, 2026-11-06).
     ours(
         "WorldDetail",
         "2",

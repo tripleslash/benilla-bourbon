@@ -1003,7 +1003,14 @@ pub(crate) mod schedule_tests {
     ///
     /// **682 (fork: measured at the merge of upstream 39de572fc)** — upstream's new
     /// `doodad_anim::play_carrier_animation` against the exclusive `run_physics_schedule`, as above.
-    const POST_UPDATE_CEILING: usize = 682;
+    ///
+    /// **690 (merge of upstream 5fb852dd0; read pair by pair against the 681 dump)** — eight are
+    /// upstream's `portrait::glue_booth::seat_on_stage_bones` (e2aeaecff), declared after
+    /// `RigModelPass` and before `TransformSystems::Propagate` as `compose_rig_models` is, and
+    /// paired with what that system already pairs with: the exclusive `run_physics_schedule`,
+    /// avian's collider and position writers, `conform::conform_units` and the transform
+    /// propagation chain, over `Transform`s of the glue scene's seats that none of them moves.
+    const POST_UPDATE_CEILING: usize = 690;
     const POST_UPDATE_SLACK: usize = 20;
     /// The actionable pairs in `Update`: conflicting access, no declared order, and nothing
     /// [`Classes`] explains, so the executor orders them however the graph falls. The count may
