@@ -137,6 +137,72 @@ pub(crate) fn fullscreen_mode(monitor: MonitorSelection) -> WindowMode {
     }
 }
 
+/// fork: desktop — the render plugin on the graphics API `gxApi` names, resolved before the `App`
+/// exists, since the plugin creates the device as it builds. The reference reads its default,
+/// "direct3d" (`0x63a833`), as Direct3D and "OpenGl" as OpenGL (`0x63a3c4`); here "direct3d" is
+/// Direct3D 12, "vulkan" Vulkan and "opengl" OpenGL. `$WGPU_BACKEND` overrides it for the session.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn with_render_api(
+    plugins: bevy::app::PluginGroupBuilder,
+) -> bevy::app::PluginGroupBuilder {
+    plugins.set(bevy::render::RenderPlugin {
+        render_creation: bevy::render::settings::WgpuSettings {
+            backends: Some(boot_render_backends()),
+            ..default()
+        }
+        .into(),
+        ..default()
+    })
+}
+
+/// The web build has one API, the browser's: the plugins as they are.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn with_render_api(
+    plugins: bevy::app::PluginGroupBuilder,
+) -> bevy::app::PluginGroupBuilder {
+    plugins
+}
+
+/// The backends [`with_render_api`] creates the renderer on: the stored `gxApi`, or its registered
+/// default, when an adapter on this machine answers for it; else every backend, wgpu's own pick,
+/// so a choice the machine cannot honour never leaves the client without a renderer. The log
+/// plugin does not exist yet, so the line goes to stdout.
+#[cfg(not(target_arch = "wasm32"))]
+fn boot_render_backends() -> wgpu::Backends {
+    if let Some(env) = wgpu::Backends::from_env() {
+        println!("render: backends {env:?} from $WGPU_BACKEND");
+        return env;
+    }
+    let api = crate::cvars::boot_cvar("gxApi")
+        .or_else(|| crate::cvars::registered_default("gxApi", 0).map(str::to_string))
+        .unwrap_or_default();
+    let wanted = api_backends(&api);
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wanted,
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    if bevy::tasks::block_on(instance.enumerate_adapters(wanted)).is_empty() {
+        println!("render: gxApi {api:?} has no adapter on this machine; wgpu picks the backend");
+        wgpu::Backends::all()
+    } else {
+        println!("render: gxApi {api:?} -> {wanted:?}");
+        wanted
+    }
+}
+
+/// `gxApi` as wgpu backends, compared case-blind as the reference's `0x63a3c4` does; any other
+/// value is the default, Direct3D.
+#[cfg(not(target_arch = "wasm32"))]
+fn api_backends(api: &str) -> wgpu::Backends {
+    if api.eq_ignore_ascii_case("vulkan") {
+        wgpu::Backends::VULKAN
+    } else if api.eq_ignore_ascii_case("opengl") {
+        wgpu::Backends::GL
+    } else {
+        wgpu::Backends::DX12
+    }
+}
+
 /// The mode the primary window is born in, resolved before the `App` exists so a fullscreen launch
 /// does not flash windowed until `Startup`. `MonitorSelection::Primary`, since `Current` has no
 /// answer before the window exists (`bevy_winit::select_monitor`).
@@ -1069,6 +1135,21 @@ const GX_RESOLUTION: &str = "gxResolution";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `gxApi`'s three values pick their backend; the registered default and anything unknown are
+    /// Direct3D 12.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_graphics_api_row_names_its_backend() {
+        assert_eq!(api_backends("direct3d"), wgpu::Backends::DX12);
+        assert_eq!(api_backends("Vulkan"), wgpu::Backends::VULKAN);
+        assert_eq!(api_backends("OpenGl"), wgpu::Backends::GL);
+        assert_eq!(api_backends(""), wgpu::Backends::DX12);
+        assert_eq!(
+            api_backends(crate::cvars::registered_default("gxApi", 0).expect("registered")),
+            wgpu::Backends::DX12
+        );
+    }
 
     /// A Vulkan presentation stall past wgpu-core's 1 s frame timeout is waited out, not turned
     /// into a lost device, only while the lock resolves wgpu-hal to `third_party/wgpu-hal`, the

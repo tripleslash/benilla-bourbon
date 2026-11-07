@@ -720,7 +720,7 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     // No `game://` source: the five UI shaders are compiled in by `crate::shaders`
     // (`embedded://benilla_app/shaders/…`), so no build-machine path reaches the binary.
 
-    app.add_plugins(quiet_console_on_web(
+    app.add_plugins(quiet_console_on_web(video::with_render_api(
         benilla_world::boot::tuned_default_plugins(Window {
             title: "World of Warcraft".into(),
             // Born in the player's display mode (`gxWindow` read straight off `config.toml`) rather
@@ -790,7 +790,7 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
             },
             ..default()
         }),
-    ))
+    )))
     .add_plugins(benilla_world::thread_qos::ThreadQosPlugin)
     // Undoes winit's forced macOS app activation for background runs; the window-side half is the
     // `Window` above.

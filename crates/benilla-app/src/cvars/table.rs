@@ -643,17 +643,24 @@ pub(crate) const REGISTERED: &[Registered] = &[
     same("widescreen", "1"),
     // `gxApi` (`0x63a833`: name `0x842a64`, default `0x864f7c` "direct3d", flags 3, callback
     // `0x63b030`, record `[0xc4ea94]`): the reference builds D3D9 unless it reads "OpenGl"
-    // (`0x63a3c4`, `0x842a5c`). Here it reports the wgpu backend (`wgpu::Backend::to_str`), pushed
-    // from `RenderAdapterInfo` and owned by the session, so it is never persisted. pfUI's
-    // `panel.lua:185` concatenates it.
-    deviates(
-        "gxApi",
-        "",
-        "direct3d",
-        "descriptive, not a selector — benilla renders through wgpu, which has no D3D9 \
-         backend and no chooser; the value is the live adapter's own and is never persisted",
-    )
-    .latched(),
+    // (`0x63a3c4`, `0x842a5c`). pfUI's `panel.lua:185` concatenates it. fork: desktop — a native
+    // client creates its renderer on it at launch (`video::with_render_api`): "direct3d" is
+    // Direct3D 12, "vulkan" Vulkan, "opengl" OpenGL, written by the Graphics API row of both
+    // options windows. The web build has the browser's API alone: there it reports the wgpu
+    // backend (`wgpu::Backend::to_str`), pushed from `RenderAdapterInfo` and owned by the session,
+    // so it is never persisted.
+    if cfg!(target_arch = "wasm32") {
+        deviates(
+            "gxApi",
+            "",
+            "direct3d",
+            "descriptive, not a selector — the page renders through the browser's one API; the \
+             value is the live adapter's own and is never persisted",
+        )
+        .latched()
+    } else {
+        same("gxApi", "direct3d").latched()
+    },
     // `gxVSync` (`0x63a859`, "1", flags 3), `OptionsFrame.lua:9`. The knob is
     // [`crate::video::VideoConfig::vsync`], which the window's present mode follows at the
     // `RestartGx` commit. `$WOW_NOVSYNC=1` overrides it for the session.

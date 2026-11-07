@@ -165,8 +165,8 @@ pub(crate) struct Cvars {
     index: HashMap<String, usize>,
     /// The file's `[cvars]` entries in their own spelling, the merge base of every save.
     file: BTreeMap<String, String>,
-    /// Lowercased names the session owns rather than the player: the env levers, and `gxApi`, the
-    /// render backend. Never saved; the file's entry is left as found.
+    /// Lowercased names the session owns rather than the player: the env levers, and on the web
+    /// build `gxApi`, the render backend. Never saved; the file's entry is left as found.
     session_owned: HashSet<String>,
     /// The session-owned rows a player's own write takes back (fork: web build) — see
     /// [`Self::fallback_for_session`] and [`Self::cap_for_session`] — each with the value it
@@ -1201,8 +1201,10 @@ fn load_config(world: &mut World) {
         for (name, value) in session {
             cvars.own_for_session(name, value.as_deref());
         }
-        // `gxApi` is the render backend, a fact about the machine that `sync_cvars` pushes live, so
-        // it is never persisted.
+        // fork: web build — `gxApi` is the render backend, a fact about the machine that
+        // `sync_cvars` pushes live, so it is never persisted. A native client's is the player's
+        // choice of API (`video::with_render_api`).
+        #[cfg(target_arch = "wasm32")]
         cvars.own_for_session("gxApi", None);
         // The hosted page's realmlist, applied BEFORE the file is read: it marks `realmlist`
         // session-owned, and `load_file` skips every session-owned key. That ordering is the
@@ -1492,7 +1494,7 @@ pub(crate) fn multisample_formats(
 /// their callbacks and push the registry's writes into the mirror.
 pub(crate) fn sync_cvars(
     mut vm: crate::script_calls::VmWith<CvarSteps<'static>>,
-    adapter: Option<Res<bevy::render::renderer::RenderAdapterInfo>>,
+    #[cfg(target_arch = "wasm32")] adapter: Option<Res<bevy::render::renderer::RenderAdapterInfo>>,
     msaa_formats: Option<Res<benilla_world::view::MsaaFormats>>,
     mut seeded: Local<VmMemo<bool>>,
 ) {
@@ -1500,7 +1502,9 @@ pub(crate) fn sync_cvars(
         let Some(cvars) = steps.cvars() else {
             return;
         };
-        // The live render backend; absent headless, where the registered `""` stands.
+        // fork: web build — the live render backend; absent headless, where the registered `""`
+        // stands.
+        #[cfg(target_arch = "wasm32")]
         if let Some(adapter) = adapter.as_deref() {
             let backend = adapter.backend.to_str();
             if cvars.get("gxApi") != Some(backend) {
@@ -1861,7 +1865,6 @@ mod tests {
                 // fork: 16x anisotropic filtering by default (c6b9efa9).
                 "anisotropic",
                 "frillDensity",
-                "gxApi",
                 "gxColorBits",
                 "gxDepthBits",
                 "gxResolution",
@@ -3995,8 +3998,9 @@ mod tests {
     }
 
     /// The string-valued rows, a closed list, each default checked on its own terms: `realmName`
-    /// and `accountName` (the reference's registered `""`, `0x882748`) and `gxApi` are empty until
-    /// the session or the login screen writes them; `gxResolution` and `realmList` pass their
+    /// and `accountName` (the reference's registered `""`, `0x882748`) are empty until the login
+    /// screen writes them; `gxApi` is the reference's "direct3d" (fork: desktop, a selector the
+    /// renderer is created on); `gxResolution` and `realmList` pass their
     /// callbacks' parsers ([`crate::video::parse_resolution`], [`crate::realmlist::normalize`]);
     /// fork: `graphicsQuality` is a rung's name, checked by [`presets`]' own tests.
     #[test]
@@ -4027,7 +4031,7 @@ mod tests {
         };
         assert_eq!(default_of("realmName"), "");
         assert_eq!(default_of("accountName"), "");
-        assert_eq!(default_of("gxApi"), "");
+        assert_eq!(default_of("gxApi"), "direct3d");
         assert_eq!(
             crate::video::parse_resolution(default_of("gxResolution")),
             Some(crate::video::DEFAULT_WINDOWED)
@@ -4576,7 +4580,6 @@ mod tests {
                 "statusBarText",
                 "TextStatusBar.lua reads it on each CVAR_UPDATE",
             ),
-            ("gxApi", "pfUI's system tooltip names the backend"),
             (
                 "graphicsQuality",
                 "the Graphics Preset row of our OptionsFrame.xml, in both options windows; the \

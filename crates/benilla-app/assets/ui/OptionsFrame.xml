@@ -465,6 +465,10 @@
             "Smooths the jagged edges of the 3D world by sampling every pixel several times, at "
             .. "a cost in frame rate. Values your graphics card does not offer are lowered to the "
             .. "highest it does. Takes effect the next time the world loads."
+        BENILLA_TOOLTIP_GRAPHICS_API =
+            "The graphics interface the game draws through. DirectX 12 is the default; Vulkan and "
+            .. "OpenGL can help with a driver that misbehaves. One your system does not offer falls "
+            .. "back to the best it does. Takes effect the next time the game starts."
         BENILLA_TOOLTIP_RENDER_SCALE =
             "Draws the 3D world at a fraction of the window's resolution, or larger than it. "
             .. "The interface is unaffected at any setting.\n\n"
@@ -727,6 +731,7 @@
                     table.insert(graphics, i + 1, "RowDisplayMode")
                     table.insert(graphics, i + 2, "RowResolution")
                     table.insert(graphics, i + 3, "RowMultisample")
+                    table.insert(graphics, i + 4, "RowGraphicsApi")
                     break
                 end
             end
@@ -2601,6 +2606,25 @@
                                                 if ( BENILLA_NATIVE ) then this:Show() end
                                             </OnLoad></Scripts>
                                         </Frame>
+                                        <Frame name="$parentRowGraphicsApi" inherits="BenillaOptionsDropdownRowTemplate" hidden="true">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowMultisample" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowMultisample" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- `gxApi`, the API the renderer is created on at
+                                                -- launch (`video::with_render_api`); "direct3d",
+                                                -- the reference's default, is Direct3D 12.
+                                                BenillaOptionsRow_OnLoad(this, "gxApi", "Graphics API",
+                                                    "BENILLA_TOOLTIP_GRAPHICS_API")
+                                                BenillaOptionsDropdownRow_Setup(this, {
+                                                    { text = "DirectX 12", value = "direct3d" },
+                                                    { text = "Vulkan", value = "vulkan" },
+                                                    { text = "OpenGL", value = "opengl" },
+                                                })
+                                                if ( BENILLA_NATIVE ) then this:Show() end
+                                            </OnLoad></Scripts>
+                                        </Frame>
                                         <Frame name="$parentRowFarclip" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowGamma" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-33"/></Offset></Anchor>
@@ -2610,7 +2634,7 @@
                                                 -- fork: desktop — under the display rows where they
                                                 -- show, the section gap kept.
                                                 if ( BENILLA_NATIVE ) then
-                                                    local above = this:GetParent():GetName() .. "RowMultisample"
+                                                    local above = this:GetParent():GetName() .. "RowGraphicsApi"
                                                     this:ClearAllPoints()
                                                     this:SetPoint("TOPLEFT", above, "BOTTOMLEFT", 0, -33)
                                                     this:SetPoint("TOPRIGHT", above, "BOTTOMRIGHT", 0, -33)
@@ -4069,6 +4093,8 @@
             BENILLA_AMBIENT_OCCLUSION = "Ambient Occlusion"
             BENILLA_INDIRECT_LIGHT = "Indirect Lighting"
             BENILLA_WATER_DETAIL = "Water Detail"
+            -- fork: desktop
+            BENILLA_GRAPHICS_API = "Graphics API"
             BENILLA_RENDER_SCALE = "Render Scale"
             -- fork: fsr (FORK.md)
             BENILLA_FRAME_GENERATION = "Use Frame Generation"
@@ -4147,6 +4173,12 @@
                 { text = "Off", value = "0" },
                 { text = "Grass", value = "1" },
                 { text = "Grass + Trees", value = "2" },
+            })
+            -- fork: desktop — the API the renderer is created on (`gxApi`).
+            BenillaGraphicsApiDropdown_Init = dropdown("gxApi", {
+                { text = "DirectX 12", value = "direct3d" },
+                { text = "Vulkan", value = "vulkan" },
+                { text = "OpenGL", value = "opengl" },
             })
             BenillaWaterDetailDropdown_Init = dropdown("waterDetail", {
                 { text = "Modern", value = "2" },
@@ -4328,6 +4360,14 @@
                     getter = "BenillaTurtle_GetFriendlyPlates",
                     setter = "BenillaTurtle_SetFriendlyPlates", defaultValue = "0" } },
             }
+            -- fork: desktop — a native client's Graphics API row, the Display section's last;
+            -- `restartGx` commits the latched row, which the next launch reads.
+            if ( BENILLA_NATIVE ) then
+                tinsert(rows, { category = DISPLAY, row = {
+                    name = "BENILLA_GRAPHICS_API", desc = BENILLA_TOOLTIP_GRAPHICS_API,
+                    type = "dropdown", identifier = "BenillaGraphicsApi", cvar = "gxApi",
+                    restartGx = 1 } })
+            end
             -- A row placed by its neighbour: the category holding the Turtle row of that name.
             local function placeBeside(entry)
                 local anchor = entry.after or entry.before
@@ -4380,7 +4420,7 @@
                 { name = "Display", from = DISPLAY, rows = {
                     "BENILLA_GRAPHICS_PRESET", "UI_SCALE", "BENILLA_RENDER_SCALE",
                     "BENILLA_RCAS_SHARPNESS", "BENILLA_FRAME_GENERATION", "BENILLA_BRIGHTNESS",
-                    "GAMMA" } },
+                    "GAMMA", "BENILLA_GRAPHICS_API" } },
                 { name = "World Detail", from = WORLD_APPEARANCE, rows = {
                     "FARCLIP", "BENILLA_GROUND_CLUTTER_DISTANCE", "BENILLA_GROUND_CLUTTER_DENSITY",
                     "BENILLA_GROUND_CLUTTER_SCALE", "BENILLA_HD_MODELS", "BENILLA_REFORGED_MODELS",
