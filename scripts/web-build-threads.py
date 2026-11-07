@@ -88,7 +88,7 @@ def main():
     max_memory = env_or("BENILLA_MAX_MEMORY", "4294967296")
     # Shared, imported and exported memory plus the five exports wasm-bindgen's threading transform reads.
     thread_flags = [
-        "-Ctarget-feature=+atomics,+bulk-memory,+mutable-globals",
+        "-Ctarget-feature=+atomics,+bulk-memory,+mutable-globals,+simd128",
         "-Clink-arg=--shared-memory",
         "-Clink-arg=--import-memory",
         "-Clink-arg=--export-memory",
@@ -156,15 +156,18 @@ def main():
     if "+atomics" not in report:
         err("   FAIL: no +atomics in target_features - RUSTFLAGS did not reach the cargo Trunk spawns.")
         fail = True
+    if "+simd128" not in report:
+        err("   FAIL: no +simd128 in target_features - RUSTFLAGS did not reach the cargo Trunk spawns.")
+        fail = True
     if fail:
         return 1
-    say("   OK: shared, imported, atomics - this module can take worker threads.")
+    say("   OK: shared, imported, atomics, simd128 - this module can take worker threads.")
 
     # BENILLA_KEEP_NAMES=1: re-emit the glue from the cargo artifact without wasm-opt, so stack traces
     # name Rust functions. For localhost and a console, never a site.
     if os.environ.get("BENILLA_KEEP_NAMES", "") == "1":
         say("== BENILLA_KEEP_NAMES=1: re-emitting unoptimized, named glue")
-        artifact = os.environ["CARGO_TARGET_DIR"] + "/wasm32-unknown-unknown/release/wenilla.wasm"
+        artifact = os.environ["CARGO_TARGET_DIR"] + "/wasm32-unknown-unknown/ship/wenilla.wasm"
         if not os.path.isfile(artifact):
             err("   no cargo artifact at " + artifact)
             return 1

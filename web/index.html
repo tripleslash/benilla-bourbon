@@ -12,6 +12,18 @@
      `data-bindgen-target="web"` is mandatory: Trunk defaults to `no-modules`, which breaks both
      the import map below and `import init from './wenilla.js'`.
 
+     `data-cargo-profile-release="ship"` (Trunk 0.21's per-link profile attribute; `trunk build
+     --release` is what selects the `-release` one) builds both modules under the workspace `ship`
+     profile: `release` plus fat LTO and one codegen unit, which is the one place the browser build
+     differs from `release` (native keeps `release`, whose measured baseline fat LTO's link time
+     would tax). The cargo artifact therefore lands under `wasm32-unknown-unknown/ship/`, not
+     `.../release/`.
+
+     The module is built with wasm SIMD (`+simd128`, from `.cargo/config.toml` for the plain build
+     and from `RUSTFLAGS` in `scripts/web-build-threads.*` for the threaded one — a `RUSTFLAGS`
+     environment replaces the config's `rustflags`, so each carries it itself), and `--enable-simd`
+     is in the wasm-opt flag list for the same reason as every other feature in it.
+
      The wasm-opt flags reproduce what `scripts/web-build.sh` did by hand. `-O3` is a SPEED pass,
      not a size pass — the client is CPU-bound on its one wasm thread and it measured +6% in-world
      (2026-08-29) — and the feature list must match what rustc emitted or wasm-opt refuses the
@@ -32,10 +44,11 @@
      Trunk upgrade ever makes these attributes stop being honoured, because the failure mode is
      silent. -->
 <link data-trunk rel="rust" href="../crates/wenilla/Cargo.toml"
+      data-cargo-profile-release="ship"
       data-bindgen-target="web"
       data-cargo-no-default-features data-cargo-features="webgpu"
       data-target-name="wenilla" data-wasm-opt="3"
-      data-wasm-opt-params="--enable-bulk-memory --enable-threads --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --strip-debug --strip-producers"
+      data-wasm-opt-params="--enable-bulk-memory --enable-threads --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --enable-simd --strip-debug --strip-producers"
       data-no-demangle />
 <!-- The pack fetch/decode Web Worker's wasm half (phase 6): `benilla-pack`'s reader on its own, so
      a pack's zstd stream is undone off the frame thread. `data-type="worker"` is what lets a second
@@ -49,7 +62,8 @@
      the client for the same reason (the feature list must match what rustc emitted). -->
 <link data-trunk rel="rust" href="../crates/wenilla-packdecode/Cargo.toml"
       data-type="worker" data-target-name="packdecode" data-wasm-opt="3"
-      data-wasm-opt-params="--enable-bulk-memory --enable-threads --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --strip-debug --strip-producers" />
+      data-cargo-profile-release="ship"
+      data-wasm-opt-params="--enable-bulk-memory --enable-threads --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --enable-simd --strip-debug --strip-producers" />
 <link data-trunk rel="copy-file" href="wasi_stubs.js" />
 <link data-trunk rel="copy-file" href="boot.js" />
 <link data-trunk rel="copy-file" href="packs.js" />

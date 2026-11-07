@@ -27,7 +27,7 @@ $maxMemory = Default-Env 'BENILLA_MAX_MEMORY' '4294967296'
 # Shared, imported and exported memory plus the five exports wasm-bindgen's threading transform
 # reads; the bash script's comments carry the measurements behind each.
 $threadFlags = @(
-    '-Ctarget-feature=+atomics,+bulk-memory,+mutable-globals',
+    '-Ctarget-feature=+atomics,+bulk-memory,+mutable-globals,+simd128',
     '-Clink-arg=--shared-memory',
     '-Clink-arg=--import-memory',
     '-Clink-arg=--export-memory',
@@ -92,8 +92,12 @@ if (-not $report.Contains('+atomics')) {
     [Console]::Error.WriteLine('   FAIL: no +atomics in target_features - RUSTFLAGS did not reach the cargo Trunk spawns.')
     $fail = $true
 }
+if (-not $report.Contains('+simd128')) {
+    [Console]::Error.WriteLine('   FAIL: no +simd128 in target_features - RUSTFLAGS did not reach the cargo Trunk spawns.')
+    $fail = $true
+}
 if ($fail) { exit 1 }
-Write-Host '   OK: shared, imported, atomics - this module can take worker threads.'
+Write-Host '   OK: shared, imported, atomics, simd128 - this module can take worker threads.'
 
 # ---------------------------------------------------------------------------------------------
 # BENILLA_KEEP_NAMES=1: re-emit the glue from the cargo artifact without wasm-opt, so stack traces
@@ -101,7 +105,7 @@ Write-Host '   OK: shared, imported, atomics - this module can take worker threa
 # ---------------------------------------------------------------------------------------------
 if ($env:BENILLA_KEEP_NAMES -eq '1') {
     Write-Host '== BENILLA_KEEP_NAMES=1: re-emitting unoptimized, named glue'
-    $artifact = Join-Path $env:CARGO_TARGET_DIR 'wasm32-unknown-unknown\release\wenilla.wasm'
+    $artifact = Join-Path $env:CARGO_TARGET_DIR 'wasm32-unknown-unknown\ship\wenilla.wasm'
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
         [Console]::Error.WriteLine("   no cargo artifact at $artifact")
         exit 1

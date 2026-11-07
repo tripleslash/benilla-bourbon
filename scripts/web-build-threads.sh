@@ -2,7 +2,8 @@
 #
 # web-build-threads.sh — the browser build WITH THREADS.
 #
-# Same Trunk build as `trunk build --release`, same `web/index.html`, same output directories. The
+# Same Trunk build as `trunk build --release`, same `web/index.html` (so the same `ship` profile:
+# fat LTO, which is why the cargo artifact below is under `ship/`), same output directories. The
 # only difference is the environment, and this script exists so that environment has one home
 # instead of living in a README paragraph that drifts.
 #
@@ -23,7 +24,9 @@
 #                           would do the same thing but would also be read by every stable
 #                           invocation in the tree, where `[unstable]` has no business being.
 #   RUSTFLAGS               `+atomics,+bulk-memory,+mutable-globals` is the shared-memory feature
-#                           triple; `--shared-memory` and `--max-memory` are passed through to
+#                           triple, and `+simd128` rides with it: the environment replaces
+#                           `.cargo/config.toml`'s `[target.wasm32-unknown-unknown] rustflags`, where
+#                           the plain build gets its `+simd128`, so it is repeated here; `--shared-memory` and `--max-memory` are passed through to
 #                           `wasm-ld` (see the note on max-memory below). These flags change the
 #                           fingerprint of every crate in the graph, so this build does not share a
 #                           `target/` directory with the plain one — that is why CARGO_TARGET_DIR is
@@ -91,7 +94,7 @@ MAX_MEMORY="${BENILLA_MAX_MEMORY:-4294967296}"
 # `wasm-bindgen` rather than at the link: "failed to prepare module for threading ... failed to find
 # `__heap_base`", then the same for each of the others in turn. Measured 2026-09-06: this is the
 # minimal set — dropping any one of the five reintroduces exactly that error naming it.
-export RUSTFLAGS="${RUSTFLAGS:-} -Ctarget-feature=+atomics,+bulk-memory,+mutable-globals -Clink-arg=--shared-memory -Clink-arg=--import-memory -Clink-arg=--export-memory -Clink-arg=--max-memory=${MAX_MEMORY} -Clink-arg=--export=__heap_base -Clink-arg=--export=__wasm_init_tls -Clink-arg=--export=__tls_base -Clink-arg=--export=__tls_size -Clink-arg=--export=__tls_align"
+export RUSTFLAGS="${RUSTFLAGS:-} -Ctarget-feature=+atomics,+bulk-memory,+mutable-globals,+simd128 -Clink-arg=--shared-memory -Clink-arg=--import-memory -Clink-arg=--export-memory -Clink-arg=--max-memory=${MAX_MEMORY} -Clink-arg=--export=__heap_base -Clink-arg=--export=__wasm_init_tls -Clink-arg=--export=__tls_base -Clink-arg=--export=__tls_size -Clink-arg=--export=__tls_align"
 
 echo "== toolchain"
 rustc -vV | sed 's/^/   /'
@@ -125,7 +128,8 @@ echo "== verify: $(basename "${WASM}") ($(du -h "${WASM}" | cut -f1))"
 REPORT=$(scripts/wasm-memory.sh "${WASM}")
 echo "${REPORT}" | sed 's/^/   /'
 
-# All three have to hold. Each is a different way to end up single-threaded without an error.
+# All four have to hold. The first three are ways to end up single-threaded without an error; the
+# fourth is the same silent failure for SIMD (the module runs, just scalar).
 fail=0
 case "${REPORT}" in *shared=YES*) ;; *)
   echo "   FAIL: linear memory is not shared — no worker can attach to it." >&2; fail=1 ;;
@@ -137,8 +141,11 @@ esac
 case "${REPORT}" in *+atomics*) ;; *)
   echo "   FAIL: no +atomics in target_features — RUSTFLAGS did not reach the cargo Trunk spawns." >&2; fail=1 ;;
 esac
+case "${REPORT}" in *+simd128*) ;; *)
+  echo "   FAIL: no +simd128 in target_features — RUSTFLAGS did not reach the cargo Trunk spawns." >&2; fail=1 ;;
+esac
 [ "${fail}" -eq 0 ] || exit 1
-echo "   OK: shared, imported, atomics — this module can take worker threads."
+echo "   OK: shared, imported, atomics, simd128 — this module can take worker threads."
 
 # ---------------------------------------------------------------------------------------------
 # BENILLA_KEEP_NAMES=1 — rebuild the glue from the cargo artifact WITHOUT wasm-opt, so the module
@@ -155,7 +162,7 @@ echo "   OK: shared, imported, atomics — this module can take worker threads."
 # ---------------------------------------------------------------------------------------------
 if [ "${BENILLA_KEEP_NAMES:-}" = "1" ]; then
   echo "== BENILLA_KEEP_NAMES=1: re-emitting unoptimized, named glue"
-  ARTIFACT="${CARGO_TARGET_DIR}/wasm32-unknown-unknown/release/wenilla.wasm"
+  ARTIFACT="${CARGO_TARGET_DIR}/wasm32-unknown-unknown/ship/wenilla.wasm"
   if [ ! -f "${ARTIFACT}" ]; then
     echo "   no cargo artifact at ${ARTIFACT}" >&2
     exit 1

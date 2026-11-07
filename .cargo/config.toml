@@ -3,3 +3,10 @@
 # `release`). Env vars still prefix it: `WOW_USER=<account> WOW_PASS=<password> cargo play`.
 [alias]
 play = "run --profile play -p benilla"
+
+# The browser build's wasm SIMD: every current browser runs it, and wasm-opt is told `--enable-simd`
+# in `web/index.html`. Only the plain `trunk build --release` reads this: the threaded build sets
+# `RUSTFLAGS` in its environment, which replaces `[target.*] rustflags` entirely, so
+# `scripts/web-build-threads.*` carries `+simd128` itself.
+[target.wasm32-unknown-unknown]
+rustflags = ["-Ctarget-feature=+simd128"]
