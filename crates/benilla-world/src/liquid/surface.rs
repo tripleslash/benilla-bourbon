@@ -971,7 +971,7 @@ fn cata_water_look(kind: LiquidKind) -> [Vec4; 6] {
             Vec4::new(1.0, 0.5, 0.25, 0.04),
             fresnel,
             Vec4::new(0.045, 1.0, 0.2, 1.0),
-            Vec4::new(0.02, 3.0, 0.8, 0.25),
+            Vec4::new(0.02, 3.0, 0.55, 0.25),
             Vec4::new(0.1, 0.5, 1.0, 0.0),
         ],
         LiquidKind::Rapids => [
@@ -979,7 +979,7 @@ fn cata_water_look(kind: LiquidKind) -> [Vec4; 6] {
             Vec4::new(0.35, 0.6, 0.25, 0.07),
             fresnel,
             Vec4::new(0.045, 1.0, 0.0, 1.0),
-            Vec4::new(0.08, 4.0, 0.4, 0.3),
+            Vec4::new(0.08, 4.0, 0.28, 0.3),
             Vec4::new(0.1, 0.5, 0.6, 0.0),
         ],
         LiquidKind::Magma | LiquidKind::Slime => [Vec4::ZERO; 6],
@@ -988,7 +988,7 @@ fn cata_water_look(kind: LiquidKind) -> [Vec4; 6] {
             Vec4::new(0.35, 0.25, 0.25, 0.03),
             fresnel,
             Vec4::new(0.045, 1.0, 0.0, 1.0),
-            Vec4::new(0.03, 1.5, 0.9, 0.25),
+            Vec4::new(0.03, 1.5, 0.6, 0.25),
             Vec4::new(0.1, 0.5, 0.6, 0.0),
         ],
     }
