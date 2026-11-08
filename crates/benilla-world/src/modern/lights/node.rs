@@ -40,15 +40,16 @@ struct LightPipelines {
     bin: CachedComputePipelineId,
     /// The table's steady strengths ([`LightRank`]), which the binning pass ranks a cell by.
     rank: Buffer,
-    /// fork: perf — the light region the binning writes on the async queue, laid out as the
-    /// block's, which [`copy_light_grid`] copies into the block on the main queue.
-    grid: Buffer,
 }
 
 #[derive(Resource, Default)]
 struct LightFrame {
     bind: Option<BindGroup>,
     groups: u32,
+    /// fork: perf — the light region the binning writes on the async queue, laid out as the
+    /// block's, which [`copy_light_grid`] copies into the block on the main queue. Made at the
+    /// first frame with the queue; never without it.
+    grid: Option<Buffer>,
 }
 
 fn init_pipelines(
@@ -74,12 +75,6 @@ fn init_pipelines(
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let grid = device.create_buffer(&BufferDescriptor {
-        label: Some("modern_light_grid"),
-        size: BLOCK_LIGHT_BYTES as u64,
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
     let bin = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some("modern_light_bin".into()),
         layout: vec![layout.clone()],
@@ -89,12 +84,7 @@ fn init_pipelines(
         entry_point: Some("bin_lights".into()),
         zero_initialize_workgroup_memory: false,
     });
-    commands.insert_resource(LightPipelines {
-        layout,
-        bin,
-        rank,
-        grid,
-    });
+    commands.insert_resource(LightPipelines { layout, bin, rank });
 }
 
 /// Write the grid's parameters and get the binning pass ready. The parameters go out every modern
@@ -169,11 +159,25 @@ fn prepare_lights(
     queue.write_buffer(&pipes.rank, 0, bytemuck::cast_slice(&rank.0));
     // fork: perf — on the async queue the binning writes its own grid, whose parameters it reads
     // as it does the block's; the block keeps the copy above for a frame the binning skips.
-    let (grid, grid_offset) = if async_queue.is_some() {
-        queue.write_buffer(&pipes.grid, 0, &bytes);
-        (&pipes.grid, 0)
-    } else {
-        (&block.buffer, LIGHT_OFFSET)
+    let async_grid = async_queue.is_some().then(|| {
+        frame
+            .grid
+            .get_or_insert_with(|| {
+                device.create_buffer(&BufferDescriptor {
+                    label: Some("modern_light_grid"),
+                    size: BLOCK_LIGHT_BYTES as u64,
+                    usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
+            .clone()
+    });
+    let (grid, grid_offset) = match &async_grid {
+        Some(grid) => {
+            queue.write_buffer(grid, 0, &bytes);
+            (grid, 0)
+        }
+        None => (&block.buffer, LIGHT_OFFSET),
     };
     frame.bind = Some(
         device.create_bind_group(
@@ -244,7 +248,7 @@ fn light_bin_pass(
 }
 
 /// fork: perf — [`light_bin_pass`] on the async compute queue (`modern::async_compute`). It reads
-/// only what `prepare_lights` uploaded and writes [`LightPipelines::grid`], so it is recorded in
+/// only what `prepare_lights` uploaded and writes [`LightFrame::grid`], so it is recorded in
 /// front of the shadow raster and runs beside it; [`copy_light_grid`] brings the cells into the
 /// block before anything reads them.
 fn light_bin_pass_async(
@@ -284,30 +288,28 @@ fn light_bin_pass_async(
 /// main pass, the first readers of the cells. Every world material binds the block, and wgpu orders
 /// the two queues per buffer, not per range: the binning writing the block itself made the shadow
 /// raster and the probe trace wait for it. The flush in front submits those first, so only the
-/// copy's submission waits.
+/// copy's submission waits. It runs only with the queue (`build`'s run condition).
 fn copy_light_grid(
     frame: Res<LightFrame>,
-    pipes: Res<LightPipelines>,
     buffers: Res<RenderAssets<GpuShaderBuffer>>,
     view: ViewQuery<Has<crate::modern::volumetrics::ModernFogView>>,
-    async_queue: Option<Res<RenderAsyncComputeQueue>>,
     // Before `render_context`: its buffer (the copy) is applied after the flush.
     mut flush: crate::modern::async_compute::FlushMainQueue,
     mut render_context: RenderContext,
 ) {
-    if async_queue.is_none() || !crate::modern::world_view_only(view.into_inner()) {
+    if !crate::modern::world_view_only(view.into_inner()) {
         return;
     }
     // The bind group exists only on a frame the binning runs.
-    if frame.bind.is_none() || frame.groups == 0 {
+    let (Some(_), true, Some(grid)) = (&frame.bind, frame.groups > 0, &frame.grid) else {
         return;
-    }
+    };
     let Some(block) = buffers.get(MODERN_SHADOW_CASCADES.id()) else {
         return;
     };
     flush.flush();
     render_context.command_encoder().copy_buffer_to_buffer(
-        &pipes.grid,
+        grid,
         0,
         &block.buffer,
         LIGHT_OFFSET,
@@ -340,7 +342,9 @@ pub(super) fn build(render_app: &mut SubApp) {
                     .before(bevy::pbr::per_view_shadow_pass::<{ bevy::pbr::LATE_SHADOW_PASS }>)
                     .before(crate::modern::volumetrics::froxel_pass)
                     .before(Core3dSystems::MainPass),
+                // Skipped without the async queue: neither it nor its buffers run.
                 copy_light_grid
+                    .run_if(resource_exists::<RenderAsyncComputeQueue>)
                     .after(crate::static_gx::gx_shadow_pass)
                     .after(bevy::pbr::per_view_shadow_pass::<{ bevy::pbr::EARLY_SHADOW_PASS }>)
                     .after(bevy::pbr::per_view_shadow_pass::<{ bevy::pbr::LATE_SHADOW_PASS }>)
