@@ -51,6 +51,13 @@ pub(crate) fn modern_libraries(app: &mut App) {
     bevy::shader::load_shader_library!(app, "shaders/modern/locallight.wgsl");
     // fork: the bindless static_gx group 1, imported under `GX_BINDLESS` only.
     bevy::shader::load_shader_library!(app, "shaders/modern/gx_bindless.wgsl");
+    // fork: the ray-traced scene's hit library and attribute repack (`rt_scene.rs`), native only:
+    // nothing composes the library until a ray-traced lane imports it.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        bevy::shader::load_shader_library!(app, "shaders/modern/rt_scene.wgsl");
+        bevy::asset::embedded_asset!(app, "shaders/modern/rt_repack.wgsl");
+    }
     bevy::asset::embedded_asset!(app, "shaders/modern/froxel_scatter.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/modern/froxel_integrate.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/modern/fog_composite.wgsl");
