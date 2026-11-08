@@ -57,6 +57,9 @@ pub(crate) fn modern_libraries(app: &mut App) {
     {
         bevy::shader::load_shader_library!(app, "shaders/modern/rt_scene.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/modern/rt_repack.wgsl");
+        // fork: static_gx's Hi-Z pyramid and two-phase GPU cull (`gpu_cull.rs`), native only.
+        bevy::asset::embedded_asset!(app, "shaders/modern/gx_hiz.wgsl");
+        bevy::asset::embedded_asset!(app, "shaders/modern/gx_cull.wgsl");
     }
     bevy::asset::embedded_asset!(app, "shaders/modern/froxel_scatter.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/modern/froxel_integrate.wgsl");
