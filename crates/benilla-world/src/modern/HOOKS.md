@@ -203,6 +203,10 @@ Fork systems go in `PreUpdate`, `Update` or `Last`.
 | `benilla-world/src/static_gx/render.rs` | `pub(crate) mod rt_scene;` after `modern_gi` and `build` calling `rt_scene::build`, both `cfg(not(target_arch = "wasm32"))`; `prepare_static_gx` calls `rt_scene::assemble_unseen` after the visible regions and before `pool.drain_pending`, in a modern frame with `rt_scene::tier_active()` | rt scene |
 | `benilla-world/src/static_gx/mod.rs` | `pub(crate) use render::rt_scene;` (native only) | rt scene |
 | `benilla-world/src/shaders.rs` | `modern_libraries`: native only, `load_shader_library!` for `shaders/modern/rt_scene.wgsl` and `embedded_asset!` for `shaders/modern/rt_repack.wgsl` | rt scene |
+| `benilla-world/src/static_gx/render.rs` | `static_gx_pass`: the `ViewQuery` takes `&ExtractedView`; before `batch.finish()` `gpu_cull::GxCullPass::new` (only with the prepass pipelines) and `batch.set_culled`, after it `bind`; the prepass job records `cull.early` before its pass and, after it, `cull.pyramid`, `cull.late` and a `static_gx_prepass_late` pass drawing `batch.emit_late` (depth loaded). `pub(crate) mod gpu_cull;` at EOF and `gpu_cull::build(app)` at the end of `build`. All `cfg(not(target_arch = "wasm32"))` | gpu cull |
+| `benilla-world/src/static_gx/render.rs` | `init_pipelines`: `GxBindless::new(ray_query, batch::gpu_cull_lane(caps))`; `assemble_region` passes `&draw.groups` to `place` (the key bound rows) | gpu cull |
+| `benilla-world/src/static_gx/mod.rs` | `pub(crate) use render::gpu_cull;` (native only) | gpu cull |
+| `benilla-world/src/shaders.rs` | `modern_libraries`: native only, `embedded_asset!` for `shaders/modern/gx_hiz.wgsl` and `shaders/modern/gx_cull.wgsl` | gpu cull |
 
 ## Interfaces for Hi-Z / RT (bindless static_gx)
 
@@ -216,8 +220,10 @@ Where `bindless::enabled` holds (`HwCaps.binding_arrays && mdi_count`, not `WOW_
 | `row + 1` | mesh-local bound centre.x (f32 bits) | centre.y | centre.z | `index_base` (first index in the arena) |
 | `row + 2` | bound half-extent.x (f32 bits) | half.y | half.z | `index_len` |
 | `row + 3 + i` | item `i`'s record: layer \| class << 16 | batch-order nudge | SIDN rgb | flags (bit 0 kill, 1..=13 probe slot, 14 interior fog) |
+| `row + 3 + items + 2k` | selection key `k`'s mesh-local bound centre (f32 bits) | | | 0 |
+| `row + 4 + items + 2k` | key `k`'s half-extent (f32 bits) | | | 0 |
 
-World = mesh-local + origin; a region's world bound is `origin + centre ± half`.
+World = mesh-local + origin; a region's world bound is `origin + centre ± half`. The key rows exist only where the GPU cull runs (`GxSlots::keys` pairs, keys `0..=` the region's largest WMO group or prop referrer-set index; a key without its own box takes the region's; cells have none). `items` is row 0's w.
 
 **The bind group** (`static_gx_bindless_layout`): 0 the table (vertex, fragment); 1 `binding_array<texture_2d_array<f32>, 1024>`, pool class `c` at element `c` (fragment); 2 the repeat sampler; 3 the clamp sampler. No uniform, no dynamic offset. WGSL side: `benilla_modern::gx_bindless` (`enter`, `origin`, `rec`, `sample_grad`, `sample_level`, `dims`).
 
@@ -225,7 +231,28 @@ World = mesh-local + origin; a region's world bound is `origin + centre ± half`
 
 **The buckets** (`GxIndirect`, rebuilt each frame by `GxBatch::finish`). Two buffers, both `INDIRECT | STORAGE | COPY_DST`: args, 20-byte `DrawIndexedIndirectArgs`, and counts, one `u32` per bucket. A bucket is one `(phase, pipeline, vertex slab)` state of one pass, drawn as one `multi_draw_indexed_indirect_count(args, args_at * 20, counts, count_at * 4, capacity)`; its `capacity` args sit contiguously from `args_at` in `(row, first index)` order, each `index_count`, `instance_count = 1`, `first_index` (`index_base` added), `base_vertex` (slab offset), `first_instance = row`. The CPU writes the count as `capacity`.
 
-**The in-place cull recipe.** Before the pass, per bucket: zero `counts[count_at]`; per candidate draw, read its region's bound from table rows `row + 1` / `row + 2` (its `first_instance`), test it (frustum, Hi-Z), and for a survivor `let slot = atomicAdd(&counts[count_at], 1u)` and write its args at `args[args_at + slot]`. The draw call already reads the count, so the CPU side does not change. The candidates are the CPU-written args, read from a copy or a second range before the cull overwrites them.
+**The in-place cull recipe.** Before the pass, per bucket: zero `counts[count_at]`; per candidate draw, read its region's bound from table rows `row + 1` / `row + 2` (its `first_instance`), test it (frustum, Hi-Z), and for a survivor `let slot = atomicAdd(&counts[count_at], 1u)` and write its args at `args[args_at + slot]`. The draw call already reads the count, so the CPU side does not change. The candidates are the CPU-written args, read from a copy or a second range before the cull overwrites them. `gpu_cull` (below) is this recipe: the candidates go to a buffer of their own.
+
+## Interfaces for the Hi-Z pyramid and the GPU cull (gpu_cull)
+
+Where `batch::gpu_cull_lane` holds (the bindless lane, native multi-draw, not `WOW_GX_GPUCULL=0`), `static_gx/render/gpu_cull.rs` culls each static_gx view's colour pass and prepass on the GPU in two phases, in a modern frame with the prepass and a bindable depth (the module doc is the contract):
+
+| step (span) | what |
+|---|---|
+| `static_gx_cull_early` | per candidate: current frustum; then last frame's pyramid under last frame's matrix. Visible: into `args`/`counts`. Occluded: deferred |
+| `static_gx_prepass` | the early survivors' depth: the static occluders |
+| `static_gx_hiz` | this frame's pyramid from that depth |
+| `static_gx_cull_late` | the deferred against the new pyramid; survivors appended to `args`/`counts` and written to `late_args`/`late_counts` |
+| `static_gx_prepass_late` | the late survivors' depth |
+| `static_gx` | the colour pass: both phases' survivors |
+
+**Buffers** (`batch::GxCullTwins`, at the args'/counts' offsets): candidates (`DrawIndexedIndirectArgs`), meta (`[count slot, bucket's first arg, selection key or 0xffff, phase-1 verdict]`), late args, late counts. A culled batch fuses draws only inside one selection key. **Bound**: the key's rows (above) or, for a cell or `0xffff`, the region's. The candidates are exactly the CPU walk's list for that pass, so a region `rt_scene::assemble_unseen` assembled off screen is never drawn.
+
+**The pyramid** (`crate::static_gx::gpu_cull::GxHiZ`, render-world resource, present while the lane runs; `pyramid(&RetainedViewEntity) -> Option<HiZPyramid>`): one per static_gx view (world camera, water mirror). `R32Float`, `STORAGE_BINDING | TEXTURE_BINDING`; level 0 is the previous power of two of the view's depth texture per axis, a full chain to 1x1; each texel is the farthest reverse-Z depth (the minimum) over a conservative footprint; uv (0, 0) is the depth's top left. `HiZPyramid { view (all levels), size (level 0), mip_count, clip_from_world (the unjittered matrix of its contents, `None` before the first build) }`. Bind as `texture_2d<f32>` (unfilterable) and `textureLoad`. It holds **only the static world's early-phase depth** (no terrain, entities or late draws), valid after `crate::static_gx::static_gx_pass` for that view (`.after(...)`) until the next frame's. A lane that wants the full depth (Hi-Z SSR) builds its own pyramid after the opaque pass from the same `gx_hiz.wgsl` (`HIZ_FROM_DEPTH` for level 0, then one dispatch a level).
+
+**Not culled on the GPU**: the shadow cascades. Their CPU list already tests each region's whole box against each cascade (`modern_shadow::outside_cascade`), the grain the GPU would have for a region drawn whole, and their static layers are cached between frames; occlusion does not apply.
+
+**Switch**: `WOW_GX_GPUCULL=0` (default on where the lane can run). **Instruments**: the spans above in `WOW_GPU_PASSES` / `WOW_GPU_STATS`; with `WOW_GX_PERF`, a `GX_CULL <world|mirror> per frame: candidates= early= late= culled=` line every 64 frames (GPU counters read back a few frames late).
 
 ## Interfaces for the ray-traced lanes (rt_scene)
 
