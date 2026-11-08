@@ -296,7 +296,7 @@ wait. On wasm32 no queue is ever made, so nothing of it runs.
 | `src/batching/gpu_preprocessing.rs` | two `ComputeTaskPool::get().scope(` (0.19.1 lines ~2355 and ~2657) become `crate::wasm_serial::compute_scope(`, and the now-unused `use bevy_tasks::ComputeTaskPool;` goes |
 | `src/render_asset.rs` | `RenderAsset::DEFERRABLE`, asked by `prepare_assets` before each of its two deferrals (above) |
 | `src/mesh/mod.rs` | `RenderMesh` sets `DEFERRABLE = false` (above) |
-| `src/render_resource/pipeline_cache.rs` | the web's async pipeline creation (fifth delta); `create_pipeline_task` drops its two macOS lines (tenth delta); the `disk_cache` field, passed as each pipeline's `cache` (twelfth delta) |
+| `src/render_resource/pipeline_cache.rs` | the web's async pipeline creation (fifth delta); `create_pipeline_task` drops its two macOS lines (tenth delta); the `disk_cache` field, passed as each pipeline's `cache` (twelfth delta); `mesh_tasks`, `queue_mesh_pipeline`, `start_create_mesh_pipeline` and the branch into it (sixteenth delta) |
 | `src/pipelined_rendering.rs` | `renderer_extract` holds the render app back on the exit frame (eleventh delta) |
 | `src/render_phase/mod.rs` | `render_batchable_meshes` no longer excludes DX12 from multi-draw-indirect-count (thirteenth delta) |
 | `src/lib.rs` | `mod wasm_serial;`; the render worker's lines (eighth delta); `destroy_released_gpu_resources` and its counter (ninth delta) |
@@ -323,6 +323,22 @@ instance and device extensions) would take DX12, benilla's default `gxApi`, away
 otherwise both are the plain `Instance::new` / `request_device`. The raw device also opens with the
 descriptor's `required_limits` rather than `adapter.limits()` (upstream dlss_wgpu 4.0.0 made the same
 fix in its own `request_device`).
+
+## The sixteenth delta: mesh-shader pipelines in the pipeline cache (native)
+
+`src/render_resource/pipeline_cache.rs`: bevy 0.19.1's `PipelineCache` builds render and compute
+pipelines only, and `PipelineDescriptor` (in `bevy_material`) has no third kind. benilla's
+static_gx mesh-shader lane (`crates/benilla-world/src/static_gx/render/meshlets.rs`) needs its
+pipelines composed by the same shader cache (its module imports the lighting libraries), so
+`PipelineCache::queue_mesh_pipeline(descriptor, task_entry)` queues a `RenderPipelineDescriptor`
+whose vertex stage is read as the mesh stage (no buffers) and records the task entry point in
+`mesh_tasks` under the pipeline's id. `start_create_render_pipeline` sends such an id to
+`start_create_mesh_pipeline`, which takes the same shader-cache module for the task and mesh stages
+(same shader, same defs), the same layout and disk cache, and calls
+`wgpu::Device::create_mesh_pipeline`. The result is a `Pipeline::RenderPipeline`, read back with
+`get_render_pipeline`; a shader change re-queues the id and builds it as a mesh pipeline again.
+Native only (`cfg(not(target_arch = "wasm32"))`): the field, the two functions and the branch.
+Nothing changes for a pipeline queued any other way.
 
 ## What this does NOT do
 

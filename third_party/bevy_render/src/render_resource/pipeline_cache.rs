@@ -217,6 +217,10 @@ pub struct PipelineCache {
     /// benilla fork (twelfth delta): the on-disk wgpu pipeline cache every pipeline is created
     /// with, native only; empty until `RenderResources::unpack_into` opens one.
     pub(crate) disk_cache: crate::pipeline_disk_cache::SharedPipelineCache,
+    /// benilla fork (sixteenth delta): the pipelines [`Self::queue_mesh_pipeline`] queued, native
+    /// only, each with its task entry point (`None`: a mesh stage alone).
+    #[cfg(not(target_arch = "wasm32"))]
+    mesh_tasks: Mutex<HashMap<CachedPipelineId, Option<Cow<'static, str>>>>,
 }
 
 impl PipelineCache {
@@ -270,6 +274,8 @@ impl PipelineCache {
             synchronous_pipeline_compilation,
             needs_shader_reload: true,
             disk_cache: default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            mesh_tasks: default(),
         }
     }
 
@@ -477,11 +483,144 @@ impl PipelineCache {
         }
     }
 
+    /// benilla fork (sixteenth delta): queue a mesh-shader pipeline, native only. `descriptor` is
+    /// read as a render pipeline's whose vertex stage stands for the mesh stage (no `buffers`: a
+    /// mesh stage takes no vertex input); `task_entry` names a task entry point in the same module
+    /// under the same shader defs, or `None` for none. It is created with
+    /// `wgpu::Device::create_mesh_pipeline` (the device needs
+    /// `Features::EXPERIMENTAL_MESH_SHADER`) and read back like any render pipeline
+    /// ([`Self::get_render_pipeline`]); a shader change re-creates it as a mesh pipeline.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn queue_mesh_pipeline(
+        &self,
+        descriptor: RenderPipelineDescriptor,
+        task_entry: Option<Cow<'static, str>>,
+    ) -> CachedRenderPipelineId {
+        let mut new_pipelines = self
+            .new_pipelines
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let index = self.pipelines.len() + new_pipelines.len();
+        self.mesh_tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(index, task_entry);
+        new_pipelines.push(CachedPipeline {
+            descriptor: PipelineDescriptor::RenderPipelineDescriptor(Box::new(descriptor)),
+            state: CachedPipelineState::Queued,
+        });
+        CachedRenderPipelineId::new(index)
+    }
+
+    /// benilla fork (sixteenth delta): [`Self::start_create_render_pipeline`] for a pipeline
+    /// [`Self::queue_mesh_pipeline`] queued: the same modules, layout and disk cache, built with
+    /// `create_mesh_pipeline`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn start_create_mesh_pipeline(
+        &mut self,
+        id: CachedPipelineId,
+        descriptor: RenderPipelineDescriptor,
+        task_entry: Option<Cow<'static, str>>,
+    ) -> CachedPipelineState {
+        let device = self.device.clone();
+        let shader_cache = self.shader_cache.clone();
+        let layout_cache = self.layout_cache.clone();
+        let disk_cache = self.disk_cache.clone();
+        let mut bindgroup_layout_cache = self.bindgroup_layout_cache.lock().unwrap();
+        let bind_group_layout = descriptor
+            .layout
+            .iter()
+            .map(|bind_group_layout_descriptor| {
+                bindgroup_layout_cache.get(&self.device, bind_group_layout_descriptor.clone())
+            })
+            .collect::<Vec<_>>();
+
+        create_pipeline_task(
+            async move {
+                let mut shader_cache = shader_cache.lock().unwrap();
+                let mut layout_cache = layout_cache.lock().unwrap();
+                // The task and mesh stages share one module: the same shader, the same defs.
+                let mesh_module = match shader_cache.get(
+                    id,
+                    descriptor.vertex.shader.id(),
+                    &descriptor.vertex.shader_defs,
+                ) {
+                    Ok(module) => module,
+                    Err(err) => return Err(err),
+                };
+                let fragment_module = match &descriptor.fragment {
+                    Some(fragment) => {
+                        match shader_cache.get(id, fragment.shader.id(), &fragment.shader_defs) {
+                            Ok(module) => Some(module),
+                            Err(err) => return Err(err),
+                        }
+                    }
+                    None => None,
+                };
+                let layout = if descriptor.layout.is_empty() && descriptor.immediate_size == 0 {
+                    None
+                } else {
+                    Some(layout_cache.get(&device, &bind_group_layout, descriptor.immediate_size))
+                };
+                drop((shader_cache, layout_cache));
+
+                let compilation_options = PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: descriptor.zero_initialize_workgroup_memory,
+                };
+                let raw = wgpu::MeshPipelineDescriptor {
+                    label: descriptor.label.as_deref(),
+                    layout: layout.as_ref().map(|layout| -> &PipelineLayout { layout }),
+                    task: task_entry.as_deref().map(|entry| wgpu::TaskState {
+                        module: &mesh_module,
+                        entry_point: Some(entry),
+                        compilation_options: compilation_options.clone(),
+                    }),
+                    mesh: wgpu::MeshState {
+                        module: &mesh_module,
+                        entry_point: descriptor.vertex.entry_point.as_deref(),
+                        compilation_options: compilation_options.clone(),
+                    },
+                    primitive: descriptor.primitive,
+                    depth_stencil: descriptor.depth_stencil.clone(),
+                    multisample: descriptor.multisample,
+                    fragment: match (&fragment_module, &descriptor.fragment) {
+                        (Some(module), Some(fragment)) => Some(RawFragmentState {
+                            module,
+                            entry_point: fragment.entry_point.as_deref(),
+                            targets: fragment.targets.as_slice(),
+                            compilation_options,
+                        }),
+                        _ => None,
+                    },
+                    multiview: None,
+                    cache: disk_cache.get(),
+                };
+                let pipeline =
+                    Pipeline::RenderPipeline(device.wgpu_device().create_mesh_pipeline(&raw).into());
+                disk_cache.note_built();
+                Ok(pipeline)
+            },
+            self.synchronous_pipeline_compilation,
+        )
+    }
+
     fn start_create_render_pipeline(
         &mut self,
         id: CachedPipelineId,
         descriptor: RenderPipelineDescriptor,
     ) -> CachedPipelineState {
+        // benilla fork (sixteenth delta): a pipeline `queue_mesh_pipeline` queued.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(task_entry) = self
+            .mesh_tasks
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .cloned()
+        {
+            return self.start_create_mesh_pipeline(id, descriptor, task_entry);
+        }
         let device = self.device.clone();
         let shader_cache = self.shader_cache.clone();
         let layout_cache = self.layout_cache.clone();
