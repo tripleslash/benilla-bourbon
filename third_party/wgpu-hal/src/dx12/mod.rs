@@ -1071,6 +1071,9 @@ unsafe impl Sync for Sampler {}
 pub struct QuerySet {
     raw: Direct3D12::ID3D12QueryHeap,
     raw_ty: Direct3D12::D3D12_QUERY_TYPE,
+    /// BENILLA: pipeline statistics. The types a statistics set was made for, which say which
+    /// fields of D3D12's record `copy_query_results` hands out; empty for any other set.
+    stats: wgt::PipelineStatisticsTypes,
 }
 
 impl crate::DynQuerySet for QuerySet {}

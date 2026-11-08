@@ -484,11 +484,10 @@ impl super::Adapter {
             | wgt::Features::EXTERNAL_TEXTURE
             | wgt::Features::MEMORY_DECORATION_COHERENT;
 
-        //TODO: in order to expose this, we need to run a compute shader
-        // that extract the necessary statistics out of the D3D12 result.
-        // Alternatively, we could allocate a buffer for the query set,
-        // write the results there, and issue a bunch of copy commands.
-        //| wgt::Features::PIPELINE_STATISTICS_QUERY
+        // BENILLA: pipeline statistics. `copy_query_results` resolves a statistics set into an
+        // intermediate buffer and copies wgpu's fields out of D3D12's record
+        // (`CommandEncoder::copy_pipeline_statistics`).
+        features |= wgt::Features::PIPELINE_STATISTICS_QUERY;
 
         if max_feature_level >= FeatureLevel::_11_1 {
             features |= wgt::Features::VERTEX_WRITABLE_STORAGE;

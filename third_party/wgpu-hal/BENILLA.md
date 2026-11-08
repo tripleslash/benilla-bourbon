@@ -9,8 +9,9 @@ marked `BENILLA:`.
 
 ## Why a fork exists at all
 
-Two patches: the Vulkan presentation stall below, and DX12 multi-draw-indirect-count ("The second
-patch", with `third_party/wgpu-core`).
+Four patches: the Vulkan presentation stall below, DX12 multi-draw-indirect-count ("The second
+patch", with `third_party/wgpu-core`), an async compute queue ("The third patch") and DX12
+pipeline-statistics queries ("The fourth patch").
 
 On Vulkan, the default on Windows and Linux, the swapchain's acquire (`NativeSwapchain::acquire`)
 waits up to wgpu-core's 1 s frame timeout, and a presentation engine that stalls longer (a machine
@@ -103,11 +104,39 @@ drivers that disable compression for concurrent images (reported for some AMD ge
 measured here).
 The second-queue-of-the-graphics-family fallback needs neither.
 
+## The fourth patch — pipeline-statistics queries on DX12
+
+Upstream's DX12 adapter leaves `Features::PIPELINE_STATISTICS_QUERY` commented out: the query heap
+type was already mapped (`D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS`), but `ResolveQueryData`
+writes D3D12's whole `D3D12_QUERY_DATA_PIPELINE_STATISTICS` record per query, eleven `u64`s
+(`IAVertices`, `IAPrimitives`, `VSInvocations`, `GSInvocations`, `GSPrimitives`, `CInvocations`,
+`CPrimitives`, `PSInvocations`, `HSInvocations`, `DSInvocations`, `CSInvocations`), where wgpu
+promises one `u64` per type the set was made for, in `PipelineStatisticsTypes` bit order. A
+straight resolve would overrun the destination wgpu-core sized for that layout. Every hunk is
+marked `BENILLA: pipeline statistics`.
+
+| file | hunk |
+|---|---|
+| `src/dx12/adapter.rs` | the feature is exposed, in place of upstream's TODO |
+| `src/dx12/mod.rs` | `QuerySet::stats`: the `PipelineStatisticsTypes` a statistics set was made for, empty for any other |
+| `src/dx12/device.rs` | `create_query_set` records it |
+| `src/dx12/command.rs` | `copy_query_results` sends a statistics set to `copy_pipeline_statistics`: the range resolves into an intermediate buffer (`COPY_DST`, then `COPY_SRC`), kept in `intermediate_copy_bufs` until `reset_all`, the same lifetime as the texture-copy intermediates; then one `CopyBufferRegion` per run of fields adjacent in both layouts. The timestamp `QuerySet` built for end-of-pass stamps gets an empty `stats`. |
+
+The field mapping, `PIPELINE_STATISTICS_FIELDS`, is wgpu's bit order against the record's field
+offsets (`offset_of!`): `VERTEX_SHADER_INVOCATIONS` is `VSInvocations`, `CLIPPER_INVOCATIONS`
+`CInvocations`, `CLIPPER_PRIMITIVES_OUT` `CPrimitives`, `FRAGMENT_SHADER_INVOCATIONS`
+`PSInvocations`, `COMPUTE_SHADER_INVOCATIONS` `CSInvocations`. These are the counters Vulkan's
+`VK_QUERY_PIPELINE_STATISTIC_*` bits name for the same five types (`src/vulkan/conv.rs`), so a
+pass reads the same five numbers on either backend. With all five types (bevy's render
+diagnostics ask for all) a query is three copies: field 2, fields 5–7, field 10.
+`pipeline_statistics_tests` checks the runs.
+
 ## How to check
 
 `diff -u <registry>/wgpu-hal-29.0.4/src/vulkan/swapchain/native.rs third_party/wgpu-hal/src/vulkan/swapchain/native.rs`
-shows the first patch and nothing else, and the same for `src/dx12/command.rs` shows the second
-(two hunks, each marked `BENILLA:`); `diff -r` of the two trees shows only those files, the dropped
+shows the first patch and nothing else, and the same for `src/dx12/command.rs` shows the second,
+third and fourth patches' hunks there, each marked `BENILLA:`; `diff -r` of the two trees shows only
+the files the four patches name, the dropped
 `[[example]]` blocks in `Cargo.toml`, and the files not copied (`examples/`, `Cargo.lock`,
 `Cargo.toml.orig`, `.cargo_vcs_info.json`, `.cargo-ok`).
 `video::tests::wgpu_hal_resolves_to_the_vendored_stall_patch` checks the lock resolves wgpu-hal to
@@ -119,3 +148,6 @@ When wgpu-hal handles the timeout itself ([gfx-rs/wgpu#9029](https://github.com/
 and wgpu fixes [gfx-rs/wgpu#7974](https://github.com/gfx-rs/wgpu/issues/7974), or when wgpu
 leaves 29: delete this directory and the `wgpu-hal` line under `[patch.crates-io]`. Drop the
 second patch only together with `third_party/wgpu-core`'s.
+The fourth patch goes when an upstream DX12 adapter exposes `PIPELINE_STATISTICS_QUERY` itself;
+without it, `WOW_GPU_STATS` reads nothing on DX12 (the device lacks the feature, and the instrument
+says so at startup).

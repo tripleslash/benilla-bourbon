@@ -2277,7 +2277,16 @@ impl crate::Device for super::Device {
 
         self.counters.query_sets.add(1);
 
-        Ok(super::QuerySet { raw, raw_ty })
+        // BENILLA: pipeline statistics.
+        let stats = match desc.ty {
+            wgt::QueryType::PipelineStatistics(types) => types,
+            _ => wgt::PipelineStatisticsTypes::empty(),
+        };
+        Ok(super::QuerySet {
+            raw,
+            raw_ty,
+            stats,
+        })
     }
 
     unsafe fn destroy_query_set(&self, _set: super::QuerySet) {

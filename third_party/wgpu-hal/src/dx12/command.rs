@@ -326,6 +326,7 @@ impl super::CommandEncoder {
                     &crate::dx12::QuerySet {
                         raw: query_set_raw,
                         raw_ty: Direct3D12::D3D12_QUERY_TYPE_TIMESTAMP,
+                        stats: wgt::PipelineStatisticsTypes::empty(),
                     },
                     index,
                 );
@@ -403,6 +404,141 @@ impl super::CommandEncoder {
         };
 
         (t, buffer)
+    }
+
+    /// BENILLA: pipeline statistics. D3D12 resolves a statistics query as the whole
+    /// `D3D12_QUERY_DATA_PIPELINE_STATISTICS` record, eleven `u64`s; wgpu's layout is one `u64` per
+    /// type the set was made for, in `PipelineStatisticsTypes` bit order, back to back. So the
+    /// range resolves into an intermediate buffer, freed with the encoder's other intermediates at
+    /// `reset_all`, and each asked-for field is copied into place, a run of fields adjacent on both
+    /// sides in one copy. `dst` is in `COPY_DST` already: wgpu-core sets it for the resolve.
+    unsafe fn copy_pipeline_statistics(
+        &mut self,
+        set: &super::QuerySet,
+        range: Range<u32>,
+        dst: &super::Buffer,
+        offset: wgt::BufferAddress,
+    ) {
+        let count = range.end - range.start;
+        if count == 0 {
+            return;
+        }
+        let record = mem::size_of::<Direct3D12::D3D12_QUERY_DATA_PIPELINE_STATISTICS>() as u64;
+        let size = u64::from(count) * record;
+        let buffer = {
+            let (resource, allocation) =
+                super::suballocation::DeviceAllocationContext::from(&*self)
+                    .create_buffer(&crate::BufferDescriptor {
+                        label: None,
+                        size,
+                        usage: wgt::BufferUses::COPY_SRC | wgt::BufferUses::COPY_DST,
+                        memory_flags: crate::MemoryFlags::empty(),
+                    })
+                    .expect(concat!(
+                        "internal error: ",
+                        "failed to allocate intermediate buffer ",
+                        "for pipeline statistics"
+                    ));
+            super::Buffer {
+                resource,
+                size,
+                allocation,
+            }
+        };
+        let barrier = |from, to| crate::BufferBarrier {
+            buffer: &buffer,
+            usage: crate::StateTransition { from, to },
+        };
+        unsafe {
+            self.transition_buffers(
+                [barrier(wgt::BufferUses::empty(), wgt::BufferUses::COPY_DST)].into_iter(),
+            )
+        };
+        unsafe {
+            self.list.as_ref().unwrap().ResolveQueryData(
+                &set.raw,
+                set.raw_ty,
+                range.start,
+                count,
+                &buffer.resource,
+                0,
+            )
+        };
+        unsafe {
+            self.transition_buffers(
+                [barrier(wgt::BufferUses::COPY_DST, wgt::BufferUses::COPY_SRC)].into_iter(),
+            )
+        };
+        let fields = u64::from(set.stats.bits().count_ones());
+        let runs = pipeline_statistics_runs(set.stats);
+        let list = self.list.as_ref().unwrap();
+        for query in 0..u64::from(count) {
+            for &(src_field, dst_field, len) in &runs {
+                unsafe {
+                    list.CopyBufferRegion(
+                        &dst.resource,
+                        offset + (query * fields + dst_field) * 8,
+                        &buffer.resource,
+                        query * record + src_field * 8,
+                        len * 8,
+                    )
+                };
+            }
+        }
+        self.intermediate_copy_bufs.push(buffer);
+    }
+}
+
+/// BENILLA: pipeline statistics. The D3D12 record field of each `PipelineStatisticsTypes` bit, in
+/// bit order, as a `u64` index into `D3D12_QUERY_DATA_PIPELINE_STATISTICS`.
+const PIPELINE_STATISTICS_FIELDS: [(wgt::PipelineStatisticsTypes, usize); 5] = {
+    use wgt::PipelineStatisticsTypes as T;
+    use windows::Win32::Graphics::Direct3D12::D3D12_QUERY_DATA_PIPELINE_STATISTICS as R;
+    [
+        (T::VERTEX_SHADER_INVOCATIONS, mem::offset_of!(R, VSInvocations) / 8),
+        (T::CLIPPER_INVOCATIONS, mem::offset_of!(R, CInvocations) / 8),
+        (T::CLIPPER_PRIMITIVES_OUT, mem::offset_of!(R, CPrimitives) / 8),
+        (T::FRAGMENT_SHADER_INVOCATIONS, mem::offset_of!(R, PSInvocations) / 8),
+        (T::COMPUTE_SHADER_INVOCATIONS, mem::offset_of!(R, CSInvocations) / 8),
+    ]
+};
+
+/// BENILLA: pipeline statistics. The copies that turn one D3D12 record into wgpu's layout for
+/// `types`: `(record field, wgpu field, fields)`, adjacent fields merged into one run.
+fn pipeline_statistics_runs(types: wgt::PipelineStatisticsTypes) -> Vec<(u64, u64, u64)> {
+    let mut runs: Vec<(u64, u64, u64)> = Vec::new();
+    let mut dst = 0u64;
+    for (bit, src) in PIPELINE_STATISTICS_FIELDS {
+        if !types.contains(bit) {
+            continue;
+        }
+        let src = src as u64;
+        match runs.last_mut() {
+            Some(run) if run.0 + run.2 == src && run.1 + run.2 == dst => run.2 += 1,
+            _ => runs.push((src, dst, 1)),
+        }
+        dst += 1;
+    }
+    runs
+}
+
+#[cfg(test)]
+mod pipeline_statistics_tests {
+    use super::pipeline_statistics_runs;
+    use wgt::PipelineStatisticsTypes as T;
+
+    #[test]
+    fn every_type_is_three_copies_out_of_the_eleven_counter_record() {
+        // VSInvocations is field 2; CInvocations, CPrimitives, PSInvocations 5..8; CSInvocations 10.
+        assert_eq!(
+            pipeline_statistics_runs(T::all()),
+            [(2, 0, 1), (5, 1, 3), (10, 4, 1)]
+        );
+        assert_eq!(
+            pipeline_statistics_runs(T::FRAGMENT_SHADER_INVOCATIONS | T::COMPUTE_SHADER_INVOCATIONS),
+            [(7, 0, 1), (10, 1, 1)]
+        );
+        assert!(pipeline_statistics_runs(T::empty()).is_empty());
     }
 }
 
@@ -894,6 +1030,11 @@ impl crate::CommandEncoder for super::CommandEncoder {
         offset: wgt::BufferAddress,
         _stride: wgt::BufferSize,
     ) {
+        // BENILLA: pipeline statistics. D3D12's record is not wgpu's layout.
+        if set.raw_ty == Direct3D12::D3D12_QUERY_TYPE_PIPELINE_STATISTICS {
+            unsafe { self.copy_pipeline_statistics(set, range, buffer, offset) };
+            return;
+        }
         unsafe {
             self.list.as_ref().unwrap().ResolveQueryData(
                 &set.raw,
