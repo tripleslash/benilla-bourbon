@@ -189,6 +189,19 @@ pub(crate) fn install_dlss(app: &mut App) {
     );
 }
 
+/// fork: dlss (FORK.md) — any adapter on DX12 or Vulkan from NVIDIA (PCI vendor `0x10DE`).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn has_nvidia_gpu() -> bool {
+    let backends = wgpu::Backends::DX12 | wgpu::Backends::VULKAN;
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends,
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    bevy::tasks::block_on(instance.enumerate_adapters(backends))
+        .iter()
+        .any(|a| a.get_info().vendor == 0x10de)
+}
+
 /// The backends [`with_render_api`] creates the renderer on: the stored `gxApi`, or its registered
 /// default, when an adapter on this machine answers for it; else every backend, wgpu's own pick,
 /// so a choice the machine cannot honour never leaves the client without a renderer. The log

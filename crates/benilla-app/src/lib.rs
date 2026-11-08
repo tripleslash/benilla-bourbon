@@ -484,6 +484,19 @@ pub fn config_dir() -> Option<std::path::PathBuf> {
     local_state::home()
 }
 
+/// fork: dlss (FORK.md) — the NVIDIA runtime files the client loads from its DLSS folder
+/// (`benilla-config/dlss/`, `wow-data/dlss/` in the desktop build), which a standalone build
+/// fetches before it starts.
+#[cfg(not(target_arch = "wasm32"))]
+pub const DLSS_RUNTIME_FILES: &[&str] = benilla_world::dlss::RUNTIME_FILES;
+
+/// fork: dlss (FORK.md) — whether this machine has an NVIDIA GPU (PCI vendor `0x10DE`) on
+/// Direct3D 12 or Vulkan: the only machines the DLSS runtime is worth fetching for.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn has_nvidia_gpu() -> bool {
+    video::has_nvidia_gpu()
+}
+
 /// fork: desktop — keep every resident (settings, addons, saved variables, the fetched game data)
 /// in `<exe dir>/<name>/`, for a self-contained client. Call before [`run`].
 pub fn set_portable_home(name: &'static str) {

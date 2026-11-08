@@ -25,8 +25,8 @@ in their own `BENILLA.md`.
 | `benilla-app/src/cvars/table.rs` | the `upscaler` row in its fork-owned block |
 | `benilla-app/src/cvars/mod.rs` | `GRAPHICS_CVARS`; the default weld and the observer arm in the tests |
 | `benilla-app/src/cvars/callbacks.rs` | `ForkKnobs::upscaler`, passed to `world_backdrop::on_cvar` |
-| `benilla-app/src/lib.rs` | `video::install_dlss` before the render plugin |
-| `benilla-app/src/video.rs` | `install_dlss`; `boot_render_backends` resolved once |
+| `benilla-app/src/lib.rs` | `video::install_dlss` before the render plugin; `DLSS_RUNTIME_FILES`, `has_nvidia_gpu` for the desktop exe's fetch |
+| `benilla-app/src/video.rs` | `install_dlss`; `boot_render_backends` resolved once; `has_nvidia_gpu` |
 | `benilla-app/assets/ui/OptionsFrame.xml` | `BENILLA_TOOLTIP_UPSCALER`, `RowUpscaler` in both windows, the Frame Generation tooltip |
 | `benilla-app/src/ui_script/options_tests.rs` | the upscaler row's tooltip and staged-row entries |
 

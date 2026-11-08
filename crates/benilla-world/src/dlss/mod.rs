@@ -44,6 +44,19 @@ pub mod streamline;
 /// Programming Guide 5.2.1).
 pub const PROJECT_ID: &str = "6f1e2b7c-3a94-4d8e-b1c5-0d7a9e4f2c61";
 
+/// The NVIDIA runtime files the client loads from [`DlssRuntime::dir`]: DLSS Super Resolution and
+/// Frame Generation's NGX snippets, then Streamline's (`streamline::RUNTIME_FILES`). The standalone
+/// desktop build fetches whichever its site serves (`benilla-desktop/src/dlss.rs`).
+pub const RUNTIME_FILES: &[&str] = &[
+    "nvngx_dlss.dll",
+    "nvngx_dlssg.dll",
+    "sl.interposer.dll",
+    "sl.common.dll",
+    "sl.dlss_g.dll",
+    "sl.reflex.dll",
+    "sl.pcl.dll",
+];
+
 /// The temporal upscaler the player picked, the `upscaler` CVar.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Upscaler {
