@@ -1257,6 +1257,41 @@ mod tests {
         );
     }
 
+    /// DX12 reports `PIPELINE_STATISTICS_QUERY`, and lays D3D12's record out as wgpu's fields,
+    /// only while the vendored wgpu-hal keeps its fourth patch (`third_party/wgpu-hal/BENILLA.md`);
+    /// without it `WOW_GPU_STATS` reads nothing on the desktop default. The patch's own test
+    /// (`pipeline_statistics_tests`) is in a crate the workspace gates do not test, so a bump that
+    /// drops a hunk fails here.
+    #[test]
+    fn wgpu_hal_reports_pipeline_statistics_on_dx12() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../third_party/wgpu-hal/src/dx12");
+        let read = |rel: &str| {
+            std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
+        };
+        for (file, hunk) in [
+            (
+                "adapter.rs",
+                "features |= wgt::Features::PIPELINE_STATISTICS_QUERY;",
+            ),
+            ("mod.rs", "stats: wgt::PipelineStatisticsTypes,"),
+            (
+                "device.rs",
+                "wgt::QueryType::PipelineStatistics(types) => types,",
+            ),
+            ("command.rs", "unsafe fn copy_pipeline_statistics("),
+            (
+                "command.rs",
+                "if set.raw_ty == Direct3D12::D3D12_QUERY_TYPE_PIPELINE_STATISTICS {",
+            ),
+        ] {
+            assert!(
+                read(file).contains(hunk),
+                "the vendored wgpu-hal dx12/{file} lost `{hunk}`"
+            );
+        }
+    }
+
     /// Synced is `Fifo`, not `AutoVsync` (`FifoRelaxed`, which tears on a late frame).
     #[test]
     fn the_default_is_synced_like_the_window_literal() {
