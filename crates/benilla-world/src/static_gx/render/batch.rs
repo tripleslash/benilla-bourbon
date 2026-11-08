@@ -38,6 +38,17 @@
 //! candidate draw (its region's bound sits in table rows `row + 1` and `row + 2`), and for each
 //! survivor `atomicAdd` the count and write its args at `args_at + the old count`. The draw call
 //! already reads the count, so nothing on the CPU side moves.
+//!
+//! # The GPU cull's buffers (`gpu_cull`, native only)
+//!
+//! Where the two-phase cull runs ([`gpu_cull_lane`]), [`GxIndirect`] also holds
+//! [`GxCullTwins`], carved at the args' and counts' offsets and grown with them. A batch the colour
+//! pass marks culled ([`GxBatch::set_culled`]) fuses a draw only with draws of its own selection
+//! key, so each draw has one bound; [`GxBatch::finish`] then writes its args to the candidates
+//! buffer instead of `args`, one `[count slot, bucket's first arg, selection key, 0]` per draw to
+//! the meta buffer, and zeroes its counts and late counts. The cull fills `args`/`counts` (the
+//! early prepass and the colour pass draw them) and `late_args`/`late_counts` (the late prepass,
+//! [`GxBatch::emit_late`]).
 
 use super::bindless::{GxBindless, GxShared};
 use super::{GxCellDraw, GxCellGpu, GxRegionBinds, GxRun, GxSel};
@@ -64,6 +75,20 @@ const MIN_ARGS: u32 = 4096;
 
 /// The count buffer's floor, in buckets.
 const MIN_COUNTS: u32 = 256;
+
+/// Bytes of one candidate's cull meta (`[u32; 4]`).
+const META_SIZE: u64 = 16;
+
+/// A draw's selection key when it has none of its own: the cull takes the region's bound.
+const NO_KEY: u16 = u16::MAX;
+
+/// fork: whether the two-phase GPU cull (`gpu_cull`, native only) runs: where static_gx draws
+/// bindless and `WOW_GX_GPUCULL=0` did not turn it off. Never on wasm32.
+pub(super) fn gpu_cull_lane(caps: Option<&HwCaps>) -> bool {
+    !cfg!(target_arch = "wasm32")
+        && super::bindless::enabled(caps)
+        && crate::launch_env::var("WOW_GX_GPUCULL").as_deref() != Some("0")
+}
 
 /// The pipeline keys `(cutout, two_sided)` in [`pipe_class`] order: a four-entry pipeline table
 /// is built by mapping these.
@@ -106,6 +131,8 @@ struct GxDraw {
     /// The region in [`GxBatch::regions`] and its bind-group slot, to find what the ids name.
     region: u32,
     slot: u32,
+    /// The run's selection key where the region holds that key's bound, else [`NO_KEY`].
+    key: u16,
 }
 
 /// A region a batch draws, with the vertex slice its mesh lives in.
@@ -117,6 +144,8 @@ struct GxRegion<'w> {
     /// The region's table row and first arena index bindless; `(0, 0)` per region.
     row: u32,
     index_base: u32,
+    /// Selection keys whose bounds the region's table block holds (`bindless`); 0 per region.
+    keys: u32,
 }
 
 /// One state's draws as one multi-draw: `capacity` args from `args_at`, and where counted, the
@@ -136,6 +165,8 @@ struct GxScratch {
     counts: Vec<u32>,
     /// One per state group, in [`GxBatch::emit`]'s order: its bucket, or `None` to draw directly.
     buckets: Vec<Option<GxBucket>>,
+    /// fork: GPU cull — one per arg of a culled batch (the module header).
+    meta: Vec<[u32; 4]>,
 }
 
 impl GxScratch {
@@ -144,6 +175,7 @@ impl GxScratch {
         self.args.clear();
         self.counts.clear();
         self.buckets.clear();
+        self.meta.clear();
     }
 }
 
@@ -212,26 +244,119 @@ pub(super) struct GxIndirect {
     native: bool,
     args: GxFrameBuffer,
     counts: GxFrameBuffer,
+    /// fork: the GPU cull's buffers, where its lane runs (`gpu_cull`).
+    cull: Option<GxCullTwins>,
+}
+
+/// fork: GPU cull (`gpu_cull`) — the buffers the two phases read and write beside the args and
+/// counts, at the same offsets: made for the capacities `(args, counts)` and remade with them.
+#[derive(Default)]
+pub(super) struct GxCullTwins {
+    capacity: (u32, u32),
+    /// The CPU-written candidates, a [`DrawIndexedIndirectArgs`] at each arg offset.
+    cand: Option<Buffer>,
+    /// Per candidate `[count slot, bucket's first arg, selection key, phase-1 verdict]`.
+    meta: Option<Buffer>,
+    /// Phase 2's survivors and counts: the late prepass's draws.
+    late_args: Option<Buffer>,
+    late_counts: Option<Buffer>,
+}
+
+impl GxCullTwins {
+    /// Remake the buffers for new capacities; their contents are this frame's, never kept.
+    fn fit(&mut self, args: u32, counts: u32, device: &RenderDevice) {
+        if args == 0 || counts == 0 || self.capacity == (args, counts) {
+            return;
+        }
+        let make = |label: &'static str, size: u64, usage: BufferUsages| {
+            Some(device.create_buffer(&BufferDescriptor {
+                label: Some(label),
+                size,
+                usage,
+                mapped_at_creation: false,
+            }))
+        };
+        let written = BufferUsages::STORAGE | BufferUsages::COPY_DST;
+        let drawn = BufferUsages::INDIRECT | BufferUsages::STORAGE;
+        let draws = u64::from(args);
+        self.cand = make("static_gx_cull_candidates", draws * ARGS_SIZE, written);
+        self.meta = make("static_gx_cull_meta", draws * META_SIZE, written);
+        self.late_args = make("static_gx_cull_late_args", draws * ARGS_SIZE, drawn);
+        self.late_counts = make(
+            "static_gx_cull_late_counts",
+            u64::from(counts) * COUNT_SIZE,
+            drawn | BufferUsages::COPY_DST,
+        );
+        self.capacity = (args, counts);
+    }
+}
+
+/// fork: GPU cull — this frame's indirect buffers and their cull twins, everything the cull's bind
+/// group holds of them.
+#[derive(Clone, Copy)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))] // `args`, `counts`: read by `gpu_cull`
+pub(super) struct GxCullBuffers<'a> {
+    pub args: &'a Buffer,
+    pub counts: &'a Buffer,
+    pub cand: &'a Buffer,
+    pub meta: &'a Buffer,
+    pub late_args: &'a Buffer,
+    pub late_counts: &'a Buffer,
+}
+
+impl GxIndirect {
+    /// fork: whether this session runs the GPU cull: native multi-draw and [`gpu_cull_lane`].
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // read by `gpu_cull`, native only
+    pub(super) fn cull_lane(&self) -> bool {
+        self.cull.is_some()
+    }
+
+    /// fork: every buffer the GPU cull binds, once all exist; `None` without its lane.
+    pub(super) fn cull_buffers(&self) -> Option<GxCullBuffers<'_>> {
+        let twins = self.cull.as_ref()?;
+        Some(GxCullBuffers {
+            args: self.args.buffer.as_ref()?,
+            counts: self.counts.buffer.as_ref()?,
+            cand: twins.cand.as_ref()?,
+            meta: twins.meta.as_ref()?,
+            late_args: twins.late_args.as_ref()?,
+            late_counts: twins.late_counts.as_ref()?,
+        })
+    }
 }
 
 /// `RenderStartup`, after [`crate::modern::caps::init`]: multi-draw where the device draws one in
-/// hardware ([`HwCaps::mdi_count`], never on wasm32) and the lever leaves it on.
+/// hardware ([`HwCaps::mdi_count`], never on wasm32) and the lever leaves it on; the GPU cull's
+/// buffers where its lane runs too.
 pub(super) fn init_indirect(mut commands: Commands, caps: Option<Res<HwCaps>>) {
+    let caps = caps.as_deref();
+    let native = caps.is_some_and(|c| c.mdi_count)
+        && crate::launch_env::var("WOW_STATIC_GX_MDI").as_deref() != Some("0");
     commands.insert_resource(GxIndirect {
-        native: caps.is_some_and(|c| c.mdi_count)
-            && crate::launch_env::var("WOW_STATIC_GX_MDI").as_deref() != Some("0"),
+        native,
         args: GxFrameBuffer::new("static_gx_indirect", ARGS_SIZE, MIN_ARGS),
         counts: GxFrameBuffer::new("static_gx_indirect_counts", COUNT_SIZE, MIN_COUNTS),
+        cull: (native && gpu_cull_lane(caps)).then(GxCullTwins::default),
     });
 }
 
-/// Rewind both cursors, and grow a buffer to what last frame asked of it if that did not fit.
+/// Rewind both cursors, and grow a buffer to what last frame asked of it if that did not fit;
+/// the GPU cull's buffers follow.
 pub(super) fn prepare_indirect(mut indirect: ResMut<GxIndirect>, device: Res<RenderDevice>) {
     if !indirect.native {
         return;
     }
-    indirect.args.grow(&device);
-    indirect.counts.grow(&device);
+    let GxIndirect {
+        args,
+        counts,
+        cull,
+        ..
+    } = &mut *indirect;
+    args.grow(&device);
+    counts.grow(&device);
+    if let Some(cull) = cull {
+        cull.fit(args.capacity, counts.capacity, &device);
+    }
 }
 
 /// One pass's draws: gathered with [`Self::region`] and the `push_*` calls, ordered by
@@ -251,6 +376,9 @@ pub(super) struct GxBatch<'w> {
     /// This batch's ranges of the args and count buffers, once [`Self::finish`] got them.
     args_at: Option<(&'w Buffer, u32)>,
     counts_at: Option<(&'w Buffer, u32)>,
+    /// fork: GPU cull — [`Self::set_culled`], and the candidates `finish` handed the cull.
+    culled: bool,
+    cull_range: Option<(u32, u32)>,
 }
 
 impl<'w> GxBatch<'w> {
@@ -274,6 +402,8 @@ impl<'w> GxBatch<'w> {
             gathered: 0,
             args_at: None,
             counts_at: None,
+            culled: false,
+            cull_range: None,
         }
     }
 
@@ -284,6 +414,23 @@ impl<'w> GxBatch<'w> {
         self.gathered = 0;
         self.args_at = None;
         self.counts_at = None;
+        self.culled = false;
+        self.cull_range = None;
+    }
+
+    /// fork: GPU cull — have [`Self::finish`] hand this batch to the two-phase cull (`gpu_cull`,
+    /// the module header). Changes nothing where the lane has no buffers. The caller then records
+    /// the cull whenever [`Self::cull_range`] is `Some`: the counts are zero until it runs.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // called by `gpu_cull`'s hook
+    pub(super) fn set_culled(&mut self, on: bool) {
+        self.culled = on;
+    }
+
+    /// fork: GPU cull — the candidates `(first arg, count)` [`Self::finish`] handed the cull, in
+    /// this frame's args; `None` when the batch draws as B drew it.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // read by `gpu_cull`, native only
+    pub(super) fn cull_range(&self) -> Option<(u32, u32)> {
+        self.cull_range
     }
 
     /// Whether any region was added since the last [`Self::clear`].
@@ -299,11 +446,11 @@ impl<'w> GxBatch<'w> {
         draw: &GxCellDraw,
         allocator: &'w MeshAllocator,
     ) -> Option<u32> {
-        let (row, index_base) = match &gpu.binds {
-            GxRegionBinds::Own { .. } => (0, 0),
+        let (row, index_base, keys) = match &gpu.binds {
+            GxRegionBinds::Own { .. } => (0, 0, 0),
             GxRegionBinds::Shared(slots) => {
                 self.shared?;
-                (slots.row, slots.index_base)
+                (slots.row, slots.index_base, slots.keys)
             }
         };
         let vslice = allocator.mesh_vertex_slice(&draw.mesh.id())?;
@@ -313,6 +460,7 @@ impl<'w> GxBatch<'w> {
             base_vertex: i32::try_from(vslice.range.start).unwrap_or(0),
             row,
             index_base,
+            keys,
         });
         Some(self.regions.len() as u32 - 1)
     }
@@ -377,6 +525,10 @@ impl<'w> GxBatch<'w> {
             count: run.index_range.len() as u32,
             region: r,
             slot: run.slot as u32,
+            key: run
+                .group
+                .filter(|&g| u32::from(g) < region.keys)
+                .unwrap_or(NO_KEY),
         });
     }
 
@@ -406,14 +558,18 @@ impl<'w> GxBatch<'w> {
         let indirect: &'w GxIndirect = self.indirect;
         self.args_at = None;
         self.counts_at = None;
+        self.cull_range = None;
+        // fork: GPU cull — a culled batch keeps each draw to one selection key, its bound.
+        let cull = indirect.cull_buffers().filter(|_| self.culled);
         let regions = &self.regions;
         let GxScratch {
             draws,
             args,
             counts,
             buckets,
+            meta,
         } = &mut self.scratch;
-        sort_and_fuse(draws);
+        sort_and_fuse(draws, cull.is_some());
         args.clear();
         counts.clear();
         buckets.clear();
@@ -449,17 +605,52 @@ impl<'w> GxBatch<'w> {
             buckets.clear();
             return;
         };
-        self.queue.write_buffer(
-            args_buffer,
-            u64::from(args_start) * ARGS_SIZE,
-            bytemuck::cast_slice(args.as_slice()),
-        );
-        if let Some((counts_buffer, counts_start)) = counts_at {
+        // fork: GPU cull — the candidates go to the cull's buffers and the counts start at zero;
+        // the cull writes `args` and the counts. Every bucket must be counted (bindless).
+        let cull = cull.filter(|_| buckets.iter().flatten().all(|b| b.count_at.is_some()));
+        if let (Some(cull), Some((counts_buffer, counts_start))) = (cull, counts_at) {
+            meta.clear();
+            let groups = draws.chunk_by(|a, b| a.state == b.state);
+            for (group, bucket) in groups.zip(buckets.iter()) {
+                if let Some(GxBucket {
+                    args_at: first,
+                    count_at: Some(c),
+                    ..
+                }) = bucket
+                {
+                    let (slot, first) = (counts_start + c, args_start + first);
+                    meta.extend(group.iter().map(|d| [slot, first, u32::from(d.key), 0]));
+                }
+            }
             self.queue.write_buffer(
-                counts_buffer,
-                u64::from(counts_start) * COUNT_SIZE,
-                bytemuck::cast_slice(counts.as_slice()),
+                cull.cand,
+                u64::from(args_start) * ARGS_SIZE,
+                bytemuck::cast_slice(args.as_slice()),
             );
+            self.queue.write_buffer(
+                cull.meta,
+                u64::from(args_start) * META_SIZE,
+                bytemuck::cast_slice(meta.as_slice()),
+            );
+            counts.fill(0);
+            let zeros: &[u8] = bytemuck::cast_slice(counts.as_slice());
+            let counts_offset = u64::from(counts_start) * COUNT_SIZE;
+            self.queue.write_buffer(counts_buffer, counts_offset, zeros);
+            self.queue.write_buffer(cull.late_counts, counts_offset, zeros);
+            self.cull_range = Some((args_start, args.len() as u32));
+        } else {
+            self.queue.write_buffer(
+                args_buffer,
+                u64::from(args_start) * ARGS_SIZE,
+                bytemuck::cast_slice(args.as_slice()),
+            );
+            if let Some((counts_buffer, counts_start)) = counts_at {
+                self.queue.write_buffer(
+                    counts_buffer,
+                    u64::from(counts_start) * COUNT_SIZE,
+                    bytemuck::cast_slice(counts.as_slice()),
+                );
+            }
         }
         self.args_at = args_at;
         self.counts_at = counts_at;
@@ -478,10 +669,44 @@ impl<'w> GxBatch<'w> {
         'w: 'p,
     {
         crate::static_gx::count_runs(counter, self.gathered);
+        self.emit_from(pass, pipes, counter, None);
+    }
+
+    /// fork: GPU cull — the late prepass: through the same buckets, the draws phase 2 found
+    /// (`late_args`, `late_counts`). Nothing when the batch took no cull range this frame.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // called by `gpu_cull`'s hook
+    pub(super) fn emit_late<'p>(
+        &self,
+        pass: &mut TrackedRenderPass<'p>,
+        pipes: &[Option<&'p RenderPipeline>],
+        counter: usize,
+    ) where
+        'w: 'p,
+    {
+        let indirect: &'w GxIndirect = self.indirect;
+        if let (Some(_), Some(cull)) = (self.cull_range, indirect.cull_buffers()) {
+            self.emit_from(pass, pipes, counter, Some((cull.late_args, cull.late_counts)));
+        }
+    }
+
+    /// [`Self::emit`]'s loop; `late` replaces the args and count buffers (same offsets) and draws
+    /// the counted buckets alone.
+    fn emit_from<'p>(
+        &self,
+        pass: &mut TrackedRenderPass<'p>,
+        pipes: &[Option<&'p RenderPipeline>],
+        counter: usize,
+        late: Option<(&'w Buffer, &'w Buffer)>,
+    ) where
+        'w: 'p,
+    {
         // One entry per state group, in this same group order; empty when nothing goes indirect.
         let mut buckets = self.scratch.buckets.iter().copied();
         for group in self.scratch.draws.chunk_by(|a, b| a.state == b.state) {
             let bucket = buckets.next().flatten();
+            if late.is_some() && bucket.and_then(|b| b.count_at).is_none() {
+                continue;
+            }
             let head = group[0];
             let Some(pipeline) = pipes.get(usize::from(head.state.pipe)).copied().flatten() else {
                 continue;
@@ -495,19 +720,21 @@ impl<'w> GxBatch<'w> {
             match (bucket, self.args_at) {
                 (Some(b), Some((args, args_start))) => {
                     crate::static_gx::count_draw(counter);
+                    let args = late.map_or(args, |(late_args, _)| late_args);
                     let args_offset = u64::from(args_start + b.args_at) * ARGS_SIZE;
                     match (b.count_at, self.counts_at) {
                         (Some(c), Some((counts, counts_start))) => pass
                             .multi_draw_indexed_indirect_count(
                                 args,
                                 args_offset,
-                                counts,
+                                late.map_or(counts, |(_, late_counts)| late_counts),
                                 u64::from(counts_start + c) * COUNT_SIZE,
                                 b.capacity,
                             ),
                         _ => pass.multi_draw_indexed_indirect(args, args_offset, b.capacity),
                     }
                 }
+                _ if late.is_some() => {}
                 _ => {
                     for d in group {
                         crate::static_gx::count_draw(counter);
@@ -524,15 +751,20 @@ impl<'w> GxBatch<'w> {
 }
 
 /// Order `draws` by state, row, then index range, and fuse each draw into the one before it where
-/// its indices continue that one's under the same state and row (the same region, bindless).
-fn sort_and_fuse(draws: &mut Vec<GxDraw>) {
+/// its indices continue that one's under the same state and row (the same region, bindless) and,
+/// with `keep_keys` (a GPU-culled batch), the same selection key.
+fn sort_and_fuse(draws: &mut Vec<GxDraw>, keep_keys: bool) {
     draws.sort_unstable_by_key(|d| (d.state, d.row, d.first));
     draws.dedup_by(|next, prev| {
         let joins = prev.state == next.state
             && prev.row == next.row
-            && prev.first + prev.count == next.first;
+            && prev.first + prev.count == next.first
+            && (!keep_keys || prev.key == next.key);
         if joins {
             prev.count += next.count;
+            if prev.key != next.key {
+                prev.key = NO_KEY;
+            }
         }
         joins
     });
@@ -614,6 +846,7 @@ mod tests {
             count: range.1,
             region: 0,
             slot: 0,
+            key: NO_KEY,
         }
     }
 
@@ -632,7 +865,7 @@ mod tests {
             draw(0, slab, a, bind_a, (0, 6)),
             draw(0, slab, a, bind_a, (18, 3)),
         ];
-        sort_and_fuse(&mut draws);
+        sort_and_fuse(&mut draws, false);
         let shape: Vec<(u8, BufferId, u32, u32)> = draws
             .iter()
             .map(|d| (d.state.pipe, d.state.index, d.first, d.count))
@@ -677,7 +910,7 @@ mod tests {
         doodad.state.phase = 1;
         let wmo = draw(3, slab, BufferId::new(), BindGroupId::new(), (0, 3));
         let mut draws = vec![doodad, wmo];
-        sort_and_fuse(&mut draws);
+        sort_and_fuse(&mut draws, false);
         assert_eq!((draws[0].state.phase, draws[1].state.phase), (0, 1));
     }
 
@@ -703,7 +936,7 @@ mod tests {
             shared(other, 20, 0, (40, 3)),
             shared(slab, 0, 100, (0, 6)),
         ];
-        sort_and_fuse(&mut draws);
+        sort_and_fuse(&mut draws, false);
         let shape: Vec<(u32, u32, u32)> = draws.iter().map(|d| (d.row, d.first, d.count)).collect();
         assert_eq!(
             shape,
@@ -744,6 +977,35 @@ mod tests {
                 }),
             ],
             "one bucket per slab, the lone draw included"
+        );
+    }
+
+    /// A GPU-culled batch fuses only inside one selection key, so every draw keeps the key whose
+    /// bound the cull tests; otherwise contiguous keys fuse and the draw takes the region's bound.
+    #[test]
+    fn a_culled_batch_fuses_only_inside_a_selection_key() {
+        let (slab, arena, bind) = (BufferId::new(), BufferId::new(), BindGroupId::new());
+        let keyed = |key, range| {
+            let mut d = draw(0, slab, arena, bind, range);
+            d.key = key;
+            d
+        };
+        let draws = vec![keyed(4, (6, 6)), keyed(3, (0, 6)), keyed(4, (12, 3))];
+        let mut culled = draws.clone();
+        sort_and_fuse(&mut culled, true);
+        let shape: Vec<(u16, u32, u32)> = culled.iter().map(|d| (d.key, d.first, d.count)).collect();
+        assert_eq!(
+            shape,
+            vec![(3, 0, 6), (4, 6, 9)],
+            "key 4's halves fuse, key 3 stays apart"
+        );
+        let mut fused = draws;
+        sort_and_fuse(&mut fused, false);
+        let shape: Vec<(u16, u32, u32)> = fused.iter().map(|d| (d.key, d.first, d.count)).collect();
+        assert_eq!(
+            shape,
+            vec![(NO_KEY, 0, 15)],
+            "across keys the draw is the region's"
         );
     }
 }

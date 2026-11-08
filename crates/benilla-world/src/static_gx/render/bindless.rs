@@ -33,6 +33,13 @@
 //! | `row + 1` | mesh-local bound centre.x (f32 bits) | centre.y | centre.z | first index in the arena |
 //! | `row + 2` | bound half-extent.x (f32 bits) | half.y | half.z | index count |
 //! | `row + 3 + i` | item `i`'s record | | | |
+//! | `row + 3 + items + 2k` | selection key `k`'s mesh-local bound centre.x (f32 bits) | centre.y | centre.z | 0 |
+//! | `row + 4 + items + 2k` | key `k`'s half-extent.x (f32 bits) | half.y | half.z | 0 |
+//!
+//! The key rows exist only where the GPU cull runs (`gpu_cull`, [`GxBindless::new`]'s
+//! `key_bounds`): one pair per selection key `0..keys` ([`GxSlots::keys`], the region's largest
+//! WMO group or prop referrer-set index plus one), a key with no bound of its own taking the
+//! region's. A cell has none.
 //!
 //! A record is the per-region layout's record with the pool class in x's high half:
 //! x = layer (bits 0..16) | class (bits 16..32), y = the MOBA batch-order nudge, z = SIDN
@@ -114,8 +121,10 @@ pub(super) fn layout() -> BindGroupLayoutDescriptor {
 pub(crate) struct GxSlots {
     /// The header's first row; the region's `first_instance`.
     pub row: u32,
-    /// Rows held: [`HEADER_ROWS`] plus one per item.
+    /// Rows held: [`HEADER_ROWS`], one per item, two per selection key.
     pub rows: u32,
+    /// Selection keys with a bound row pair after the records; 0 without the GPU cull.
+    pub keys: u32,
     /// The region's first index in the arena; its run ranges are relative to it.
     pub index_base: u32,
     pub index_len: u32,
@@ -272,11 +281,14 @@ pub(super) struct GxBindless {
     /// `(pool classes, table buffer)` the bind group was built over.
     bound: Option<(u32, BufferId)>,
     warned_overflow: bool,
+    /// fork: GPU cull — regions also hold their selection keys' bounds (the module header).
+    key_bounds: bool,
 }
 
 impl GxBindless {
     /// `ray_query`: the arena is also a BLAS input (`BLAS_INPUT`), for the ray-traced lanes.
-    pub(super) fn new(ray_query: bool) -> Self {
+    /// `key_bounds`: each region holds its selection keys' bounds, for the GPU cull.
+    pub(super) fn new(ray_query: bool, key_bounds: bool) -> Self {
         let mut index_usage = BufferUsages::INDEX | BufferUsages::STORAGE;
         if ray_query {
             index_usage |= BufferUsages::BLAS_INPUT;
@@ -294,23 +306,36 @@ impl GxBindless {
             bind: None,
             bound: None,
             warned_overflow: false,
+            key_bounds,
         }
     }
 
-    /// Place a region: allocate its table block and index range, write its header and `records`.
-    /// The caller copies its indices into [`Self::index_buffer`] at `index_base` through `copies`.
+    /// Place a region: allocate its table block and index range, write its header, `records` and,
+    /// with `key_bounds`, its selection keys' bounds (`groups`, mesh-local, keyed like a run's
+    /// `group`). The caller copies its indices into [`Self::index_buffer`] at `index_base` through
+    /// `copies`.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn place(
         &mut self,
         origin: Vec3,
         aabb: &Aabb,
+        groups: &[(u16, Aabb)],
         records: &[[u32; 4]],
         index_len: u32,
         device: &RenderDevice,
         queue: &RenderQueue,
         copies: &mut CommandEncoder,
     ) -> GxSlots {
-        let rows = HEADER_ROWS + records.len() as u32;
+        let keys = if self.key_bounds {
+            groups
+                .iter()
+                .map(|(k, _)| u32::from(*k) + 1)
+                .max()
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let rows = HEADER_ROWS + records.len() as u32 + 2 * keys;
         let row = self.rows.alloc(rows);
         self.table.reserve(self.rows.end(), device, queue, copies);
         let index_base = self.index_alloc.alloc(index_len);
@@ -332,10 +357,16 @@ impl GxBindless {
         let slots = GxSlots {
             row,
             rows,
+            keys,
             index_base,
             index_len,
         };
         self.write_records(queue, slots, records);
+        if keys > 0 {
+            let at = u64::from(row + HEADER_ROWS + records.len() as u32) * ROW;
+            let bounds = key_rows(aabb, groups, keys);
+            queue.write_buffer(table, at, bytemuck::cast_slice(&bounds));
+        }
         slots
     }
 
@@ -432,6 +463,25 @@ impl GxBindless {
     }
 }
 
+/// The bound row pairs of keys `0..keys`: each key's own bound from `groups`, the region's where
+/// it has none.
+fn key_rows(region: &Aabb, groups: &[(u16, Aabb)], keys: u32) -> Vec<[u32; 4]> {
+    let pair = |b: &Aabb| {
+        let (c, h) = (Vec3::from(b.center), Vec3::from(b.half_extents));
+        [
+            [c.x.to_bits(), c.y.to_bits(), c.z.to_bits(), 0],
+            [h.x.to_bits(), h.y.to_bits(), h.z.to_bits(), 0],
+        ]
+    };
+    let mut rows = vec![pair(region); keys as usize];
+    for (k, b) in groups {
+        if let Some(slot) = rows.get_mut(usize::from(*k)) {
+            *slot = pair(b);
+        }
+    }
+    rows.into_iter().flatten().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,6 +507,29 @@ mod tests {
             "6..12 joins and lowers the mark"
         );
         assert_eq!(a.alloc(0), 6, "an empty block still takes one");
+    }
+
+    /// Every key below the largest takes a row pair: its own bound where it has one, the region's
+    /// where it has not.
+    #[test]
+    fn key_rows_fill_every_key_up_to_the_largest() {
+        let region = Aabb::from_min_max(Vec3::splat(-10.0), Vec3::splat(10.0));
+        let group = Aabb::from_min_max(Vec3::ZERO, Vec3::ONE);
+        let rows = key_rows(&region, &[(2, group)], 3);
+        assert_eq!(rows.len(), 6, "two rows a key, keys 0..3");
+        assert_eq!(rows[0][0], 0.0f32.to_bits(), "key 0 takes the region's centre");
+        assert_eq!(rows[1][0], 10.0f32.to_bits(), "and its half-extent");
+        assert_eq!(rows[4][0], 0.5f32.to_bits(), "key 2 its own centre");
+        assert_eq!(rows[5][1], 0.5f32.to_bits(), "and its own half-extent");
+    }
+
+    /// The cull shader reads the key rows where the table puts them.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_cull_shader_agrees_with_the_table() {
+        let src = include_str!("../../shaders/modern/gx_cull.wgsl");
+        assert!(src.contains(&format!("const HEADER_ROWS: u32 = {HEADER_ROWS}u;")));
+        assert!(src.contains("row + HEADER_ROWS + head.w + 2u * key"));
     }
 
     /// The WGSL library declares the same array size and header length as the layout here.

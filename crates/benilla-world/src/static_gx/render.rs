@@ -308,7 +308,10 @@ fn init_pipelines(
     // counted multi-draw (`bindless`), else the per-region one.
     let bindless = bindless::enabled(caps.as_deref());
     if bindless {
-        commands.insert_resource(bindless::GxBindless::new(caps.is_some_and(|c| c.ray_query)));
+        commands.insert_resource(bindless::GxBindless::new(
+            caps.is_some_and(|c| c.ray_query),
+            batch::gpu_cull_lane(caps.as_deref()),
+        ));
         info!("static_gx: bindless layout (WOW_GX_BINDLESS=0 draws per region)");
     } else {
         info!("static_gx: per-region layout");
@@ -965,6 +968,7 @@ fn assemble_region(
             let slots = shared.place(
                 draw.origin,
                 &draw.aabb,
+                &draw.groups,
                 &records,
                 at,
                 render_device,
