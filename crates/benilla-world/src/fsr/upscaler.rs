@@ -353,6 +353,7 @@ impl FsrState {
     }
 
     /// fork: dlss (FORK.md) — this frame's jitter, in render pixels.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn jitter(&self) -> Vec2 {
         self.jitter
     }

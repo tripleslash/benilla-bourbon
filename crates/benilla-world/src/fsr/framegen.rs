@@ -364,6 +364,7 @@ impl FgState {
     }
 
     /// fork: dlss (FORK.md) — DLSS-G's output, on a view DLSS-G generates for.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn dlss_output(&self) -> Option<&TextureView> {
         match &self.targets.generator {
             Generator::Dlss(v) => Some(v),
@@ -373,22 +374,26 @@ impl FgState {
 
     /// fork: dlss (FORK.md) — this frame's finished image through its linear view, DLSS-G's
     /// backbuffer.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn current_final(&self) -> &TextureView {
         &self.targets.finals[self.parity].sampled
     }
 
     /// fork: dlss (FORK.md) — the compose wrote this world frame's image.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn composed(&self) -> bool {
         self.composed.load(Ordering::Acquire)
     }
 
     /// fork: dlss (FORK.md) — rendered frames since the pair last reset, this one counted;
     /// 1 on a reset frame.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn frame_index_since_reset(&self) -> u32 {
         self.frame_index_since_reset
     }
 
     /// fork: dlss (FORK.md) — DLSS-G wrote this world frame's generated image.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn mark_generated(&self) {
         self.generated.store(true, Ordering::Release);
     }

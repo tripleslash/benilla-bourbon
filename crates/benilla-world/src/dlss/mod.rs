@@ -277,6 +277,8 @@ impl Plugin for DlssPlugin {
 
     /// NGX opens on the render device, which exists once the renderer has.
     fn finish(&self, app: &mut App) {
+        #[cfg(target_arch = "wasm32")]
+        let _ = app;
         #[cfg(not(target_arch = "wasm32"))]
         sr::init_sdk(app);
     }
