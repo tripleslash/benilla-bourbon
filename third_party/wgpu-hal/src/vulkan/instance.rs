@@ -571,7 +571,12 @@ impl super::Instance {
 
         let entry = unsafe {
             profiling::scope!("Load vk library");
-            ash::Entry::load()
+            // BENILLA: a present interposer's loader in place of the system one
+            // (`super::interposer`).
+            match super::interposer::loader() {
+                Some(path) => ash::Entry::load_from(path),
+                None => ash::Entry::load(),
+            }
         }
         .map_err(|err| {
             crate::InstanceError::with_source(String::from("missing Vulkan entry points"), err)

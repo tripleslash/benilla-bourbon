@@ -9,9 +9,10 @@ marked `BENILLA:`.
 
 ## Why a fork exists at all
 
-Four patches: the Vulkan presentation stall below, DX12 multi-draw-indirect-count ("The second
+Six patches: the Vulkan presentation stall below, DX12 multi-draw-indirect-count ("The second
 patch", with `third_party/wgpu-core`), an async compute queue ("The third patch") and DX12
-pipeline-statistics queries ("The fourth patch").
+pipeline-statistics queries ("The fourth patch"), the DX12 command list for NGX ("The fifth
+patch") and a present interposer for Streamline ("The sixth patch").
 
 On Vulkan, the default on Windows and Linux, the swapchain's acquire (`NativeSwapchain::acquire`)
 waits up to wgpu-core's 1 s frame timeout, and a presentation engine that stalls longer (a machine
@@ -130,6 +131,34 @@ offsets (`offset_of!`): `VERTEX_SHADER_INVOCATIONS` is `VSInvocations`, `CLIPPER
 pass reads the same five numbers on either backend. With all five types (bevy's render
 diagnostics ask for all) a query is three copies: field 2, fields 5–7, field 10.
 `pipeline_statistics_tests` checks the runs.
+
+## The fifth patch — the DX12 command list, for NVIDIA NGX (`src/dx12/command.rs`)
+
+`CommandEncoder::raw_command_list()` returns the open `ID3D12GraphicsCommandList`. DLSS on DX12
+(`third_party/dlss_wgpu/src/d3d12.rs`) records `NVSDK_NGX_D3D12_CreateFeature` and
+`NVSDK_NGX_D3D12_EvaluateFeature_C` into it, in an encoder of its own that nothing else records
+into, so NGX's descriptor heaps and root signature need no restoring. Vulkan has the equivalent
+upstream (`raw_handle()`). Additive: no existing path changes.
+
+## The sixth patch — a present interposer (NVIDIA Streamline), DX12 and Vulkan
+
+DLSS Frame Generation exists only inside Streamline's closed `sl.dlss_g` plugin, which must see the
+swap chain. In manual-hooking mode (`ProgrammingGuideManualHooking.md`) the host routes the hooked
+calls through Streamline's proxies:
+
+- **DX12** (`src/dx12/mod.rs`, `interposer`; `src/dx12/adapter.rs`): with an `slUpgradeInterface`
+  installed by `interposer::set_upgrade_interface`, the direct queue is created on the proxy device
+  (`eID3D12Device_CreateCommandQueue`) and the HWND swap chain on the proxy factory
+  (`eIDXGIFactory_CreateSwapChainForHwnd`); the swap chain wgpu then holds is the proxy, so
+  `Present`, `GetBuffer`, `ResizeBuffers` and the rest reach Streamline. The composition targets are
+  not routed.
+- **Vulkan** (`src/vulkan/mod.rs`, `interposer`; `src/vulkan/instance.rs`): with a loader path set
+  by `interposer::set_loader`, `ash::Entry::load_from(sl.interposer.dll)` replaces
+  `Entry::load()`, Streamline's documented Vulkan path (1.1): its `vkGet*ProcAddr` answer the
+  driver's functions except the ones it intercepts.
+
+Unset (every run that does not select DLSS frame generation at boot), both are one `OnceLock` read
+at instance or swap-chain creation and nothing else.
 
 ## How to check
 

@@ -87,6 +87,13 @@ impl Drop for super::CommandEncoder {
 }
 
 impl super::CommandEncoder {
+    /// BENILLA: the open command list, for a library that records into it directly (NVIDIA NGX's
+    /// `NVSDK_NGX_D3D12_EvaluateFeature`, `third_party/dlss_wgpu`). `None` while not encoding. The
+    /// caller restores nothing: such a list is recorded by the library alone, then ended by wgpu.
+    pub fn raw_command_list(&self) -> Option<&Direct3D12::ID3D12GraphicsCommandList> {
+        self.list.as_ref()
+    }
+
     /// BENILLA: async compute. The D3D12 state of a buffer use as this encoder must name it.
     fn buffer_state(&self, usage: wgt::BufferUses) -> Direct3D12::D3D12_RESOURCE_STATES {
         let marked = usage.contains(crate::ASYNC_COMPUTE_BUFFER_MARK);
