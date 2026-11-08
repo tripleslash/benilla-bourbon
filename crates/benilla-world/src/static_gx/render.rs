@@ -257,7 +257,28 @@ struct GxPipelines {
     /// fork: this session draws bindless (`bindless::enabled`, fixed at startup): `cell_layout` is
     /// the shared layout and every static_gx pipeline takes [`Self::layout_defs`].
     bindless: bool,
+    /// fork: F — the colour pipelines declare the ray-traced scene as group 3 and trace the sun's
+    /// and the lamps' visibility (`modern::rt_shadow`, [`rt_shadow_layout`]); `static_gx_pass`
+    /// binds it. The prepass twins never do.
+    rt: bool,
 }
+
+/// fork: F — the ray-traced scene's layout for a modern colour pipeline where the ray-traced
+/// shadows run (`modern::shadow::rt_shadows`), bound as group 3; `None` everywhere else.
+fn rt_shadow_layout(modern: bool) -> Option<BindGroupLayoutDescriptor> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        (modern && crate::modern::shadow::rt_shadows()).then(rt_scene::layout)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = modern;
+        None
+    }
+}
+
+/// fork: F — group 3 of [`rt_shadow_layout`]'s pipelines.
+const RT_SHADOW_GROUP: u32 = 3;
 
 impl GxPipelines {
     /// fork: the shader defs of group 1's layout: `GX_BINDLESS` when bindless, else none. Every
@@ -361,6 +382,7 @@ fn init_pipelines(
         prepass: HashMap::default(),
         specialized_for: None,
         bindless,
+        rt: false,
     });
 }
 
@@ -472,6 +494,9 @@ fn prepare_static_gx(
         pipes.pipelines.clear();
         pipes.prepass.clear();
         let prepassed = modern && prepass_enabled();
+        // fork: F — the colour pipelines' ray-traced scene, where the lane runs.
+        let rt_layout = rt_shadow_layout(modern);
+        pipes.rt = rt_layout.is_some();
         for cutout in [false, true] {
             for two_sided in [false, true] {
                 let mut defs = pipes.layout_defs();
@@ -548,15 +573,22 @@ fn prepare_static_gx(
                     });
                     pipes.prepass.insert((cutout, two_sided), pre);
                 }
+                // fork: F — the colour pipeline alone traces; after the prepass twin took its defs.
+                let mut layout = vec![
+                    pipes.view_layout.clone(),
+                    pipes.cell_layout.clone(),
+                    pipes.light_layout.clone(),
+                ];
+                if let Some(rt) = &rt_layout {
+                    layout.push(rt.clone());
+                    defs.push(ShaderDefVal::from("RT_SHADOWS"));
+                    defs.push(ShaderDefVal::UInt("RT_GROUP".into(), RT_SHADOW_GROUP));
+                }
                 let id = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
                     label: Some(
                         format!("static_gx c{} t{}", u8::from(cutout), u8::from(two_sided)).into(),
                     ),
-                    layout: vec![
-                        pipes.view_layout.clone(),
-                        pipes.cell_layout.clone(),
-                        pipes.light_layout.clone(),
-                    ],
+                    layout,
                     vertex: VertexState {
                         shader: shader.clone(),
                         shader_defs: defs.clone(),
@@ -1336,6 +1368,20 @@ pub(crate) fn static_gx_pass(
         let batch = &batch;
         #[cfg(not(target_arch = "wasm32"))]
         let (cull, view_depth) = (cull.as_ref(), depth);
+        // fork: F — the scene the colour pipelines trace against, or its stand-in; with neither
+        // (before the scene's first prepare) a pipeline that declares it cannot draw.
+        #[cfg(not(target_arch = "wasm32"))]
+        let rt_bind = if pipes.rt {
+            let Some(bind) = world
+                .get_resource::<rt_scene::RtScene>()
+                .and_then(|s| s.bind_group_or_stub())
+            else {
+                return;
+            };
+            Some(bind)
+        } else {
+            None
+        };
         crate::par_encode::record(
             &mut render_context,
             jobs,
@@ -1368,6 +1414,10 @@ pub(crate) fn static_gx_pass(
                 let span = diagnostics.pass_span(&mut pass, label);
                 pass.set_bind_group(0, &view_bind.main, view_offsets);
                 pass.set_bind_group(2, &light_bind.0, &[]);
+                #[cfg(not(target_arch = "wasm32"))]
+                if let (Some(bind), 1) = (rt_bind, used) {
+                    pass.set_bind_group(RT_SHADOW_GROUP as usize, bind, &[]);
+                }
                 batch.emit(&mut pass, table, 0);
                 span.end(&mut pass);
                 #[cfg(not(target_arch = "wasm32"))]

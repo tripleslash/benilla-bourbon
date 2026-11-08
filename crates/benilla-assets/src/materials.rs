@@ -12,8 +12,9 @@ use bevy::pbr::{
 };
 use bevy::prelude::*;
 use bevy::render::render_resource::{
-    AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, ColorWrites,
-    CompareFunction, FragmentState, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+    AsBindGroup, BindGroupLayoutDescriptor, BlendComponent, BlendFactor, BlendOperation,
+    BlendState, Buffer, ColorWrites, CompareFunction, FragmentState, RenderPipelineDescriptor,
+    SpecializedMeshPipelineError,
 };
 use bevy::shader::{ShaderDefVal, ShaderRef};
 
@@ -38,6 +39,35 @@ pub fn modern_vertex_walks() -> bool {
 // (`benilla_world::modern::volumetrics`), sampled by the transparent lanes.
 pub const MODERN_FOG_VOLUME: Handle<Image> =
     bevy::asset::uuid_handle!("e8a1c6d2-4f37-4b9e-a0c5-93d17b2f6e48");
+
+/// fork: F — the ray-traced shadows' scene group (`benilla_world::static_gx::rt_scene::layout`),
+/// published at render startup where that lane runs (`benilla_world::modern::rt_shadow`, native
+/// only); never set anywhere else, so every pipeline elsewhere is untouched.
+pub static RT_SHADOW_LAYOUT: std::sync::OnceLock<BindGroupLayoutDescriptor> =
+    std::sync::OnceLock::new();
+
+/// fork: F — where the ray-traced shadows run, a modern receiver's colour pipeline declares the
+/// scene as the group after the material's, and its fragment stage compiles `RT_SHADOWS` with
+/// `RT_GROUP` naming that group (`benilla_modern::rtshadow`, `rt_scene`); bevy_pbr's `DrawMaterial`
+/// binds it there (`MaterialExtraBindGroup`, `third_party/bevy_pbr/BENILLA.md`). Never a
+/// depth-prepass pipeline, whose draw function binds no such group.
+fn push_rt_shadows(descriptor: &mut RenderPipelineDescriptor) {
+    let Some(layout) = RT_SHADOW_LAYOUT.get() else {
+        return;
+    };
+    if is_prepass(descriptor) {
+        return;
+    }
+    let Some(fragment) = descriptor.fragment.as_mut() else {
+        return;
+    };
+    let group = descriptor.layout.len() as u32;
+    fragment.shader_defs.push("RT_SHADOWS".into());
+    fragment
+        .shader_defs
+        .push(ShaderDefVal::UInt("RT_GROUP".into(), group));
+    descriptor.layout.push(layout.clone());
+}
 
 /// fork: is `descriptor` a depth-prepass pipeline (`benilla_world::entity_cull`)? Bevy's prepass
 /// specializes a material through the same `specialize` as its colour pass, and marks its own
@@ -410,6 +440,8 @@ impl MaterialExtension for WowModelExt {
                     fragment.shader_defs.push("MODERN_VERTEX_WALKS".into());
                 }
             }
+            // fork: F — the sun's and the lamps' visibility by ray.
+            push_rt_shadows(descriptor);
         }
         // Each `discard` the batch can reach, and only those: one compiled in costs the draw its
         // hidden-surface removal on a tile GPU even where it never fires.
@@ -889,6 +921,9 @@ impl MaterialExtension for LiquidCataExt {
         if let Some(ds) = descriptor.depth_stencil.as_mut() {
             ds.bias.constant = 0;
         }
+        // fork: F — the surface's and the bed's sun visibility by ray (the modern path is a runtime
+        // branch on this lane, so every pipeline declares the group where the lane runs).
+        push_rt_shadows(descriptor);
         Ok(())
     }
 }
@@ -1025,6 +1060,8 @@ impl MaterialExtension for TerrainExtension {
                     fragment.shader_defs.push("MODERN_VERTEX_WALKS".into());
                 }
             }
+            // fork: F — the sun's and the lamps' visibility by ray.
+            push_rt_shadows(descriptor);
         }
         Ok(())
     }

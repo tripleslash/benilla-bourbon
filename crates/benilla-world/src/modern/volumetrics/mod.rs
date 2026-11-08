@@ -146,6 +146,27 @@ pub struct FroxelTier {
     pub shafts: f32,
 }
 
+/// fork: F — **the froxel rays' lane**: at the ray-traced tier (native,
+/// `rt_scene::tier_active()`), unless `$WOW_RT_FROXEL=0`, the scatter pass takes the sun's
+/// visibility per froxel as a ray query times the cascade tap, and each shadowed lamp's as a ray
+/// to it (`froxel_scatter.wgsl` under `RT_FROXEL`, span `modern_froxel_scatter_rt`). Independent of
+/// [`crate::modern::shadow::rt_shadows`]; `$WOW_RT=0` turns both off. Fixed for the session once
+/// render startup ran (false before).
+pub fn rt_froxel() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        crate::static_gx::rt_scene::tier_active()
+            && *CELL.get_or_init(|| {
+                crate::launch_env::var("WOW_RT_FROXEL").as_deref() != Some("0")
+            })
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
+}
+
 pub fn froxel_tier(quality: LightingQuality) -> FroxelTier {
     let (mode, grid, range, point_lights, cloud_shadow, shafts) = match quality {
         LightingQuality::Low => (FogMode::Analytic, UVec3::ONE, 200.0, 0, 0.0, 0.9),

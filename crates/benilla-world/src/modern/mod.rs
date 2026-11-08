@@ -22,6 +22,9 @@ pub mod gi;
 pub mod lights;
 pub mod look;
 mod meter;
+// fork: F — the ray-traced shadows' render-world plumbing, native only.
+#[cfg(not(target_arch = "wasm32"))]
+mod rt_shadow;
 pub mod shadow;
 mod sky;
 pub mod sun_arc;
@@ -376,6 +379,8 @@ impl Plugin for ModernLightingPlugin {
                 lights::plugin,
                 weather::plugin,
             ));
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_plugins(rt_shadow::plugin);
     }
 }
 

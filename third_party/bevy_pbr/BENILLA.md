@@ -54,6 +54,20 @@ shadow cascades, point faces and spot shadows (the `DirectionalLight` `benilla-a
 occlusion-culling pass, as `src/ssr/mod.rs` does for its own pass. Only a pass span opens a
 pipeline-statistics query and those cannot nest; nothing above `view_shadow_pass` holds one.
 
+## The fourth delta: one extra bind group after the material's
+
+`src/material.rs`, `DrawMaterial`. benilla's ray-traced shadows (`benilla-world`
+`modern/rt_shadow.rs`, native only) cast rays from the fragment stages of its own materials
+(`wow_model.wgsl`, `terrain.wgsl`, `liquid_cata.wgsl`), which needs the ray-traced scene's bind
+group (a TLAS and a texture binding array, neither of which `AsBindGroup` can declare) bound beside
+the material's. The materials' `MaterialExtension::specialize` appends its layout as group 4, and the
+hunk adds `SetMaterialExtraBindGroup<{ MATERIAL_BIND_GROUP_INDEX + 1 }>` to `DrawMaterial` ahead of
+`DrawMesh`: it binds the render-world resource `MaterialExtraBindGroup` (also added) at that index
+where the resource holds one, and does nothing otherwise. wgpu checks only the groups a pipeline's
+layout names, so a group bound past a shorter layout (every other material, and every pipeline in a
+session without the lane) is ignored; benilla inserts the resource only where the lane runs, on
+devices whose `max_bind_groups` reaches it. The prepass and shadow draw functions are untouched.
+
 ## Verifying against upstream
 
 ```sh
@@ -64,6 +78,8 @@ diff -r third_party/bevy_pbr /tmp/upstream/bevy_pbr-0.19.1
 That must print exactly a `diff` for `src/render/mesh_preprocess.wgsl` (the `occlusion_exempt`
 binding and the condition it joins, five lines in, one changed), one for `src/prepass/mod.rs`
 (two parameters, the view's colour cache lookup and the readiness check), one for
-`src/render/light.rs` (the `RecordDiagnostics` import and the span around the shadow phase),
+`src/render/light.rs` (the `RecordDiagnostics` import and the span around the shadow phase), one
+for `src/material.rs` (the `DrawMaterial` row, `MaterialExtraBindGroup` and
+`SetMaterialExtraBindGroup`),
 `Only in third_party/bevy_pbr:
 BENILLA.md`, and `Only in <upstream>: .cargo_vcs_info.json`, `Cargo.lock`, `Cargo.toml.orig`.

@@ -312,6 +312,10 @@ pub(crate) struct RtScene {
     bound: Option<BindKey>,
     /// Entries were waiting at the last frame's end: the settled line is due when none are.
     was_pending: bool,
+    /// fork: F — the stand-in bind group ([`Self::bind_group_or_stub`]) over an empty TLAS, built
+    /// once, and what it holds.
+    stub: Option<BindGroup>,
+    stub_parts: Option<(Tlas, Buffer)>,
 }
 
 fn create_tlas(device: &RenderDevice, max_instances: u32) -> Tlas {
@@ -366,6 +370,8 @@ impl RtScene {
             bind: None,
             bound: None,
             was_pending: false,
+            stub: None,
+            stub_parts: None,
         }
     }
 
@@ -374,6 +380,68 @@ impl RtScene {
     #[allow(dead_code)] // the ray-traced lanes' interface
     pub(crate) fn bind_group(&self) -> Option<&BindGroup> {
         self.bind.as_ref()
+    }
+
+    /// fork: F — [`Self::bind_group`], or where it does not exist (no instance yet, a classic frame,
+    /// a map change) the stand-in: an empty TLAS that every ray misses, one-row buffers and the
+    /// pool's white class in every texture slot. For the pipelines that declare the scene for the
+    /// whole session whether or not it is ready — the ray-traced shadows' receivers
+    /// (`modern::rt_shadow`) — which must bind something at every draw. `None` only before the
+    /// first [`prepare_rt_scene`].
+    pub(crate) fn bind_group_or_stub(&self) -> Option<&BindGroup> {
+        self.bind.as_ref().or(self.stub.as_ref())
+    }
+
+    /// fork: F — build the stand-in once. Its TLAS is built here, empty, and submitted at once, so
+    /// any pass that binds it later is recorded after its build (wgpu refuses an unbuilt TLAS).
+    fn ensure_stub(
+        &mut self,
+        pool: &mut GxTexturePool,
+        pipes: &GxPipelines,
+        pipeline_cache: &PipelineCache,
+        device: &RenderDevice,
+        queue: &RenderQueue,
+    ) {
+        if self.stub.is_some() {
+            return;
+        }
+        let tlas = create_tlas(device, 1);
+        // One row is all a shader's runtime-sized arrays need to bind; nothing ever reads it, as no
+        // ray hits.
+        let rows = device.create_buffer(&BufferDescriptor {
+            label: Some("rt_stub_rows"),
+            size: 64,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("rt_stub_tlas"),
+        });
+        encoder.build_acceleration_structures(
+            std::iter::empty::<&BlasBuildEntry<'_>>(),
+            std::iter::once(&tlas),
+        );
+        queue.submit([encoder.finish()]);
+        let white = pool.white(device, queue);
+        let white_view: &WgpuTextureView = &**pool.view(white);
+        let views: Vec<&WgpuTextureView> = (0..GX_CLASS_SLOTS).map(|_| white_view).collect();
+        let layout = pipeline_cache.get_bind_group_layout(&self.layout);
+        self.stub = Some(device.create_bind_group(
+            "rt_scene_stub",
+            &layout,
+            &BindGroupEntries::sequential((
+                tlas.as_binding(),
+                rows.as_entire_binding(),
+                rows.as_entire_binding(),
+                rows.as_entire_binding(),
+                rows.as_entire_binding(),
+                rows.as_entire_binding(),
+                &views[..],
+                &pipes.sampler,
+                &pipes.sampler_clamp,
+            )),
+        ));
+        self.stub_parts = Some((tlas, rows));
     }
 
     /// Entries waiting for their BLAS; the scene holds every resident region and cell at 0.
@@ -1036,6 +1104,8 @@ fn prepare_rt_scene(
     // `WOW_GX_PERF`: counted in static_gx's `prepare=`, the phase it extends.
     let _t = crate::static_gx::gx_perf_guard(3);
     let scene = scene.into_inner();
+    // fork: F — before any early return: the stand-in is what a classic frame binds too.
+    scene.ensure_stub(&mut pool, &pipes, &pipeline_cache, &device, &queue);
     let last = std::mem::take(&mut scene.frame);
     if !last.recorded.load(Ordering::Relaxed) {
         scene.requeue(last);

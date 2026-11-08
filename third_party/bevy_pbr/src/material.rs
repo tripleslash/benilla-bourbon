@@ -507,14 +507,46 @@ pub fn init_material_pipeline(mut commands: Commands, mesh_pipeline: Res<MeshPip
     });
 }
 
+// benilla fork (BENILLA.md, the fourth delta): `SetMaterialExtraBindGroup` after the material's.
 pub type DrawMaterial = (
     SetItemPipeline,
     SetMeshViewBindGroup<0>,
     SetMeshViewBindingArrayBindGroup<1>,
     SetMeshBindGroup<2>,
     SetMaterialBindGroup<MATERIAL_BIND_GROUP_INDEX>,
+    SetMaterialExtraBindGroup<{ MATERIAL_BIND_GROUP_INDEX + 1 }>,
     DrawMesh,
 );
+
+/// benilla fork (BENILLA.md, the fourth delta): one bind group every material draw binds after the
+/// material's own group, for pipelines an app's `MaterialExtension::specialize` gives a group there.
+/// Absent or `None`, nothing is bound and every draw is upstream's. A pipeline whose layout stops at
+/// the material's group ignores a group bound past it.
+#[derive(Resource, Default)]
+pub struct MaterialExtraBindGroup(pub Option<BindGroup>);
+
+/// benilla fork (BENILLA.md, the fourth delta): binds [`MaterialExtraBindGroup`] at `I` where it
+/// holds one.
+pub struct SetMaterialExtraBindGroup<const I: usize>;
+impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetMaterialExtraBindGroup<I> {
+    type Param = Option<SRes<MaterialExtraBindGroup>>;
+    type ViewQuery = ();
+    type ItemQuery = ();
+
+    #[inline]
+    fn render<'w>(
+        _item: &P,
+        _view: (),
+        _item_query: Option<()>,
+        extra: SystemParamItem<'w, '_, Self::Param>,
+        pass: &mut TrackedRenderPass<'w>,
+    ) -> RenderCommandResult {
+        if let Some(group) = extra.and_then(|e| e.into_inner().0.as_ref()) {
+            pass.set_bind_group(I, group, &[]);
+        }
+        RenderCommandResult::Success
+    }
+}
 
 /// Sets the bind group for a given [`Material`] at the configured `I` index.
 pub struct SetMaterialBindGroup<const I: usize>;

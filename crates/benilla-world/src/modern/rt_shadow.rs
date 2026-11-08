@@ -1,0 +1,71 @@
+//! fork: F — **ray-traced shadows**, the render-world plumbing (native only).
+//!
+//! Where [`super::shadow::rt_shadows`] holds, every modern receiver of the sun and of the shadowed
+//! lamps takes their visibility through the static world and the terrain as a ray query against
+//! the ray-traced scene (`static_gx::rt_scene`), through `benilla_modern::rtshadow`, and the maps
+//! keep only what the scene does not hold: the cascades draw the entity casters alone and the lamp
+//! atlas no static face (`static_gx::render::modern_shadow`). The sky map keeps its static casters
+//! (the ambient's open-sky read and the debug views use it).
+//!
+//! The receivers bind the scene for the whole session, whether it is ready or not
+//! (`RtScene::bind_group_or_stub`, an empty TLAS before the first instance and in a classic frame):
+//!
+//! - the Bevy material lanes (`wow_model.wgsl` under `WOW_MODERN`, `terrain.wgsl` under
+//!   `WOW_MODERN`, `liquid_cata.wgsl`) declare it as the group after the material's
+//!   (`benilla_assets::materials::RT_SHADOW_LAYOUT`, set here at render startup), and bevy_pbr's
+//!   `DrawMaterial` binds `MaterialExtraBindGroup` there (`third_party/bevy_pbr/BENILLA.md`, the
+//!   fourth delta), which this module fills every frame;
+//! - static_gx's colour pipelines declare it as group 3 and `static_gx_pass` binds it;
+//! - the probe trace binds it at group 1 (`modern::gi`), the froxels at group 1 under their own
+//!   lane ([`super::volumetrics::rt_froxel`]).
+//!
+//! No pass of its own: the rays run inside the receivers' fragment stages, so their cost is read
+//! as the colour passes' (`static_gx`, `main_opaque_pass_3d`) against a `WOW_RT_SHADOWS=0` run,
+//! and the static shadow caster draws `WOW_GX_PERF` counts fall to the sky map's alone.
+
+use bevy::pbr::MaterialExtraBindGroup;
+use bevy::prelude::*;
+use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
+
+use crate::static_gx::rt_scene::{self, RtScene};
+
+/// `RenderStartup`, after the tier is decided: publish the scene's layout to the material lanes
+/// and give bevy_pbr's draw command the resource it binds.
+fn init_rt_shadows(mut commands: Commands) {
+    if !super::shadow::rt_shadows() {
+        return;
+    }
+    // A second startup (a test app, a renderer rebuilt) finds it set to the same layout.
+    let _ = benilla_assets::materials::RT_SHADOW_LAYOUT.set(rt_scene::layout());
+    commands.insert_resource(MaterialExtraBindGroup::default());
+    info!(
+        "rt shadows: sun and lamp visibility by ray, cascades and lamp atlas for entities only \
+         (WOW_RT_SHADOWS=0 turns it off)"
+    );
+}
+
+/// Every frame: the scene's bind group, or its stand-in, where the material lanes' draws bind it.
+/// After `prepare_rt_scene` (`PrepareResources`), which builds both.
+fn bind_rt_shadows(scene: Option<Res<RtScene>>, extra: Option<ResMut<MaterialExtraBindGroup>>) {
+    let (Some(scene), Some(mut extra)) = (scene, extra) else {
+        return;
+    };
+    let next = scene.bind_group_or_stub();
+    if extra.0.as_ref().map(|b| b.id()) != next.map(|b| b.id()) {
+        extra.0 = next.cloned();
+    }
+}
+
+pub(super) fn plugin(app: &mut App) {
+    if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+        render_app
+            .add_systems(
+                RenderStartup,
+                init_rt_shadows.after(rt_scene::init_rt_scene),
+            )
+            .add_systems(
+                Render,
+                bind_rt_shadows.in_set(RenderSystems::PrepareBindGroups),
+            );
+    }
+}

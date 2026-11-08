@@ -84,6 +84,27 @@ pub fn local_shadow_layers(quality: LightingQuality) -> usize {
     }
 }
 
+/// fork: F — **the ray-traced shadows' lane**: at the ray-traced tier (native,
+/// `rt_scene::tier_active()`), unless `$WOW_RT_SHADOWS=0`, the sun's and the shadowed lamps'
+/// visibility through the static world and the terrain is a ray query in every receiver
+/// (`benilla_modern::rtshadow`), the cascades draw the entity casters alone (the sky map keeps its
+/// static ones) and the lamp atlas holds no static face. `$WOW_RT=0` turns the tier, and this with
+/// it, off. Fixed for the session once render startup ran (false before).
+pub fn rt_shadows() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        crate::static_gx::rt_scene::tier_active()
+            && *CELL.get_or_init(|| {
+                crate::launch_env::var("WOW_RT_SHADOWS").as_deref() != Some("0")
+            })
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
+}
+
 /// Layers the array is created with for a session at `quality`: the cascades, the sky map, and the
 /// tier's cube-atlas layers.
 pub fn shadow_layers(quality: LightingQuality) -> usize {
