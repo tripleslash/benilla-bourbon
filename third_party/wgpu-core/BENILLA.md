@@ -166,7 +166,7 @@ in` the registry copy for cargo's packaging files (`.cargo-ok`, `.cargo_vcs_info
 `https://static.crates.io/crates/wgpu-core/wgpu-core-29.0.4.crate`.
 
 On a DX12 machine: `WOW_STATIC_GX_MDI=0` against `=1` (plain multi-draw), and Bevy's indirect lane
-(`WOW_INDIRECT=1`, which now uses count draws on DX12), each pictured against Vulkan
+(`WOW_ENTITY_GPU_CULL=1`, which now uses count draws on DX12), each pictured against Vulkan
 (`WGPU_BACKEND=vulkan`) at the same spot, must match.
 
 ## When to drop it
