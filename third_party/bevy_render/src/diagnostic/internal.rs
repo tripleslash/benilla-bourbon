@@ -601,6 +601,15 @@ impl FrameData {
 
         let mut diagnostics = Vec::new();
 
+        // benilla fork (BENILLA.md, "The fourteenth delta"): each span's start, from the frame's
+        // earliest timestamp, so passes on the two queues can be laid against each other.
+        let first = self
+            .closed_spans
+            .iter()
+            .filter_map(|s| s.begin_timestamp_index.zip(s.end_timestamp_index))
+            .map(|(begin, _)| timestamps[begin as usize])
+            .min();
+
         for span in &self.closed_spans {
             if let (Some(begin), Some(end)) = (span.begin_instant, span.end_instant) {
                 diagnostics.push(RenderDiagnostic {
@@ -636,6 +645,13 @@ impl FrameData {
                     suffix: "ms",
                     value,
                 });
+                if let Some(first) = first {
+                    diagnostics.push(RenderDiagnostic {
+                        path: self.diagnostic_path(&span.path_range, "start_gpu"),
+                        suffix: "ms",
+                        value: (begin - first as f64) * (timestamp_period_ns as f64) / 1e6,
+                    });
+                }
             }
 
             if let Some(index) = span.pipeline_statistics_index {

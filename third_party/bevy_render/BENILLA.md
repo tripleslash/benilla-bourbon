@@ -247,7 +247,44 @@ entries) while this phase drew them without a count. No other bevy 0.19.1 crate 
 (`bevy_pbr`, `bevy_core_pipeline` and the rest grepped for `Dx12`). benilla's cameras draw directly
 unless `WOW_INDIRECT=1`, so the path runs only there.
 
-## The delta, and the command that proves it
+## The fourteenth delta: render-graph systems can record for the async compute queue (native)
+
+`src/renderer/async_compute.rs` (new), re-exported from `renderer`: a minimal hook onto wgpu's async
+compute queue (`third_party/wgpu/PATCH.md` and `third_party/wgpu-core/BENILLA.md`, "Async compute").
+
+```rust
+#[derive(Resource, Clone, Deref)]
+pub struct RenderAsyncComputeQueue(pub Arc<WgpuWrapper<wgpu::AsyncComputeQueue>>);
+impl RenderAsyncComputeQueue {
+    pub fn create(device: &RenderDevice, queue: &RenderQueue) -> Option<Self>;
+}
+#[derive(SystemParam)] pub struct AsyncComputeContext<'w, 's> { .. }
+impl AsyncComputeContext<'_, '_> {
+    pub fn available(&self) -> bool;
+    pub fn command_encoder(&mut self) -> Option<&mut CommandEncoder>;
+    pub fn diagnostic_recorder(&self) -> Option<Res<'_, DiagnosticsRecorder>>;
+}
+#[derive(Resource, Default)] pub struct AsyncComputeFrame { .. }   // submitted(&self) -> bool
+pub fn wait_for_async_compute(..);   // RenderGraph, after Render, before resolve_encoder and Submit
+```
+
+Nothing changes unless an app inserts `RenderAsyncComputeQueue` (benilla does in its modern
+lighting, `crates/benilla-world/src/modern/async_compute.rs`). A system that takes
+`AsyncComputeContext` records into its encoder; its `SystemBuffer` is applied in topological order
+like `RenderContextState`'s, and when it is it submits the main-queue buffers queued so far
+(`PendingCommandBuffers`), then its own on the async queue. So GPU order follows graph order:
+the async work sees everything recorded before it and runs beside what is recorded after. wgpu
+makes a main submission wait only for async work it conflicts with, so a consumer waits by being
+submitted after it; `FlushCommands` in front of the consumer is what lets the work in between
+overlap. `wait_for_async_compute` submits what is queued and makes the main queue wait for the
+frame's last async submission, so the frame's final submission (the timestamp resolve, the present)
+follows all of it: queries are not tracked across the two queues.
+
+`src/diagnostic/internal.rs`: each span with timestamps also reports `start_gpu`, its start from the
+frame's earliest timestamp in ms, beside `elapsed_gpu`, so passes on the two queues can be laid
+against each other (benilla's `PERF_OVERLAP`). `src/lib.rs` registers `AsyncComputeFrame` and the
+wait. On wasm32 no queue is ever made, so nothing of it runs.
+
 
 **A few lines changed in five upstream files, one module added.**
 

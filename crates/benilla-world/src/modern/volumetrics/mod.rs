@@ -347,9 +347,10 @@ fn volume_image(size: UVec3) -> Image {
         TextureFormat::Rgba16Float,
         RenderAssetUsages::RENDER_WORLD,
     );
-    // The integrate pass writes it as storage; every lane samples it filtered.
+    // The integrate pass writes it as storage; every lane samples it filtered. fork: perf — with
+    // the froxels on the async queue it is a copy's destination instead (`node::copy_volume`).
     image.texture_descriptor.usage =
-        TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING;
+        TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING | TextureUsages::COPY_DST;
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         label: Some("modern_fog_volume".into()),
         address_mode_u: ImageAddressMode::ClampToEdge,

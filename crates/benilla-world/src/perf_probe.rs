@@ -71,6 +71,11 @@
 //! `PERF_PASSES`, follows each `PERF_PROBE`: the GPU milliseconds per frame of every top-level
 //! render-diagnostics span over the same sample window, costliest first, with the `modern_*`
 //! passes summed as `modern=`. Wall time says a tier got cheaper; this says which pass paid for it.
+//!
+//! `PERF_OVERLAP` (fork: perf, `modern::async_compute`) then says, per async-queue pass, how many of
+//! its GPU milliseconds per frame ran under a main-queue pass span: `pass=beside/total`. On one
+//! queue (`WOW_ASYNC_COMPUTE=0`) passes never run under each other, so `beside` is 0 there; that is
+//! the control. Both queues' timestamps are read on one timeline, from the frame's earliest.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -272,15 +277,49 @@ struct PassSums {
     /// per view (the water mirror, then the world camera) reads as one figure per view.
     view_ms: std::collections::BTreeMap<String, Vec<f64>>,
     view_frags: std::collections::BTreeMap<String, Vec<f64>>,
+    /// fork: perf — per async-queue pass, GPU ms summed over the window and the part of it under a
+    /// main-queue span of the same frame (`overlap_line`).
+    beside: std::collections::BTreeMap<String, (f64, f64)>,
     frames: u32,
     seen: Option<bevy::platform::time::Instant>,
+}
+
+/// fork: perf — the passes `modern::async_compute` puts on the async queue.
+fn on_async_queue(pass: &str) -> bool {
+    pass.starts_with("modern_light_bin") || pass.starts_with("modern_froxel")
 }
 
 impl PassSums {
     fn fold(&mut self, store: &bevy::diagnostic::DiagnosticsStore) {
         let mut newest = self.seen;
         let mut times: Vec<bevy::platform::time::Instant> = Vec::new();
+        // fork: perf — each span's start and length, keyed by frame, pass and order in the frame.
+        type SpanKey = (bevy::platform::time::Instant, String, usize);
+        let mut spans: std::collections::BTreeMap<SpanKey, (Option<f64>, Option<f64>)> =
+            Default::default();
         for diagnostic in store.iter() {
+            if let Some(pass) = diagnostic
+                .path()
+                .as_str()
+                .strip_prefix("render/")
+                .and_then(|p| {
+                    p.strip_suffix("/start_gpu")
+                        .or(p.strip_suffix("/elapsed_gpu"))
+                })
+                .filter(|p| !p.contains('/'))
+            {
+                let start = diagnostic.path().as_str().ends_with("/start_gpu");
+                let (mut at, mut nth) = (None, 0);
+                for m in diagnostic
+                    .measurements()
+                    .filter(|m| self.seen.is_none_or(|s| m.time > s))
+                {
+                    nth = if at == Some(m.time) { nth + 1 } else { 0 };
+                    at = Some(m.time);
+                    let slot = spans.entry((m.time, pass.to_string(), nth)).or_default();
+                    *(if start { &mut slot.0 } else { &mut slot.1 }) = Some(m.value);
+                }
+            }
             let Some((pass, stat)) = diagnostic
                 .path()
                 .as_str()
@@ -327,6 +366,50 @@ impl PassSums {
         }
         self.frames += times.len() as u32;
         self.seen = newest;
+
+        // fork: perf — how much of each async pass ran under the main queue's spans, frame by frame.
+        let mut frame: Vec<(&str, f64, f64)> = Vec::new();
+        let mut keys = spans.iter().peekable();
+        while let Some(((time, pass, _), (start, ms))) = keys.next() {
+            if let (Some(start), Some(ms)) = (start, ms) {
+                frame.push((pass, *start, start + ms));
+            }
+            if keys.peek().is_some_and(|((t, _, _), _)| t == time) {
+                continue;
+            }
+            for &(pass, a0, a1) in frame.iter().filter(|s| on_async_queue(s.0)) {
+                let mut under: Vec<(f64, f64)> = frame
+                    .iter()
+                    .filter(|s| !on_async_queue(s.0))
+                    .map(|s| (s.1.max(a0), s.2.min(a1)))
+                    .filter(|(lo, hi)| hi > lo)
+                    .collect();
+                under.sort_by(|x, y| x.0.total_cmp(&y.0));
+                let (mut beside, mut reach) = (0.0, a0);
+                for (lo, hi) in under {
+                    beside += (hi - lo.max(reach)).max(0.0);
+                    reach = reach.max(hi);
+                }
+                let row = self.beside.entry(pass.to_string()).or_default();
+                row.0 += a1 - a0;
+                row.1 += beside;
+            }
+            frame.clear();
+        }
+    }
+
+    /// fork: perf — `pass=beside/total` GPU ms per frame for each async-queue pass (module docs).
+    fn overlap_line(&self) -> Option<String> {
+        if self.frames == 0 || self.beside.is_empty() {
+            return None;
+        }
+        let n = f64::from(self.frames);
+        let each: Vec<String> = self
+            .beside
+            .iter()
+            .map(|(k, (total, beside))| format!("{k}={:.3}/{:.3}", beside / n, total / n))
+            .collect();
+        Some(each.join(" "))
     }
 
     /// Skip whatever arrived before sampling began, so the window's sums start clean.
@@ -337,6 +420,7 @@ impl PassSums {
         self.verts.clear();
         self.view_ms.clear();
         self.view_frags.clear();
+        self.beside.clear();
         self.frames = 0;
     }
 
@@ -588,6 +672,9 @@ fn sample(
     );
     if let Some(line) = run.passes.line() {
         info!("PERF_PASSES cfg={cfg} {line}");
+    }
+    if let Some(line) = run.passes.overlap_line() {
+        info!("PERF_OVERLAP cfg={cfg} {line}");
     }
     let px = windows.single().map_or(0, |w| {
         u64::from(w.resolution.physical_width()) * u64::from(w.resolution.physical_height())

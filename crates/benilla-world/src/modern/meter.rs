@@ -14,7 +14,9 @@ use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::prelude::*;
 use bevy::render::render_resource::binding_types::{sampler, storage_buffer_sized, texture_2d};
 use bevy::render::render_resource::*;
-use bevy::render::renderer::{render_system, RenderContext, RenderDevice, ViewQuery};
+use bevy::render::renderer::{
+    render_system, AsyncComputeContext, RenderContext, RenderDevice, ViewQuery,
+};
 use bevy::render::view::ViewTarget;
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
@@ -105,12 +107,14 @@ fn init(
     });
 }
 
-/// `PostProcess`, before the FFXGlow combine exposes the frame: meter the world view's scene.
+/// `PostProcess`, before the FFXGlow combine exposes the frame: meter the world view's scene. On
+/// the async compute queue where there is one (`super::async_compute`), beside the post-process.
 fn meter_pass(
     view: ViewQuery<(&ViewTarget, &FfxGlow)>,
     meter: Option<Res<Meter>>,
     pipeline_cache: Res<PipelineCache>,
     mut render_context: RenderContext,
+    mut async_compute: AsyncComputeContext,
 ) {
     let Some(meter) = meter else {
         return;
@@ -134,7 +138,10 @@ fn meter_pass(
             meter.cells.as_entire_binding(),
         )),
     );
-    let encoder = render_context.command_encoder();
+    let encoder = match async_compute.command_encoder() {
+        Some(encoder) => encoder,
+        None => render_context.command_encoder(),
+    };
     {
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("modern_meter"),

@@ -11,7 +11,9 @@ use bevy::render::render_resource::binding_types::{
     storage_buffer_read_only_sized, storage_buffer_sized,
 };
 use bevy::render::render_resource::*;
-use bevy::render::renderer::{RenderContext, RenderQueue, ViewQuery};
+use bevy::render::renderer::{
+    AsyncComputeContext, RenderAsyncComputeQueue, RenderContext, RenderQueue, ViewQuery,
+};
 use bevy::render::storage::GpuShaderBuffer;
 use bevy::render::{Render, RenderStartup, RenderSystems};
 
@@ -187,9 +189,12 @@ fn light_bin_pass(
     pipes: Res<LightPipelines>,
     pipeline_cache: Res<PipelineCache>,
     view: ViewQuery<Has<crate::modern::volumetrics::ModernFogView>>,
+    async_queue: Option<Res<RenderAsyncComputeQueue>>,
     mut render_context: RenderContext,
 ) {
-    if !crate::modern::world_view_only(view.into_inner()) {
+    // With an async queue the binning runs in front of the shadow raster instead
+    // (`light_bin_pass_async`).
+    if async_queue.is_some() || !crate::modern::world_view_only(view.into_inner()) {
         return;
     }
     let (Some(bind), true) = (&frame.bind, frame.groups > 0) else {
@@ -215,6 +220,42 @@ fn light_bin_pass(
     span.end(&mut pass);
 }
 
+/// fork: perf — [`light_bin_pass`] on the async compute queue (`modern::async_compute`). It reads
+/// only what `prepare_lights` uploaded, so it is recorded in front of the shadow raster and runs
+/// beside it; the cells are written before anything that reads them is submitted (the froxels,
+/// the main pass), and wgpu has those wait for it.
+fn light_bin_pass_async(
+    frame: Res<LightFrame>,
+    pipes: Res<LightPipelines>,
+    pipeline_cache: Res<PipelineCache>,
+    view: ViewQuery<Has<crate::modern::volumetrics::ModernFogView>>,
+    mut async_compute: AsyncComputeContext,
+) {
+    if !async_compute.available() || !crate::modern::world_view_only(view.into_inner()) {
+        return;
+    }
+    let (Some(bind), true) = (&frame.bind, frame.groups > 0) else {
+        return;
+    };
+    let Some(pipeline) = pipeline_cache.get_compute_pipeline(pipes.bin) else {
+        return;
+    };
+    let diagnostics = async_compute.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
+    let Some(encoder) = async_compute.command_encoder() else {
+        return;
+    };
+    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+        label: Some("modern_light_bin"),
+        timestamp_writes: None,
+    });
+    let span = diagnostics.pass_span(&mut pass, "modern_light_bin");
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, bind, &[]);
+    pass.dispatch_workgroups(frame.groups, 1, 1);
+    span.end(&mut pass);
+}
+
 pub(super) fn build(render_app: &mut SubApp) {
     render_app
         .init_resource::<LightFrame>()
@@ -228,9 +269,18 @@ pub(super) fn build(render_app: &mut SubApp) {
         // froxels take their point lights from this frame's cells.
         .add_systems(
             Core3d,
-            light_bin_pass
-                .after(crate::static_gx::gx_shadow_pass)
-                .before(crate::modern::volumetrics::froxel_pass)
-                .before(Core3dSystems::MainPass),
+            (
+                light_bin_pass
+                    .after(crate::static_gx::gx_shadow_pass)
+                    .before(crate::modern::volumetrics::froxel_pass)
+                    .before(Core3dSystems::MainPass),
+                // fork: perf — in front of every shadow pass, so it runs beside them.
+                light_bin_pass_async
+                    .before(crate::static_gx::gx_shadow_pass)
+                    .before(bevy::pbr::per_view_shadow_pass::<{ bevy::pbr::EARLY_SHADOW_PASS }>)
+                    .before(bevy::pbr::per_view_shadow_pass::<{ bevy::pbr::LATE_SHADOW_PASS }>)
+                    .before(crate::modern::volumetrics::froxel_pass)
+                    .before(Core3dSystems::MainPass),
+            ),
         );
 }

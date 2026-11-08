@@ -125,6 +125,9 @@ impl Global {
   waits for both. `device.poll(Wait)` waits for both fences, and a queue is empty only when both
   are.
 
+**Why a wait happened.** `RUST_LOG=wgpu_core::device::async_queue=debug` logs each conflict wait
+with the first resource that caused it and the two uses.
+
 **Limits.** Async command buffers come only from `async_queue_create_command_encoder`
 (`CommandBufferMutable::async_compute`), go only to the async queue (`QueueSubmitError::WrongQueue`),
 and may not record a render pass or a texture clear (`CommandEncoderError::AsyncComputeOnly`: a

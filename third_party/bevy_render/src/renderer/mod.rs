@@ -1,3 +1,5 @@
+// benilla fork (BENILLA.md, "The fourteenth delta"): async compute.
+mod async_compute;
 #[cfg(feature = "raw_vulkan_init")]
 pub mod raw_vulkan_init;
 mod render_context;
@@ -6,6 +8,10 @@ mod wgpu_wrapper;
 
 pub use render_context::{
     CurrentView, FlushCommands, PendingCommandBuffers, RenderContext, RenderContextState, ViewQuery,
+};
+pub use async_compute::{
+    wait_for_async_compute, AsyncComputeContext, AsyncComputeFrame, AsyncComputeState,
+    RenderAsyncComputeQueue,
 };
 pub use render_device::*;
 pub use wgpu_wrapper::WgpuWrapper;

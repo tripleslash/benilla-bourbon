@@ -15,7 +15,10 @@ use bevy::render::render_resource::binding_types::{
     texture_depth_2d_multisampled, texture_storage_3d, uniform_buffer,
 };
 use bevy::render::render_resource::*;
-use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
+use bevy::render::renderer::{
+    AsyncComputeContext, FlushCommands, RenderAsyncComputeQueue, RenderContext, RenderDevice,
+    RenderQueue, ViewQuery,
+};
 use bevy::render::storage::GpuShaderBuffer;
 use bevy::render::texture::GpuImage;
 use bevy::render::view::{
@@ -68,6 +71,11 @@ struct FroxelTargets {
     ready: bool,
     /// fork: a one-texel depth map the ground-fog banks read when the GI heightfield is absent.
     ground_stub: Option<(Texture, TextureView)>,
+    /// fork: perf — with the froxels on the async queue, the volume the integrate pass writes,
+    /// copied into `MODERN_FOG_VOLUME` in front of the fog composite ([`flush_before_fog_composite`]).
+    /// Every world material binds that volume, so writing it from the async queue would make the
+    /// opaque raster wait for the froxels.
+    integrated: Option<(Texture, TextureView)>,
 }
 
 fn init_pipelines(
@@ -228,6 +236,7 @@ fn prepare_froxels(
     scene: Option<Res<crate::modern::gi::ModernGiScene>>,
     mut targets: ResMut<FroxelTargets>,
     held: Option<Res<crate::fsr::FsrHeld>>,
+    async_queue: Option<Res<RenderAsyncComputeQueue>>,
 ) {
     // fork: fsr (FORK.md) — a held frame runs no froxel pass, so it must not flip `front`:
     // the next world frame would read the never-written slot as its history.
@@ -295,7 +304,28 @@ fn prepare_froxels(
                         volume_texture(&device, "modern_froxel_scatter_a", grid),
                         volume_texture(&device, "modern_froxel_scatter_b", grid),
                     ];
+                    targets.integrated = None;
                     targets.grid = grid;
+                }
+                if async_queue.is_none() {
+                    targets.integrated = None;
+                } else if targets.integrated.is_none() {
+                    let texture = device.create_texture(&TextureDescriptor {
+                        label: Some("modern_froxel_integrated"),
+                        size: Extent3d {
+                            width: grid.x,
+                            height: grid.y,
+                            depth_or_array_layers: grid.z,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: TextureDimension::D3,
+                        format: TextureFormat::Rgba16Float,
+                        usage: TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC,
+                        view_formats: &[],
+                    });
+                    let view = texture.create_view(&TextureViewDescriptor::default());
+                    targets.integrated = Some((texture, view));
                 }
                 if targets.noise.is_none() {
                     let texture = device.create_texture(&TextureDescriptor {
@@ -364,13 +394,17 @@ fn prepare_froxels(
                         ground_view,
                     )),
                 );
+                let integrate_target = targets
+                    .integrated
+                    .as_ref()
+                    .map_or(&integrated.texture_view, |(_, view)| view);
                 let integrate_bind = device.create_bind_group(
                     "modern_froxel_integrate",
                     &pipeline_cache.get_bind_group_layout(&pipes.integrate_layout),
                     &BindGroupEntries::sequential((
                         block.buffer.as_entire_binding(),
                         write,
-                        &integrated.texture_view,
+                        integrate_target,
                     )),
                 );
                 targets.scatter_bind = Some(scatter_bind);
@@ -483,10 +517,14 @@ fn specialize_composites(
     }
 }
 
+/// The scatter and integrate passes. On the async compute queue where there is one
+/// (`modern::async_compute`): after the shadow raster, whose cascades they read, beside the opaque
+/// raster, and in front of the fog composite, which waits for them.
 pub(crate) fn froxel_pass(
     world: &World,
     view: ViewQuery<&ModernFogView>,
     mut render_context: RenderContext,
+    mut async_compute: AsyncComputeContext,
 ) {
     let _fog_view = view.into_inner();
     {
@@ -508,9 +546,16 @@ pub(crate) fn froxel_pass(
         };
         let grid = targets.grid;
         // The journal's `gpu_modern` column, where the device times passes.
-        let diagnostics = render_context.diagnostic_recorder();
+        let diagnostics = if async_compute.available() {
+            async_compute.diagnostic_recorder()
+        } else {
+            render_context.diagnostic_recorder()
+        };
         let diagnostics = diagnostics.as_deref();
-        let encoder = render_context.command_encoder();
+        let encoder = match async_compute.command_encoder() {
+            Some(encoder) => encoder,
+            None => render_context.command_encoder(),
+        };
         {
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("modern_froxel_scatter"),
@@ -534,6 +579,44 @@ pub(crate) fn froxel_pass(
             span.end(&mut pass);
         }
     }
+}
+
+/// fork: perf — with the froxels on the async queue, submit what the main pass has recorded so far
+/// in front of the fog composite, then copy this frame's volume into `MODERN_FOG_VOLUME`: wgpu makes
+/// only the submission with the copy wait for the froxels, so the opaque raster before it runs
+/// beside them, and the composite and everything after it read this frame's volume as on one queue.
+/// A material drawn in the opaque raster that samples the volume (only `wow_effect.wgsl` does, for
+/// blended effects, which draw after the composite) would read the previous frame's.
+fn flush_before_fog_composite(
+    view: ViewQuery<&ModernFogView>,
+    targets: Res<FroxelTargets>,
+    async_queue: Option<Res<RenderAsyncComputeQueue>>,
+    images: Res<RenderAssets<GpuImage>>,
+    mut flush: FlushCommands,
+    mut render_context: RenderContext,
+) {
+    let _fog_view = view.into_inner();
+    let (true, true, Some((source, _))) = (
+        async_queue.is_some(),
+        targets.ready,
+        targets.integrated.as_ref(),
+    ) else {
+        return;
+    };
+    let Some(volume) = images.get(MODERN_FOG_VOLUME.id()) else {
+        return;
+    };
+    flush.flush();
+    let grid = targets.grid;
+    render_context.command_encoder().copy_texture_to_texture(
+        source.as_image_copy(),
+        volume.texture.as_image_copy(),
+        Extent3d {
+            width: grid.x,
+            height: grid.y,
+            depth_or_array_layers: grid.z,
+        },
+    );
 }
 
 /// The fullscreen fog passes' view query: both draw over the view target with the same bindings.
@@ -687,6 +770,12 @@ pub(super) fn build(render_app: &mut SubApp) {
                 // After everything opaque (the retained cells and the SSILVB multiply included),
                 // before the transparent pass — and before the water's scene copy, so a riverbed
                 // seen through the water is fogged like the one beside it.
+                flush_before_fog_composite
+                    .in_set(Core3dSystems::MainPass)
+                    .after(main_opaque_pass_3d)
+                    .after(crate::static_gx::static_gx_pass)
+                    .after(crate::ssilvb::ssilvb_pass)
+                    .before(fog_composite_pass),
                 fog_composite_pass
                     .in_set(Core3dSystems::MainPass)
                     .after(main_opaque_pass_3d)

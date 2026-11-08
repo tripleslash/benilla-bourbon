@@ -431,6 +431,17 @@ impl Plugin for RenderPlugin {
             render_app.init_resource::<AppFunctionRegistry>();
 
             render_app.add_schedule(RenderGraph::base_schedule());
+            // benilla fork (BENILLA.md, "The fourteenth delta"): the frame's last main submission
+            // waits for the frame's async compute work.
+            render_app
+                .init_resource::<renderer::AsyncComputeFrame>()
+                .add_systems(
+                    RenderGraph,
+                    renderer::wait_for_async_compute
+                        .after(renderer::RenderGraphSystems::Render)
+                        .before(diagnostic::resolve_encoder)
+                        .before(renderer::RenderGraphSystems::Submit),
+                );
 
             render_app.init_schedule(RenderStartup);
             render_app

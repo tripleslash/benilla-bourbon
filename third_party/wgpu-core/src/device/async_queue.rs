@@ -131,8 +131,18 @@ impl AsyncComputeQueue {
         executions: &[&EncoderInFlight],
     ) -> Option<SubmissionIndex> {
         let after = self.main_waited.load(Ordering::Acquire);
-        self.lock_life()
-            .newest_matching(after, |a| executions.iter().any(|m| conflicts(a, m)))
+        let mut reason = None;
+        let index = self.lock_life().newest_matching(after, |a| {
+            executions.iter().any(|m| {
+                reason = conflict(a, m);
+                reason.is_some()
+            })
+        });
+        if let (Some(index), Some(reason)) = (index, reason) {
+            // `RUST_LOG=wgpu_core::device::async_queue=debug` names what stops an overlap.
+            log::debug!("async compute: main queue waits for submission {index}: {reason}");
+        }
+        index
     }
 
     /// Make the main queue wait, on the GPU, until this queue has finished `index`.
@@ -466,8 +476,10 @@ impl AsyncComputeQueue {
     }
 }
 
-/// Whether async execution `a` and main execution `m` must not overlap.
-fn conflicts(a: &EncoderInFlight, m: &EncoderInFlight) -> bool {
+/// Why async execution `a` and main execution `m` must not overlap, if they must not: the first
+/// resource they share other than for one unchanged read.
+fn conflict(a: &EncoderInFlight, m: &EncoderInFlight) -> Option<alloc::string::String> {
+    use alloc::format;
     for buffer in m.trackers.buffers.used_resources() {
         if a.trackers.buffers.contains(buffer) {
             match (
@@ -475,7 +487,12 @@ fn conflicts(a: &EncoderInFlight, m: &EncoderInFlight) -> bool {
                 m.trackers.buffers.read_only_state(buffer),
             ) {
                 (Some(x), Some(y)) if x == y => {}
-                _ => return true,
+                (x, y) => {
+                    return Some(format!(
+                        "{} (async {x:?}, main {y:?})",
+                        buffer.error_ident()
+                    ))
+                }
             }
         }
     }
@@ -486,16 +503,26 @@ fn conflicts(a: &EncoderInFlight, m: &EncoderInFlight) -> bool {
                 m.trackers.textures.read_only_state(texture),
             ) {
                 (Some(x), Some(y)) if x == y => {}
-                _ => return true,
+                (x, y) => {
+                    return Some(format!(
+                        "{} (async {x:?}, main {y:?})",
+                        texture.error_ident()
+                    ))
+                }
             }
         }
     }
-    m.pending_buffers
+    if let Some(b) = m
+        .pending_buffers
         .values()
-        .any(|b| a.trackers.buffers.contains(b))
-        || m.pending_textures
-            .values()
-            .any(|t| a.trackers.textures.contains(t))
+        .find(|b| a.trackers.buffers.contains(b))
+    {
+        return Some(format!("{} (a pending write)", b.error_ident()));
+    }
+    m.pending_textures
+        .values()
+        .find(|t| a.trackers.textures.contains(t))
+        .map(|t| format!("{} (a pending write)", t.error_ident()))
 }
 
 /// Schedule `temp` (a destroyed resource) for release once neither queue's submissions use it:
