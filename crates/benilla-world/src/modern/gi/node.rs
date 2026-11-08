@@ -1,10 +1,20 @@
 //! The render-world half of the probe GI: the block's GI parameters, the trace and blend compute
 //! passes, and their place in the graph (after the modern shadow pass, whose cascades the trace
 //! samples, and before the froxels, which read the probes).
+//!
+//! fork: perf — with the async compute queue (`modern::async_compute`; native, not
+//! `$WOW_ASYNC_GI=0`) the classify, trace and blend passes record on it instead
+//! ([`gi_trace_pass_async`]), and the field they keep is a buffer of their own
+//! ([`GiFrame::field`]), copied into the block's probe region at the next frame's start
+//! ([`copy_gi_field`]): every reader of the probes then reads the field one frame late, and nothing on
+//! the main queue waits for the trace. The block's probe region is the whole field state either way
+//! (the trace's "previous field" reads it, classify and blend the field), so the probes evolve
+//! exactly as on the main queue, one frame later where they are read.
 
 use bevy::app::SubApp;
 use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::prelude::*;
+use bevy::render::diagnostic::DiagnosticsRecorder;
 use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_resource::binding_types::{
@@ -12,6 +22,8 @@ use bevy::render::render_resource::binding_types::{
     texture_depth_2d, uniform_buffer_sized,
 };
 use bevy::render::render_resource::*;
+#[cfg(not(target_arch = "wasm32"))]
+use bevy::render::renderer::{AsyncComputeContext, RenderAsyncComputeQueue};
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::storage::GpuShaderBuffer;
 use bevy::render::texture::GpuImage;
@@ -32,6 +44,16 @@ pub const PROBE_OFFSET: u64 =
     crate::modern::lights::node::LIGHT_OFFSET + crate::modern::lights::BLOCK_LIGHT_BYTES as u64;
 /// Where the block's `GiParams` sit.
 const PARAMS_OFFSET: u64 = (CASCADES_BYTES + BLOCK_TAIL_BYTES) as u64;
+
+/// fork: perf — [`GiPipelines::async_trace`] for the session, any world; false before render
+/// startup and always on wasm32.
+static ASYNC_TRACE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// fork: perf — whether the probe trace records on the async compute queue this session: the perf
+/// probe's `PERF_OVERLAP` then counts its spans as async ones.
+pub(crate) fn async_trace() -> bool {
+    cfg!(not(target_arch = "wasm32")) && ASYNC_TRACE.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 #[derive(Resource)]
 struct GiPipelines {
@@ -54,6 +76,11 @@ struct GiPipelines {
     /// live, and it is bound the scene while the shadows are (`$WOW_RT_GI=0`; the cascades then hold
     /// no static world) and the stand-in otherwise, on which `rtshadow` reads the cascades alone.
     voxel_rt: bool,
+    /// fork: perf — the classify, trace and blend passes record on the async compute queue
+    /// ([`gi_trace_pass_async`]): the queue exists (`modern::async_compute`) and `$WOW_ASYNC_GI` is
+    /// not "0". Decided at render startup, for the session.
+    #[cfg(not(target_arch = "wasm32"))]
+    async_trace: bool,
 }
 
 /// The trace's dispatch is rows of this many workgroups (`gi_classify.wgsl`'s `GROUP_ROW`): one
@@ -95,12 +122,31 @@ struct GiFrame {
     cut_frames: u32,
     /// Workgroups of the classify pass: one thread per probe of the tier.
     groups: u32,
+    /// fork: perf — the probe field of the async-queue trace ([`GiPipelines::async_trace`]), the
+    /// tier's probes at [`PROBE_BYTES`] each: classify reads it and the blend writes it, in place
+    /// of the block's probe region, and [`copy_gi_field`] copies it into that region at the next
+    /// frame's start, before the probes' readers. `None` on the main-queue trace.
+    #[cfg(not(target_arch = "wasm32"))]
+    field: Option<Buffer>,
+    /// fork: perf — a trace was recorded into [`Self::field`] since [`copy_gi_field`] last copied
+    /// it into the block.
+    #[cfg(not(target_arch = "wasm32"))]
+    field_ahead: bool,
+    /// fork: perf — [`Self::field`] is new (the first traced frame, or a tier change resized it):
+    /// [`copy_gi_field`] fills it from the block's probe region before its first trace.
+    #[cfg(not(target_arch = "wasm32"))]
+    field_seed: bool,
+    /// fork: perf — a field a resize replaced while it was ahead of the block: copied into the block
+    /// before the new field is filled from it.
+    #[cfg(not(target_arch = "wasm32"))]
+    field_retired: Option<Buffer>,
 }
 
 fn init_pipelines(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
+    #[cfg(not(target_arch = "wasm32"))] async_queue: Option<Res<RenderAsyncComputeQueue>>,
 ) {
     let trace_layout = BindGroupLayoutDescriptor::new(
         "modern_gi_trace",
@@ -251,6 +297,21 @@ fn init_pipelines(
              (WOW_RT_GI=0 turns it off)"
         );
     }
+    // fork: perf — the trace on the async compute queue wherever there is one (`async_compute::init`
+    // runs first), unless `$WOW_ASYNC_GI=0` keeps it on the main queue.
+    #[cfg(not(target_arch = "wasm32"))]
+    let async_trace =
+        async_queue.is_some() && crate::launch_env::var("WOW_ASYNC_GI").as_deref() != Some("0");
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        ASYNC_TRACE.store(async_trace, std::sync::atomic::Ordering::Relaxed);
+        if async_trace {
+            info!(
+                "modern GI: the probe trace runs on the async compute queue, its field read a \
+                 frame late (WOW_ASYNC_GI=0 keeps it on the main queue)"
+            );
+        }
+    }
     commands.insert_resource(GiPipelines {
         classify_layout,
         trace_layout,
@@ -262,6 +323,8 @@ fn init_pipelines(
         blend,
         rt_trace,
         voxel_rt,
+        #[cfg(not(target_arch = "wasm32"))]
+        async_trace,
     });
 }
 
@@ -476,12 +539,37 @@ fn prepare_gi(
             size: Some(std::num::NonZero::new(probe_bytes).expect("probe region is never empty")),
         })
     };
+    // fork: perf — on the async queue, classify and the blend keep the trace's own field: a write
+    // into the block there made every main submission that binds the block (every world material,
+    // the froxels) wait for the trace, since wgpu orders the two queues per buffer.
+    #[cfg(not(target_arch = "wasm32"))]
+    let field = pipes.async_trace.then(|| {
+        if frame.field.as_ref().is_none_or(|f| f.size() != probe_bytes) {
+            let old = frame.field.replace(device.create_buffer(&BufferDescriptor {
+                label: Some("modern_gi_field"),
+                size: probe_bytes,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+            if std::mem::take(&mut frame.field_ahead) {
+                frame.field_retired = old;
+            }
+            frame.field_seed = true;
+        }
+        frame.field.clone().expect("made above")
+    });
+    #[cfg(target_arch = "wasm32")]
+    let field: Option<Buffer> = None;
+    let probes_binding = || match &field {
+        Some(field) => field.as_entire_binding(),
+        None => probe_region(),
+    };
 
     frame.classify_bind = Some(device.create_bind_group(
         "modern_gi_classify",
         &pipeline_cache.get_bind_group_layout(&pipes.classify_layout),
         &BindGroupEntries::sequential((
-            probe_region(),
+            probes_binding(),
             uniform.as_entire_binding(),
             work.as_entire_binding(),
             dispatch.as_entire_binding(),
@@ -513,7 +601,8 @@ fn prepare_gi(
             scratch.as_entire_binding(),
             // The probe region of the block alone: the rest of it is read-only storage in the same
             // frame's render passes, and a writable binding is exclusive per buffer, not per range.
-            probe_region(),
+            // fork: perf — the trace's own field on the async queue.
+            probes_binding(),
             work.as_entire_binding(),
         )),
     ));
@@ -557,6 +646,145 @@ fn vox_stub(device: &RenderDevice) -> TextureView {
         .create_view(&TextureViewDescriptor::default())
 }
 
+/// What a frame's trace records, from [`prepare_gi`]'s bind groups: `None` when there is nothing
+/// to trace or a pipeline is not ready yet, so nothing is recorded.
+struct TracePlan<'a> {
+    classify_bind: &'a BindGroup,
+    trace_bind: &'a BindGroup,
+    blend_bind: &'a BindGroup,
+    dispatch: &'a Buffer,
+    groups: u32,
+    classify: &'a ComputePipeline,
+    setup: &'a ComputePipeline,
+    trace: &'a ComputePipeline,
+    sum: &'a ComputePipeline,
+    blend: &'a ComputePipeline,
+    /// fork: at the ray-traced tier the ray stage is the ray query, with the scene at group 1.
+    rt_stage: Option<(&'a BindGroup, &'a ComputePipeline)>,
+    /// fork: F — the voxel path's scene for its hits' sun term (`GiPipelines::voxel_rt`).
+    shadow_bind: Option<&'a BindGroup>,
+}
+
+impl<'a> TracePlan<'a> {
+    fn new(
+        frame: &'a GiFrame,
+        pipes: &GiPipelines,
+        pipeline_cache: &'a PipelineCache,
+    ) -> Option<Self> {
+        let (Some(classify_bind), Some(trace_bind), Some(blend_bind), Some(dispatch)) = (
+            &frame.classify_bind,
+            &frame.trace_bind,
+            &frame.blend_bind,
+            &frame.dispatch,
+        ) else {
+            return None;
+        };
+        if frame.groups == 0 {
+            return None;
+        }
+        let (Some(classify), Some(setup), Some(trace), Some(sum), Some(blend)) = (
+            pipeline_cache.get_compute_pipeline(pipes.classify),
+            pipeline_cache.get_compute_pipeline(pipes.setup),
+            pipeline_cache.get_compute_pipeline(pipes.trace),
+            pipeline_cache.get_compute_pipeline(pipes.sum),
+            pipeline_cache.get_compute_pipeline(pipes.blend),
+        ) else {
+            return None;
+        };
+        // fork: F — a voxel trace that declares the scene cannot run without it.
+        if pipes.voxel_rt && frame.shadow_bind.is_none() && frame.rt_bind.is_none() {
+            return None;
+        }
+        // fork: at the ray-traced tier the ray stage is the ray query, with the scene at group 1.
+        let rt_stage = match &frame.rt_bind {
+            Some(bind) => Some((
+                bind,
+                pipes
+                    .rt_trace
+                    .and_then(|id| pipeline_cache.get_compute_pipeline(id))?,
+            )),
+            None => None,
+        };
+        Some(Self {
+            classify_bind,
+            trace_bind,
+            blend_bind,
+            dispatch,
+            groups: frame.groups,
+            classify,
+            setup,
+            trace,
+            sum,
+            blend,
+            rt_stage,
+            shadow_bind: frame.shadow_bind.as_ref(),
+        })
+    }
+
+    /// The classify, trace and blend passes into `encoder`, either queue's, each timed under its
+    /// span (the journal's `gpu_modern` column, where the device times passes).
+    fn record(self, encoder: &mut CommandEncoder, diagnostics: Option<&DiagnosticsRecorder>) {
+        // Classify sweeps every probe and packs the ones due a trace; the trace and the blend then
+        // launch one thread per packed probe (`gi_classify.wgsl` says why that is the whole win).
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("modern_gi_classify"),
+                timestamp_writes: None,
+            });
+            let span = diagnostics.pass_span(&mut pass, "modern_gi_classify");
+            pass.set_pipeline(self.classify);
+            pass.set_bind_group(0, self.classify_bind, &[]);
+            pass.dispatch_workgroups(self.groups, 1, 1);
+            span.end(&mut pass);
+        }
+        {
+            // fork: a span of its own at the ray-traced tier, so the two paths compare by name.
+            let label = if self.rt_stage.is_some() {
+                "modern_gi_trace_rt"
+            } else {
+                "modern_gi_trace"
+            };
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some(label),
+                timestamp_writes: None,
+            });
+            let span = diagnostics.pass_span(&mut pass, label);
+            pass.set_bind_group(0, self.trace_bind, &[]);
+            // Setup, rays, sums — one dispatch each over the same rows (`gi_trace.wgsl`).
+            pass.set_pipeline(self.setup);
+            pass.dispatch_workgroups_indirect(self.dispatch, 0);
+            match self.rt_stage {
+                Some((rt_bind, rt_trace)) => {
+                    pass.set_pipeline(rt_trace);
+                    pass.set_bind_group(1, rt_bind, &[]);
+                }
+                None => {
+                    pass.set_pipeline(self.trace);
+                    // fork: F — the voxel path's hits trace their sun (`GiPipelines::voxel_rt`).
+                    if let Some(bind) = self.shadow_bind {
+                        pass.set_bind_group(1, bind, &[]);
+                    }
+                }
+            }
+            pass.dispatch_workgroups_indirect(self.dispatch, 0);
+            pass.set_pipeline(self.sum);
+            pass.dispatch_workgroups_indirect(self.dispatch, 0);
+            span.end(&mut pass);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("modern_gi_blend"),
+                timestamp_writes: None,
+            });
+            let span = diagnostics.pass_span(&mut pass, "modern_gi_blend");
+            pass.set_pipeline(self.blend);
+            pass.set_bind_group(0, self.blend_bind, &[]);
+            pass.dispatch_workgroups_indirect(self.dispatch, 0);
+            span.end(&mut pass);
+        }
+    }
+}
+
 /// The probe trace, on the world camera's view alone: the field is world-space, and the water
 /// mirror and the booths, which read none of it, each ran it again ([`world_view_only`]).
 ///
@@ -569,105 +797,100 @@ pub(crate) fn gi_trace_pass(
     if !crate::modern::world_view_only(view.into_inner()) {
         return;
     }
-    let frame = world.resource::<GiFrame>();
-    let (Some(classify_bind), Some(trace_bind), Some(blend_bind), Some(dispatch)) = (
-        &frame.classify_bind,
-        &frame.trace_bind,
-        &frame.blend_bind,
-        &frame.dispatch,
-    ) else {
+    let Some(pipes) = world.get_resource::<GiPipelines>() else {
         return;
     };
-    if frame.groups == 0 {
+    // fork: perf — the async queue's pass records it instead (`gi_trace_pass_async`).
+    #[cfg(not(target_arch = "wasm32"))]
+    if pipes.async_trace {
         return;
     }
-    let pipes = world.resource::<GiPipelines>();
     let pipeline_cache = world.resource::<PipelineCache>();
-    let (Some(classify), Some(setup), Some(trace), Some(sum), Some(blend)) = (
-        pipeline_cache.get_compute_pipeline(pipes.classify),
-        pipeline_cache.get_compute_pipeline(pipes.setup),
-        pipeline_cache.get_compute_pipeline(pipes.trace),
-        pipeline_cache.get_compute_pipeline(pipes.sum),
-        pipeline_cache.get_compute_pipeline(pipes.blend),
-    ) else {
+    let Some(plan) = TracePlan::new(world.resource::<GiFrame>(), pipes, pipeline_cache) else {
         return;
     };
-    // fork: F — a voxel trace that declares the scene cannot run without it.
-    if pipes.voxel_rt && frame.shadow_bind.is_none() && frame.rt_bind.is_none() {
-        return;
-    }
-    // fork: at the ray-traced tier the ray stage is the ray query, with the scene at group 1.
-    let rt_stage = match &frame.rt_bind {
-        Some(bind) => match pipes
-            .rt_trace
-            .and_then(|id| pipeline_cache.get_compute_pipeline(id))
-        {
-            Some(pipeline) => Some((bind, pipeline)),
-            None => return,
-        },
-        None => None,
-    };
-    // The journal's `gpu_modern` column, where the device times passes.
     let diagnostics = render_context.diagnostic_recorder();
-    let diagnostics = diagnostics.as_deref();
+    plan.record(render_context.command_encoder(), diagnostics.as_deref());
+}
+
+/// fork: perf — [`gi_trace_pass`] on the async compute queue ([`GiPipelines::async_trace`]), in
+/// `MainPass` after `static_gx_pass` and before bevy's opaque pass, so it runs beside the rest of
+/// the frame's raster and post-processing: every input is ready by then (this frame's cascades and
+/// lamp atlas from `gx_shadow_pass`, the voxels and heightfield from `gi_voxel_pass`, the TLAS from
+/// `rt_scene_pass`, the light grid from `copy_light_grid`), the async submission waits for every
+/// main submission before it, and nothing after it on the main queue writes what it reads or reads
+/// what it writes (it writes only [`GiFrame::field`] and its own scratch). After `static_gx_pass`
+/// rather than in front of it: the ray-traced scene's group binds static_gx's index arena as
+/// storage, which static_gx's draws use as an index buffer, a different state, so a trace submitted
+/// in front of them made them wait for it. The frame's last submission waits for it
+/// (`bevy_render`'s `wait_for_async_compute`).
+#[cfg(not(target_arch = "wasm32"))]
+fn gi_trace_pass_async(
+    mut frame: ResMut<GiFrame>,
+    pipes: Res<GiPipelines>,
+    pipeline_cache: Res<PipelineCache>,
+    view: ViewQuery<Has<crate::modern::volumetrics::ModernFogView>>,
+    mut async_compute: AsyncComputeContext,
+) {
+    if !pipes.async_trace
+        || !async_compute.available()
+        || !crate::modern::world_view_only(view.into_inner())
+    {
+        return;
+    }
+    let Some(plan) = TracePlan::new(&frame, &pipes, &pipeline_cache) else {
+        return;
+    };
+    let diagnostics = async_compute.diagnostic_recorder();
+    let Some(encoder) = async_compute.command_encoder() else {
+        return;
+    };
+    plan.record(encoder, diagnostics.as_deref());
+    frame.field_ahead = true;
+}
+
+/// fork: perf — with the trace on the async queue, its field into the block's probe region on the
+/// main queue, at the start of the world view's frame (before the froxels and the main pass, the
+/// probes' readers, and before this frame's trace): the field as the last frame's trace left it.
+/// The last frame's final submission already waited for that trace, so this copy waits for nothing.
+/// A new field is filled from the block first ([`GiFrame::field_seed`]), after a replaced one that
+/// was ahead is copied in ([`GiFrame::field_retired`]). It runs only with the queue (`build`'s run
+/// condition).
+#[cfg(not(target_arch = "wasm32"))]
+fn copy_gi_field(
+    mut frame: ResMut<GiFrame>,
+    pipes: Res<GiPipelines>,
+    buffers: Res<RenderAssets<GpuShaderBuffer>>,
+    view: ViewQuery<Has<crate::modern::volumetrics::ModernFogView>>,
+    mut render_context: RenderContext,
+) {
+    if !pipes.async_trace || !crate::modern::world_view_only(view.into_inner()) {
+        return;
+    }
+    let Some(block) = buffers.get(MODERN_SHADOW_CASCADES.id()) else {
+        return;
+    };
+    let retired = frame.field_retired.take();
+    let ahead = std::mem::take(&mut frame.field_ahead);
+    let seed = std::mem::take(&mut frame.field_seed);
+    if retired.is_none() && !ahead && !seed {
+        return;
+    }
+    // The probe region is the block's tail; a field that would overrun it is never copied.
+    let fits = |b: &Buffer| PROBE_OFFSET + b.size() <= block.buffer.size();
+    let field = frame.field.clone().filter(|b| fits(b));
     let encoder = render_context.command_encoder();
-    // Classify sweeps every probe and packs the ones due a trace; the trace and the blend then
-    // launch one thread per packed probe (`gi_classify.wgsl` says why that is the whole win).
-    {
-        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("modern_gi_classify"),
-            timestamp_writes: None,
-        });
-        let span = diagnostics.pass_span(&mut pass, "modern_gi_classify");
-        pass.set_pipeline(classify);
-        pass.set_bind_group(0, classify_bind, &[]);
-        pass.dispatch_workgroups(frame.groups, 1, 1);
-        span.end(&mut pass);
+    if let Some(old) = retired.filter(|b| fits(b)) {
+        encoder.copy_buffer_to_buffer(&old, 0, &block.buffer, PROBE_OFFSET, old.size());
     }
-    {
-        // fork: a span of its own at the ray-traced tier, so the two paths compare by name.
-        let label = if rt_stage.is_some() {
-            "modern_gi_trace_rt"
-        } else {
-            "modern_gi_trace"
-        };
-        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some(label),
-            timestamp_writes: None,
-        });
-        let span = diagnostics.pass_span(&mut pass, label);
-        pass.set_bind_group(0, trace_bind, &[]);
-        // Setup, rays, sums — one dispatch each over the same rows (`gi_trace.wgsl`).
-        pass.set_pipeline(setup);
-        pass.dispatch_workgroups_indirect(dispatch, 0);
-        match rt_stage {
-            Some((rt_bind, rt_trace)) => {
-                pass.set_pipeline(rt_trace);
-                pass.set_bind_group(1, rt_bind, &[]);
-            }
-            None => {
-                pass.set_pipeline(trace);
-                // fork: F — the voxel path's hits trace their sun (`GiPipelines::voxel_rt`).
-                if let Some(bind) = &frame.shadow_bind {
-                    pass.set_bind_group(1, bind, &[]);
-                }
-            }
+    match field {
+        Some(field) if seed => {
+            encoder.copy_buffer_to_buffer(&block.buffer, PROBE_OFFSET, &field, 0, field.size());
         }
-        pass.dispatch_workgroups_indirect(dispatch, 0);
-        pass.set_pipeline(sum);
-        pass.dispatch_workgroups_indirect(dispatch, 0);
-        span.end(&mut pass);
-    }
-    {
-        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("modern_gi_blend"),
-            timestamp_writes: None,
-        });
-        let span = diagnostics.pass_span(&mut pass, "modern_gi_blend");
-        pass.set_pipeline(blend);
-        pass.set_bind_group(0, blend_bind, &[]);
-        pass.dispatch_workgroups_indirect(dispatch, 0);
-        span.end(&mut pass);
+        Some(field) if ahead => {
+            encoder.copy_buffer_to_buffer(&field, 0, &block.buffer, PROBE_OFFSET, field.size());
+        }
+        _ => {}
     }
 }
 
@@ -688,10 +911,35 @@ pub(super) fn build(render_app: &mut SubApp) {
     );
     #[cfg(target_arch = "wasm32")]
     let init = init_pipelines;
+    // fork: perf — whether the trace goes to the async queue is decided once that queue is made.
+    #[cfg(not(target_arch = "wasm32"))]
+    let init = init.after(crate::modern::async_compute::init);
     render_app
         .init_resource::<GiFrame>()
         .add_systems(RenderStartup, init)
         // After the voxel pass, which owns the scene the trace marches through.
         .add_systems(Render, prepare_gi.in_set(RenderSystems::PrepareBindGroups))
         .add_systems(Core3d, trace);
+    // fork: perf — the trace on the async queue, and its field copied in at the next frame's start
+    // (see `gi_trace_pass_async` for the place). Both skipped without the queue: neither they nor
+    // their buffers run.
+    #[cfg(not(target_arch = "wasm32"))]
+    render_app.add_systems(
+        Core3d,
+        (
+            copy_gi_field
+                .run_if(resource_exists::<RenderAsyncComputeQueue>)
+                .before(crate::modern::volumetrics::froxel_pass)
+                .before(Core3dSystems::MainPass),
+            gi_trace_pass_async
+                .run_if(resource_exists::<RenderAsyncComputeQueue>)
+                .in_set(Core3dSystems::MainPass)
+                .after(copy_gi_field)
+                .after(crate::static_gx::gx_shadow_pass)
+                .after(crate::static_gx::gi_voxel_pass)
+                .after(crate::static_gx::rt_scene::rt_scene_pass)
+                .after(crate::static_gx::static_gx_pass)
+                .before(bevy::core_pipeline::core_3d::main_opaque_pass_3d),
+        ),
+    );
 }
