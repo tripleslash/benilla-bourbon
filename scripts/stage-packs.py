@@ -38,17 +38,20 @@ def out(text):
     print(text, flush=True)
 
 
-def clear_parts(stem):
-    """Remove a previous split of `stem` from the site."""
-    for name in os.listdir(SITE):
+def clear_parts(stem, dest=None):
+    """Remove a previous split of `stem` from the site (or `dest`)."""
+    dest = dest or SITE
+    for name in os.listdir(dest):
         if name.startswith(stem + ".part"):
-            os.remove(os.path.join(SITE, name))
+            os.remove(os.path.join(dest, name))
 
 
-def split_parts(src, stem, suffix, extra=""):
-    """Split `src` into 24 MiB `<stem>.partNN<suffix>` files plus `<stem>.parts.json` in the site,
-    `{"bytes":N,<extra>,"parts":[...]}`. The twin of scripts/split-parts.sh; `src` is only read."""
-    clear_parts(stem)
+def split_parts(src, stem, suffix, extra="", dest=None):
+    """Split `src` into 24 MiB `<stem>.partNN<suffix>` files plus `<stem>.parts.json` in the site
+    (or `dest`), `{"bytes":N,<extra>,"parts":[...]}`. The twin of scripts/split-parts.sh; `src` is
+    only read."""
+    dest = dest or SITE
+    clear_parts(stem, dest)
     size = os.path.getsize(src)
     parts = []
     with open(src, "rb") as f:
@@ -57,7 +60,7 @@ def split_parts(src, stem, suffix, extra=""):
             if not buf:
                 break
             name = "%s.part%02d%s" % (stem, len(parts), suffix)
-            with open(os.path.join(SITE, name), "wb") as part:
+            with open(os.path.join(dest, name), "wb") as part:
                 part.write(buf)
             parts.append(name)
     manifest = '{"bytes":%d,%s"parts":[%s]}\n' % (
@@ -65,9 +68,31 @@ def split_parts(src, stem, suffix, extra=""):
         extra + "," if extra else "",
         ",".join('"%s"' % p for p in parts),
     )
-    with open(os.path.join(SITE, stem + ".parts.json"), "wb") as f:
+    with open(os.path.join(dest, stem + ".parts.json"), "wb") as f:
         f.write(manifest.encode("utf-8"))
-    out("split %s (%d B) into %d parts in %s" % (os.path.basename(src), size, len(parts), SITE))
+    out("split %s (%d B) into %d parts in %s" % (os.path.basename(src), size, len(parts), dest))
+
+
+def stage_dlss():
+    """fork: dlss (FORK.md) — NVIDIA's DLSS runtime as `dlss/<dll>.partNN` plus
+    `dlss/<dll>.parts.json` with its SHA-1, which the standalone exe fetches. The twin of the step in
+    scripts/stage-desktop.sh."""
+    import glob
+    import hashlib
+    import shutil
+
+    dest = os.path.join(SITE, "dlss")
+    shutil.rmtree(dest, ignore_errors=True)
+    os.makedirs(dest)
+    rel = "third_party/nvidia-dlss/lib/Windows_x86_64/rel/"
+    dlls = [rel + "nvngx_dlss.dll", rel + "nvngx_dlssg.dll"]
+    dlls += sorted(glob.glob("third_party/nvidia-dlss/streamline/bin/x64/sl.*.dll"))
+    for dll in dlls:
+        if not os.path.isfile(dll):
+            continue
+        with open(dll, "rb") as f:
+            sha1 = hashlib.sha1(f.read()).hexdigest()
+        split_parts(dll, os.path.basename(dll), "", '"sha1":"%s"' % sha1, dest)
 
 
 def stage_desktop():
@@ -281,6 +306,8 @@ def main():
 
     # fork: desktop — the desktop client split the same way (scripts/stage-desktop.sh, the bash twin).
     stage_desktop()
+    # fork: dlss (FORK.md)
+    stage_dlss()
 
     # Nothing at the top of the site may exceed the cap; the packs are capped by the packer.
     with os.scandir(SITE) as it:

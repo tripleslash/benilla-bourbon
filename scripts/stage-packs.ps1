@@ -188,16 +188,16 @@ function Read-Full($stream, [byte[]]$buf) {
 }
 
 # Remove a previous split of $stem from the site.
-function Clear-Parts([string]$stem) {
-    Get-ChildItem -LiteralPath $siteAbs -File -Force |
+function Clear-Parts([string]$stem, [string]$destAbs = $siteAbs) {
+    Get-ChildItem -LiteralPath $destAbs -File -Force |
         Where-Object { $_.Name.StartsWith($stem + '.part', [StringComparison]::Ordinal) } |
         ForEach-Object { [IO.File]::Delete($_.FullName) }
 }
 
 # Split $srcAbs into 24 MiB `<stem>.partNN<suffix>` files plus `<stem>.parts.json` in the site,
 # {"bytes":N,<extra>,"parts":[...]}. The twin of scripts/split-parts.sh; $srcAbs is only read.
-function Split-Parts([string]$srcAbs, [string]$stem, [string]$suffix, [string]$extra = '') {
-    Clear-Parts $stem
+function Split-Parts([string]$srcAbs, [string]$stem, [string]$suffix, [string]$extra = '', [string]$destAbs = $siteAbs) {
+    Clear-Parts $stem $destAbs
     $bytes = (New-Object IO.FileInfo $srcAbs).Length
     $buf = New-Object byte[] $PART_MAX
     $parts = New-Object Collections.Generic.List[string]
@@ -207,7 +207,7 @@ function Split-Parts([string]$srcAbs, [string]$stem, [string]$suffix, [string]$e
             $n = Read-Full $in $buf
             if ($n -le 0) { break }
             $name = '{0}.part{1:d2}{2}' -f $stem, $parts.Count, $suffix
-            $out = [IO.File]::Create([IO.Path]::Combine($siteAbs, $name))
+            $out = [IO.File]::Create([IO.Path]::Combine($destAbs, $name))
             try { $out.Write($buf, 0, $n) } finally { $out.Dispose() }
             $parts.Add($name)
         }
@@ -218,8 +218,8 @@ function Split-Parts([string]$srcAbs, [string]$stem, [string]$suffix, [string]$e
     $head = '{"bytes":' + $bytes + ','
     if ($extra) { $head += $extra + ',' }
     $json = $head + '"parts":[' + ($quoted -join ',') + ']}' + "`n"
-    [IO.File]::WriteAllText([IO.Path]::Combine($siteAbs, $stem + '.parts.json'), $json, (New-Object Text.UTF8Encoding $false))
-    Write-Host "split $([IO.Path]::GetFileName($srcAbs)) ($bytes B) into $($parts.Count) parts in $SITE"
+    [IO.File]::WriteAllText([IO.Path]::Combine($destAbs, $stem + '.parts.json'), $json, (New-Object Text.UTF8Encoding $false))
+    Write-Host "split $([IO.Path]::GetFileName($srcAbs)) ($bytes B) into $($parts.Count) parts in $destAbs"
 }
 
 # Split the wasm module into 24 MiB *.wasm parts plus wow.parts.json.
@@ -228,6 +228,26 @@ if ([IO.File]::Exists($wasmAbs)) {
     Split-Parts $wasmAbs 'wow' '.wasm'  # wow_bg.wasm ships as wow.partNN.wasm
     # The link, not the build: web/dist keeps its inode.
     [IO.File]::Delete($wasmAbs)
+}
+
+# fork: dlss (FORK.md) - NVIDIA's DLSS runtime as `dlss/<dll>.partNN` plus
+# `dlss/<dll>.parts.json` with its SHA-1, which the standalone exe fetches. The twin of the step in
+# scripts/stage-desktop.sh.
+$dlssAbs = [IO.Path]::Combine($siteAbs, 'dlss')
+if ([IO.Directory]::Exists($dlssAbs)) { [IO.Directory]::Delete($dlssAbs, $true) }
+[void][IO.Directory]::CreateDirectory($dlssAbs)
+$dlls = @(
+    (Resolve-Repo 'third_party/nvidia-dlss/lib/Windows_x86_64/rel/nvngx_dlss.dll'),
+    (Resolve-Repo 'third_party/nvidia-dlss/lib/Windows_x86_64/rel/nvngx_dlssg.dll')
+)
+$slDir = Resolve-Repo 'third_party/nvidia-dlss/streamline/bin/x64'
+if ([IO.Directory]::Exists($slDir)) {
+    $dlls += @(Get-ChildItem -LiteralPath $slDir -Filter 'sl.*.dll' -File | Sort-Object Name | ForEach-Object { $_.FullName })
+}
+foreach ($dll in $dlls) {
+    if (-not [IO.File]::Exists($dll)) { continue }
+    $dllSha1 = (Get-FileHash -LiteralPath $dll -Algorithm SHA1).Hash.ToLowerInvariant()
+    Split-Parts $dll ([IO.Path]::GetFileName($dll)) '' ('"sha1":"' + $dllSha1 + '"') $dlssAbs
 }
 
 # fork: desktop - wow-reforged.exe as `wow-reforged.exe.partNN` plus its manifest, carrying the
