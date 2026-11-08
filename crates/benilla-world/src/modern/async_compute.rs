@@ -64,7 +64,8 @@ impl SystemBuffer for FlushMainQueueState {
 }
 
 /// `RenderStartup`: the device's async compute queue, unless the lever is off or there is none.
-fn init(mut commands: Commands, device: Res<RenderDevice>, queue: Res<RenderQueue>) {
+/// [`super::caps::init`] runs after it and records the queue as `HwCaps::async_compute`.
+pub(crate) fn init(mut commands: Commands, device: Res<RenderDevice>, queue: Res<RenderQueue>) {
     if cfg!(target_arch = "wasm32") {
         return;
     }

@@ -26,7 +26,7 @@
 
 use bevy::prelude::*;
 use bevy::render::render_resource::WgpuFeatures;
-use bevy::render::renderer::{RenderAdapterInfo, RenderDevice};
+use bevy::render::renderer::{RenderAdapterInfo, RenderAsyncComputeQueue, RenderDevice};
 use bevy::render::settings::WgpuLimits;
 use bevy::render::{RenderApp, RenderStartup};
 
@@ -52,8 +52,9 @@ pub struct HwCaps {
     pub ray_query: bool,
     /// Conservative rasterization.
     pub conservative_raster: bool,
-    /// A compute queue of its own. False until the async compute lane reads it from here
-    /// (`async_compute.rs` still probes the device itself).
+    /// A compute queue of its own: `async_compute::init` made one (not on wasm32, not under
+    /// `WOW_ASYNC_COMPUTE=0` or `WOW_GPU_STATS`, and only where the backend has a second queue).
+    /// No feature bit says so, so [`Self::from_parts`] leaves it false and [`init`] reads the queue.
     pub async_compute: bool,
     /// The largest storage-buffer binding the device takes, and no larger than its largest
     /// buffer, in bytes. 0 on wasm32.
@@ -110,9 +111,8 @@ impl HwCaps {
             } else {
                 0
             },
-            multiview_selective: features.contains(
-                WgpuFeatures::MULTIVIEW | WgpuFeatures::SELECTIVE_MULTIVIEW,
-            ),
+            multiview_selective: features
+                .contains(WgpuFeatures::MULTIVIEW | WgpuFeatures::SELECTIVE_MULTIVIEW),
         }
     }
 }
@@ -180,9 +180,12 @@ pub(crate) fn init(
     mut commands: Commands,
     device: Res<RenderDevice>,
     adapter: Res<RenderAdapterInfo>,
+    async_queue: Option<Res<RenderAsyncComputeQueue>>,
 ) {
     let mut caps = HwCaps::from_parts(device.features(), &device.limits());
     caps.mesh_shader &= emits_mesh_stages(adapter.0.backend);
+    // The queue `async_compute::init` made, which runs first (`plugin`).
+    caps.async_compute = async_queue.is_some();
     info!(
         "caps: binding_arrays={} mdi_count={} immediates={} ray_query={} conservative_raster={} \
          async_compute={} mesh_shader={} multiview_views={} multiview_selective={} \
@@ -204,7 +207,7 @@ pub(crate) fn init(
 
 pub(super) fn plugin(app: &mut App) {
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
-        render_app.add_systems(RenderStartup, init);
+        render_app.add_systems(RenderStartup, init.after(super::async_compute::init));
     }
 }
 
