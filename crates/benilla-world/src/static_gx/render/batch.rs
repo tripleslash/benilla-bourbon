@@ -76,6 +76,11 @@ const MIN_ARGS: u32 = 4096;
 /// The count buffer's floor, in buckets.
 const MIN_COUNTS: u32 = 256;
 
+/// The native tier's floors ([`crate::modern::caps::alloc_floor`]): every static_gx pass of a
+/// frame takes its draws from the one buffer, and a frame that outgrows it draws directly.
+const NATIVE_MIN_ARGS: u32 = 1 << 16;
+const NATIVE_MIN_COUNTS: u32 = 1 << 12;
+
 /// Bytes of one candidate's cull meta (`[u32; 4]`).
 const META_SIZE: u64 = 16;
 
@@ -227,6 +232,12 @@ impl GxFrameBuffer {
             return;
         }
         let capacity = asked.next_power_of_two().max(self.min);
+        if self.buffer.is_some() && crate::static_gx::gx_perf_enabled() {
+            info!(
+                "GX_GROW {}: {} -> {capacity} (asked {asked}; that frame drew directly)",
+                self.label, self.capacity
+            );
+        }
         self.buffer = Some(device.create_buffer(&BufferDescriptor {
             label: Some(self.label),
             size: u64::from(capacity) * self.unit,
@@ -327,15 +338,24 @@ impl GxIndirect {
 
 /// `RenderStartup`, after [`crate::modern::caps::init`]: multi-draw where the device draws one in
 /// hardware ([`HwCaps::mdi_count`], never on wasm32) and the lever leaves it on; the GPU cull's
-/// buffers where its lane runs too.
+/// buffers where its lane runs too. The floors are the native tier's (`caps::alloc_floor`).
 pub(super) fn init_indirect(mut commands: Commands, caps: Option<Res<HwCaps>>) {
     let caps = caps.as_deref();
     let native = caps.is_some_and(|c| c.mdi_count)
         && crate::launch_env::var("WOW_STATIC_GX_MDI").as_deref() != Some("0");
+    let floor = |web, tier, unit| crate::modern::caps::alloc_floor(caps, web, tier, unit);
     commands.insert_resource(GxIndirect {
         native,
-        args: GxFrameBuffer::new("static_gx_indirect", ARGS_SIZE, MIN_ARGS),
-        counts: GxFrameBuffer::new("static_gx_indirect_counts", COUNT_SIZE, MIN_COUNTS),
+        args: GxFrameBuffer::new(
+            "static_gx_indirect",
+            ARGS_SIZE,
+            floor(MIN_ARGS, NATIVE_MIN_ARGS, ARGS_SIZE),
+        ),
+        counts: GxFrameBuffer::new(
+            "static_gx_indirect_counts",
+            COUNT_SIZE,
+            floor(MIN_COUNTS, NATIVE_MIN_COUNTS, COUNT_SIZE),
+        ),
         cull: (native && gpu_cull_lane(caps)).then(GxCullTwins::default),
     });
 }

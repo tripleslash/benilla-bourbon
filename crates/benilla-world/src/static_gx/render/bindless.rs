@@ -36,10 +36,10 @@
 //! | `row + 3 + items + 2k` | selection key `k`'s mesh-local bound centre.x (f32 bits) | centre.y | centre.z | 0 |
 //! | `row + 4 + items + 2k` | key `k`'s half-extent.x (f32 bits) | half.y | half.z | 0 |
 //!
-//! The key rows exist only where the GPU cull runs (`gpu_cull`, [`GxBindless::new`]'s
-//! `key_bounds`): one pair per selection key `0..keys` ([`GxSlots::keys`], the region's largest
-//! WMO group or prop referrer-set index plus one), a key with no bound of its own taking the
-//! region's. A cell has none.
+//! The key rows exist only where the GPU cull runs (`gpu_cull`, [`GxBindless::new`]): one pair
+//! per selection key `0..keys` ([`GxSlots::keys`], the region's largest WMO group or prop
+//! referrer-set index plus one), a key with no bound of its own taking the region's. A cell has
+//! none.
 //!
 //! A record is the per-region layout's record with the pool class in x's high half:
 //! x = layer (bits 0..16) | class (bits 16..32), y = the MOBA batch-order nudge, z = SIDN
@@ -90,6 +90,12 @@ const MIN_ROWS: u32 = 1 << 14;
 
 /// The arena's floor, in indices (4 MiB).
 const MIN_INDICES: u32 = 1 << 20;
+
+/// The native tier's floors ([`crate::modern::caps::alloc_floor`]): table rows (1 MiB) and arena
+/// indices (16 MiB). Each growth submits a copy in the middle of prepare and rebuilds the bind
+/// group.
+const NATIVE_MIN_ROWS: u32 = 1 << 16;
+const NATIVE_MIN_INDICES: u32 = 1 << 22;
 
 /// Whether this session draws static_gx bindless: the device can, and `WOW_GX_BINDLESS=0` did not
 /// turn it off. Never on wasm32 (every [`HwCaps`] field is false there).
@@ -225,6 +231,12 @@ impl GrowBuffer {
             return;
         }
         let capacity = end.next_power_of_two().max(self.min);
+        if self.buffer.is_some() && crate::static_gx::gx_perf_enabled() {
+            info!(
+                "GX_GROW {}: {} -> {capacity} units of {} B (a submit and a copy)",
+                self.label, self.capacity, self.unit
+            );
+        }
         let buffer = device.create_buffer(&BufferDescriptor {
             label: Some(self.label),
             size: u64::from(capacity) * self.unit,
@@ -286,27 +298,34 @@ pub(super) struct GxBindless {
 }
 
 impl GxBindless {
-    /// `ray_query`: the arena is also a BLAS input (`BLAS_INPUT`), for the ray-traced lanes.
-    /// `key_bounds`: each region holds its selection keys' bounds, for the GPU cull.
-    pub(super) fn new(ray_query: bool, key_bounds: bool) -> Self {
+    /// Where [`HwCaps::ray_query`] holds, the arena is also a BLAS input (`BLAS_INPUT`), for the
+    /// ray-traced lanes; where the GPU cull runs (`batch::gpu_cull_lane`), each region holds its
+    /// selection keys' bounds. The floors are the native tier's (`caps::alloc_floor`).
+    pub(super) fn new(caps: Option<&HwCaps>) -> Self {
         let mut index_usage = BufferUsages::INDEX | BufferUsages::STORAGE;
-        if ray_query {
+        if caps.is_some_and(|c| c.ray_query) {
             index_usage |= BufferUsages::BLAS_INPUT;
         }
+        let floor = |web, tier, unit| crate::modern::caps::alloc_floor(caps, web, tier, unit);
         Self {
             table: GrowBuffer::new(
                 "static_gx_region_table",
                 BufferUsages::STORAGE,
                 ROW,
-                MIN_ROWS,
+                floor(MIN_ROWS, NATIVE_MIN_ROWS, ROW),
             ),
             rows: RangeAlloc::default(),
-            indices: GrowBuffer::new("static_gx_index_arena", index_usage, 4, MIN_INDICES),
+            indices: GrowBuffer::new(
+                "static_gx_index_arena",
+                index_usage,
+                4,
+                floor(MIN_INDICES, NATIVE_MIN_INDICES, 4),
+            ),
             index_alloc: RangeAlloc::default(),
             bind: None,
             bound: None,
             warned_overflow: false,
-            key_bounds,
+            key_bounds: super::batch::gpu_cull_lane(caps),
         }
     }
 

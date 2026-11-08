@@ -10,6 +10,9 @@
 //!
 //! A field is a capability, not a decision: a lane combines it with its own lever (static_gx's
 //! bindless layout needs `binding_arrays && mdi_count` and honours `WOW_GX_BINDLESS=0`).
+//!
+//! [`alloc_floor`] is the native allocation tier: the floor a native lane's self-growing buffer
+//! opens at, sized against [`HwCaps::buffer_bytes`] instead of the floor the lane began with.
 
 use bevy::prelude::*;
 use bevy::render::render_resource::WgpuFeatures;
@@ -42,6 +45,9 @@ pub struct HwCaps {
     /// A compute queue of its own. False until the async compute lane reads it from here
     /// (`async_compute.rs` still probes the device itself).
     pub async_compute: bool,
+    /// The largest storage-buffer binding the device takes, and no larger than its largest
+    /// buffer, in bytes. 0 on wasm32.
+    pub buffer_bytes: u64,
 }
 
 impl HwCaps {
@@ -64,8 +70,31 @@ impl HwCaps {
             ray_query: features.contains(WgpuFeatures::EXPERIMENTAL_RAY_QUERY),
             conservative_raster: features.contains(WgpuFeatures::CONSERVATIVE_RASTERIZATION),
             async_compute: false,
+            buffer_bytes: limits
+                .max_storage_buffer_binding_size
+                .min(limits.max_buffer_size),
         }
     }
+}
+
+/// The floor, in units of `unit` bytes, a native lane's self-growing buffer opens at: `native`
+/// where the device reported its limits ([`HwCaps::buffer_bytes`], never on wasm32) and
+/// `WOW_ALLOC_TIER=0` did not turn the tier off, else `web`, the lane's own floor. A buffer still
+/// grows past its floor; a larger one spares the first streaming burst the frames each growth
+/// costs (a frame of direct draws, or a submit and a copy in the middle of prepare).
+pub fn alloc_floor(caps: Option<&HwCaps>, web: u32, native: u32, unit: u64) -> u32 {
+    let on = crate::launch_env::var("WOW_ALLOC_TIER").as_deref() != Some("0");
+    floor_within(caps.map_or(0, |c| c.buffer_bytes), on, web, native, unit)
+}
+
+/// `native` held to an eighth of a `bytes` binding, never under `web`; `web` where `bytes` is 0
+/// or the tier is off.
+fn floor_within(bytes: u64, on: bool, web: u32, native: u32, unit: u64) -> u32 {
+    if bytes == 0 || !on {
+        return web;
+    }
+    let most = u32::try_from(bytes / 8 / unit.max(1)).unwrap_or(u32::MAX);
+    native.min(most).max(web)
 }
 
 /// `RenderStartup`: read the caps and log them. Lanes that build on them order after this.
@@ -104,9 +133,17 @@ mod tests {
     #[test]
     fn a_capability_needs_every_feature_it_names() {
         let mut limits = WgpuLimits::default();
+        let buffer_bytes = if cfg!(target_arch = "wasm32") {
+            0
+        } else {
+            limits.max_storage_buffer_binding_size
+        };
         assert_eq!(
             HwCaps::from_parts(WgpuFeatures::empty(), &limits),
-            HwCaps::default()
+            HwCaps {
+                buffer_bytes,
+                ..HwCaps::default()
+            }
         );
         let arrays = WgpuFeatures::TEXTURE_BINDING_ARRAY
             | WgpuFeatures::BUFFER_BINDING_ARRAY
@@ -122,5 +159,16 @@ mod tests {
         );
         let count_only = WgpuFeatures::MULTI_DRAW_INDIRECT_COUNT;
         assert!(!HwCaps::from_parts(count_only, &limits).mdi_count);
+    }
+
+    /// The native floor holds under an eighth of the binding, never under the web floor, and the
+    /// web floor stands where the limits are unknown or the tier is off.
+    #[test]
+    fn a_native_floor_fits_the_binding() {
+        assert_eq!(floor_within(0, true, 8, 64, 4), 8);
+        assert_eq!(floor_within(1 << 30, false, 8, 64, 4), 8);
+        assert_eq!(floor_within(1 << 30, true, 8, 64, 4), 64);
+        assert_eq!(floor_within(8 * 4 * 16, true, 8, 64, 4), 16);
+        assert_eq!(floor_within(8 * 4 * 4, true, 8, 64, 4), 8);
     }
 }

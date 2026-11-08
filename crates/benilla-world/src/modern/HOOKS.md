@@ -204,7 +204,7 @@ Fork systems go in `PreUpdate`, `Update` or `Last`.
 | `benilla-world/src/static_gx/mod.rs` | `pub(crate) use render::rt_scene;` (native only) | rt scene |
 | `benilla-world/src/shaders.rs` | `modern_libraries`: native only, `load_shader_library!` for `shaders/modern/rt_scene.wgsl` and `embedded_asset!` for `shaders/modern/rt_repack.wgsl` | rt scene |
 | `benilla-world/src/static_gx/render.rs` | `static_gx_pass`: the `ViewQuery` takes `&ExtractedView`; before `batch.finish()` `gpu_cull::GxCullPass::new` (only with the prepass pipelines) and `batch.set_culled`, after it `bind`; the prepass job records `cull.early` before its pass and, after it, `cull.pyramid`, `cull.late` and a `static_gx_prepass_late` pass drawing `batch.emit_late` (depth loaded). `pub(crate) mod gpu_cull;` at EOF and `gpu_cull::build(app)` at the end of `build`. All `cfg(not(target_arch = "wasm32"))` | gpu cull |
-| `benilla-world/src/static_gx/render.rs` | `init_pipelines`: `GxBindless::new(ray_query, batch::gpu_cull_lane(caps))`; `assemble_region` passes `&draw.groups` to `place` (the key bound rows) | gpu cull |
+| `benilla-world/src/static_gx/render.rs` | `init_pipelines`: `GxBindless::new(caps)` (it reads `ray_query`, `batch::gpu_cull_lane` and the native allocation floors itself); `assemble_region` passes `&draw.groups` to `place` (the key bound rows) | gpu cull |
 | `benilla-world/src/static_gx/mod.rs` | `pub(crate) use render::gpu_cull;` (native only) | gpu cull |
 | `benilla-world/src/shaders.rs` | `modern_libraries`: native only, `embedded_asset!` for `shaders/modern/gx_hiz.wgsl` and `shaders/modern/gx_cull.wgsl` | gpu cull |
 
