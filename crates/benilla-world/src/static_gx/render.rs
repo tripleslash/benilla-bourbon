@@ -259,7 +259,8 @@ struct GxPipelines {
     bindless: bool,
     /// fork: F — the colour pipelines declare the ray-traced scene as group 3 and trace the sun's
     /// and the lamps' visibility (`modern::rt_shadow`, [`rt_shadow_layout`]); `static_gx_pass`
-    /// binds it. The prepass twins never do.
+    /// binds it. The prepass twins never do. Always false on wasm32, where nothing reads it.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     rt: bool,
 }
 
