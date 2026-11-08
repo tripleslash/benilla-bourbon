@@ -1059,8 +1059,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // ── fork-owned block: dlss (FORK.md) ──
     // fork: dlss (FORK.md)
     // `upscaler` — what fills the temporal upscaler's slot below 1:1 or under frame generation:
-    // `dlss` (NVIDIA DLSS 4.5 Super Resolution, and DLSS Frame Generation through Streamline where
-    // it runs; FSR wherever NGX or Streamline reports no support), `fsr` (FSR 3.1.5) or `off` (the
+    // `dlss` (NVIDIA DLSS 4.5 Super Resolution and Frame Generation through NGX; FSR's wherever NGX
+    // reports no support), `fsr` (FSR 3.1.5) or `off` (the
     // bilinear stretch, no frame generation). The knob is `benilla_world::dlss::UpscalerChoice`,
     // its default `Upscaler::default()` (welded below). Applies to the next frame.
     ours(

@@ -75,19 +75,23 @@ pub(super) fn init_sdk(app: &mut App) {
         )),
         Some(_) => DlssSdk::new(project_id(), device).map_err(|e| e.to_string()),
     };
-    let fg = app
-        .world()
-        .get_resource::<DlssSupport>()
-        .is_some_and(|s| s.frame_generation);
     match outcome {
         Ok(sdk) => {
-            let (backend, rr) = {
+            let (backend, rr, fg) = {
                 let locked = sdk.lock().unwrap();
-                (locked.backend(), locked.ray_reconstruction_available())
+                (
+                    locked.backend(),
+                    locked.ray_reconstruction_available(),
+                    locked.frame_generation_available(),
+                )
             };
             info!(
-                "dlss: DLSS 4.5 super resolution on {backend:?}{}",
-                if fg { ", frame generation through Streamline" } else { "" }
+                "dlss: DLSS 4.5 super resolution on {backend:?}, frame generation {}",
+                if fg {
+                    "too"
+                } else {
+                    "not supported here (FSR's stands in)"
+                }
             );
             let support = DlssSupport {
                 super_resolution: true,
@@ -174,7 +178,9 @@ pub(crate) fn prepare_dlss(
                         view_formats: &[],
                     });
                     let exposure_view = exposure.create_view(&TextureViewDescriptor::default());
-                    info!("dlss: {mode:?} at {render} → {display}, HDR {hdr}");
+                    // `display` would name `tracing::field::display` inside the macro.
+                    let out = display;
+                    info!("dlss: {mode:?} at {render} → {out}, HDR {hdr}");
                     state.dlss = Some(super::DlssViewState::new(ViewDlss {
                         context,
                         render,

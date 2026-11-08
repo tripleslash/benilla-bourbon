@@ -17,11 +17,11 @@ in their own `BENILLA.md`.
 |---|---|
 | `benilla-world/src/lib.rs` | `pub mod dlss;` |
 | `benilla-world/src/world_plugins.rs` | `.add(crate::dlss::DlssPlugin)` after `FsrPlugin` |
-| `benilla-world/Cargo.toml` | `dlss_wgpu`, `bevy_render`'s `raw_vulkan_init`, `uuid` (native); `libloading`, `windows-core`, `ash` (Windows) |
-| `benilla-world/src/fsr/mod.rs` | `UpscalerKind`; `FsrView::upscaler`, `with_upscaler`; `FsrShaders::motion_only`, `motion_only_source`; `HudlessCompose` in `FsrView`'s sync targets |
+| `benilla-world/Cargo.toml` | `dlss_wgpu`, `bevy_render`'s `raw_vulkan_init`, `uuid` (native) |
+| `benilla-world/src/fsr/mod.rs` | `UpscalerKind`; `FsrView::upscaler`, `with_upscaler`; `FsrShaders::motion_only`, `motion_only_source`; `DlssFgView` in `FsrView`'s sync targets |
 | `benilla-world/src/fsr/upscaler.rs` | `Targets`/`UpscaleTargets` split by `UpscalerKind`; `FsrState::dlss`, `jitter`, `is_modern`, `kind`, `motion_vectors`; the `motion_only` pipeline; `prepare_fsr` is `pub(crate)`; `fsr_opaque_copy` skips a DLSS view; `fsr_upscale_pass`'s DLSS branch |
-| `benilla-world/src/ffx_glow.rs` | the compose pair also for a view carrying `dlss::HudlessCompose` (DLSS-G's HUD-less world) |
-| `benilla-app/src/world_backdrop.rs` | `Slot`, `resolve_upscaler`, `frame_generation_wanted`; `upscaler = off` in `track_render_size`/`retarget_world_camera`; `sync_fsr_view` sets `FsrView::upscaler`, `FgBlocked` under DLSS-G and `DlssFrameGeneration`; the `upscaler` arm of `on_cvar` |
+| `benilla-world/src/fsr/framegen.rs` | `Generator` (FSR's chain or DLSS-G's output); `FgState::dlss_output`, `current_final`, `composed`, `frame_index_since_reset`, `mark_generated`; `prepare_framegen` reads `DlssFrameGeneration`; `fsr_framegen_pass` composes only under DLSS-G; both `pub(crate)` |
+| `benilla-app/src/world_backdrop.rs` | `Slot`, `resolve_upscaler`, `frame_generation_wanted`; `upscaler = off` in `track_render_size`/`retarget_world_camera`; `sync_fsr_view` sets `FsrView::upscaler`, FSR's cadence for either generator and `DlssFrameGeneration`; the `upscaler` arm of `on_cvar` |
 | `benilla-app/src/cvars/table.rs` | the `upscaler` row in its fork-owned block |
 | `benilla-app/src/cvars/mod.rs` | `GRAPHICS_CVARS`; the default weld and the observer arm in the tests |
 | `benilla-app/src/cvars/callbacks.rs` | `ForkKnobs::upscaler`, passed to `world_backdrop::on_cvar` |

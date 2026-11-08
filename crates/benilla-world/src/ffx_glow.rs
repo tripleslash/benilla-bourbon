@@ -662,23 +662,18 @@ fn prepare_textures(
             Option<&FfxGlowTextures>,
             Option<&crate::fsr::FsrView>,
             Option<&crate::fsr::FgState>,
-            // fork: dlss (FORK.md) — DLSS-G's HUD-less world uses the same compose.
-            Option<&crate::dlss::HudlessCompose>,
         ),
         With<FfxGlow>,
     >,
 ) {
-    for (entity, camera, target, existing, fsr, fg, hudless) in &views {
+    for (entity, camera, target, existing, fsr, fg) in &views {
         let Some(vp) = camera.physical_viewport_size else {
             continue;
         };
         // fork: fsr (FORK.md) — the blur downsamples the upscaled image, so its targets are a
         // quarter of the display size.
         let vp = fsr.map_or(vp, |f| f.display);
-        let compose = fg
-            .map(|fg| (fg.format(), fg.decode()))
-            .or(hudless.map(|h| (h.format, h.decode)))
-            .map(|(format, decode)| specializer.pair_for(format, !decode, None));
+        let compose = fg.map(|fg| specializer.pair_for(fg.format(), !fg.decode(), None));
         // Specialised even while claimed: a claim is per frame and drops whenever the UI camera
         // loses its `ViewTarget` (a minimize, a surface reconfigure), when a cold pair would
         // compile synchronously on the render thread. Keeping it warm is a cached lookup.

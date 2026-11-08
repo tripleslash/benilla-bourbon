@@ -489,8 +489,7 @@
             .. "generation is on. NVIDIA DLSS 4.5 (RTX cards) also uses DLSS Frame Generation "
             .. "where your card and the DLSS runtime support it; elsewhere it falls back to AMD "
             .. "FSR 3.1. Off stretches the picture with no upscaler and no frame generation.\n\n"
-            .. "Switching between DLSS and FSR applies at once; DLSS Frame Generation starts with "
-            .. "the next session."
+            .. "Switching applies at once."
 
         -- fork: fsr (FORK.md) — 1.12 has no such slider.
         BENILLA_TOOLTIP_RCAS_SHARPNESS =

@@ -103,16 +103,18 @@ pub fn ensure(origin: &str, dir: &Path, files: &[&str]) {
                 eprintln!("dlss: {e}");
             }
             let end = if result.is_ok() { DONE } else { FAILED };
-            let _ = shared
-                .state
-                .compare_exchange(RUNNING, end, Ordering::AcqRel, Ordering::Acquire);
+            let _ =
+                shared
+                    .state
+                    .compare_exchange(RUNNING, end, Ordering::AcqRel, Ordering::Acquire);
         })
     };
     if update::wait(&shared, total) {
         // Closed: the worker stops at its next chunk and removes its partial file.
-        let _ = shared
-            .state
-            .compare_exchange(RUNNING, CANCELLED, Ordering::AcqRel, Ordering::Acquire);
+        let _ =
+            shared
+                .state
+                .compare_exchange(RUNNING, CANCELLED, Ordering::AcqRel, Ordering::Acquire);
         return;
     }
     let _ = worker.join();

@@ -93,7 +93,7 @@ pub fn bevy_offset(fsr_jitter: Vec2) -> Vec2 {
     FsrVelocityTarget,
     FgState,
     FgPresent,
-    crate::dlss::HudlessCompose
+    crate::dlss::DlssFgView
 ))]
 pub struct FsrView {
     /// The display resolution the chain reconstructs, in physical px.

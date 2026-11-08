@@ -166,26 +166,15 @@ pub(crate) fn with_render_api(
 }
 
 /// fork: dlss (FORK.md) — DLSS's boot half ([`benilla_world::dlss::install_boot`]): the
-/// runtime folder (`$WOW_DLSS_PATH`, else `benilla-config/dlss/`), NGX's Vulkan extensions on a
-/// Vulkan boot, and Streamline when `upscaler` is `dlss` and `frameGeneration` is on as stored.
-/// Streamline sits on the swap chain from device creation, so it is chosen here or not at all this
-/// session: switching to DLSS frame generation later runs FSR's until a restart.
+/// runtime folder (`$WOW_DLSS_PATH`, else `benilla-config/dlss/`, `wow-data/dlss/` in the desktop
+/// build) and NGX's Vulkan extensions on a Vulkan boot. Every DLSS choice switches at run time.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn install_dlss(app: &mut App) {
-    let stored = |name: &str| {
-        crate::cvars::boot_cvar(name)
-            .or_else(|| crate::cvars::registered_default(name, 0).map(str::to_string))
-            .unwrap_or_default()
-    };
-    let choice = benilla_world::dlss::Upscaler::from_cvar(&stored("upscaler"));
-    let frame_generation = choice == benilla_world::dlss::Upscaler::Dlss
-        && benilla_ui::script::s_str_to_int(&stored("frameGeneration")) != 0;
     let home = crate::local_state::home();
     benilla_world::dlss::install_boot(
         app,
         benilla_world::dlss::DlssRuntime::resolve(home.as_deref()),
         boot_render_backends(),
-        frame_generation,
     );
 }
 

@@ -45,20 +45,13 @@ bytemuck = { version = "1", features = ["derive"] }
 wgpu.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
 
-# fork: dlss (FORK.md) — DLSS 4.5 Super Resolution through NGX (the vendored
+# fork: dlss (FORK.md) — DLSS 4.5 Super Resolution and Frame Generation through NGX (the vendored
 # `third_party/dlss_wgpu`, its mock without the DLSS SDK), and `bevy_render`'s `raw_vulkan_init`,
 # which the vendored fork runs only on a Vulkan-only boot, for NGX's Vulkan extensions.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 dlss_wgpu = { path = "../../third_party/dlss_wgpu" }
 bevy_render = { version = "0.19.1", default-features = false, features = ["raw_vulkan_init"] }
 uuid = "1"
-
-# fork: dlss (FORK.md) — Streamline (DLSS Frame Generation): its loader, the raw handles it is
-# tagged with, at wgpu-hal's pins.
-[target.'cfg(windows)'.dependencies]
-libloading = "0.8"
-windows-core = { version = "0.62", default-features = false }
-ash = "0.38"
 
 # macOS AppKit calls, at `benilla-app`'s pins so the graph has one objc2.
 [target.'cfg(target_os = "macos")'.dependencies]
