@@ -195,6 +195,34 @@ Fork systems go in `PreUpdate`, `Update` or `Last`.
 | `wow_model.wgsl`, `terrain.wgsl`, `static_gx.wgsl` | modern vertex stages: one walk of the light table at most, none where the light grid answers the fragment (`point_light_gouraud` in terrain; `GxVsOut.anchor` @7 and the mirror's selection in static_gx's fragment); `MODERN_VERTEX_WALKS` restores both walks | perf |
 | `benilla-assets/src/materials.rs`, `static_gx/render.rs` | `modern_vertex_walks()` (`$WOW_MODERN_VERTEXWALKS=1`) pushes `MODERN_VERTEX_WALKS` beside `WOW_MODERN` | perf |
 | the shared light buffer (`lighting::global_light`) | row 20 `.z` / `.w` are the modern vertex hints (`modern::shadow::VERTEX_HINT_OFFSET`): `build_light_data` still packs 0, `modern::lights`' `prepare_lights` writes them in the render world after `upload_light` | perf |
+| `benilla-world/src/static_gx/render.rs` | `mod bindless;` at EOF; `enum GxRegionBinds { Own{..}, Shared(GxSlots) }` replaces `GxCellGpu`'s `bind_groups` / `record_table` / `cell_uniform` / `indices`; `GxPipelines::bindless` + `layout_defs()`; `init_pipelines` takes `Option<Res<HwCaps>>`, picks `cell_layout` and inserts `GxBindless`; `prepare_static_gx` takes `Option<ResMut<GxBindless>>` (evict on retain and replace, `reset` on the map clear, `refresh_bind` before the copies submit, `GxCellGpu::write_records` in the kill and fog syncs); `assemble_region` takes `shared`, packs the class into record x's high half bindless, and its per-region half moved to `own_binds` | bindless |
+| `benilla-world/src/static_gx/render.rs` | the colour and prepass pipelines start their defs from `pipes.layout_defs()` (the shadow casters and the voxelizer, fork-owned, do the same) | bindless |
+| `benilla-world/src/static_gx/pool.rs` | `GxTexturePool::class_count()` | bindless |
+| `benilla-world/src/shaders.rs` | `modern_libraries`: `load_shader_library!` for `shaders/modern/gx_bindless.wgsl` | bindless |
+| `static_gx.wgsl` | `#ifdef GX_BINDLESS` `#import benilla_modern::gx_bindless`; group 1 under `#ifdef GX_BINDLESS` / `#else`: bindless, a `var<private> cell` filled by `gx_enter(row)`; both sides define `gx_rec(word)`, and every `recs[word & 0xffffu]` read is `gx_rec(word)`; `GxVertex` / `GxPrepassVertex` gain `@builtin(instance_index)` and `GxVsOut` @8 / `GxPrepassOut` @3 a flat `region`, entered first in `vertex`, `prepass_vertex`, `fragment` and `prepass_fragment`; `gx_sample` has a bindless twin | bindless |
+
+## Interfaces for Hi-Z / RT (bindless static_gx)
+
+Where `bindless::enabled` holds (`HwCaps.binding_arrays && mdi_count`, not `WOW_GX_BINDLESS=0`), every retained region lives in three shared GPU objects a GPU cull or a ray-traced lane can read without touching the CPU path. The contracts are the module docs of `static_gx/render/bindless.rs` and `static_gx/render/batch.rs`; this is their summary.
+
+**The region table** (`GxBindless`, group 1 binding 0, `array<vec4<u32>>`, `STORAGE | COPY_DST | COPY_SRC`). A region's block starts at its `row`, which every draw passes as `first_instance`:
+
+| row | x | y | z | w |
+|---|---|---|---|---|
+| `row + 0` | origin.x (f32 bits) | origin.y | origin.z | item count |
+| `row + 1` | mesh-local bound centre.x (f32 bits) | centre.y | centre.z | `index_base` (first index in the arena) |
+| `row + 2` | bound half-extent.x (f32 bits) | half.y | half.z | `index_len` |
+| `row + 3 + i` | item `i`'s record: layer \| class << 16 | batch-order nudge | SIDN rgb | flags (bit 0 kill, 1..=13 probe slot, 14 interior fog) |
+
+World = mesh-local + origin; a region's world bound is `origin + centre ± half`.
+
+**The bind group** (`static_gx_bindless_layout`): 0 the table (vertex, fragment); 1 `binding_array<texture_2d_array<f32>, 1024>`, pool class `c` at element `c` (fragment); 2 the repeat sampler; 3 the clamp sampler. No uniform, no dynamic offset. WGSL side: `benilla_modern::gx_bindless` (`enter`, `origin`, `rec`, `sample_grad`, `sample_level`, `dims`).
+
+**The index arena** (one `u32` index buffer, `INDEX | STORAGE | COPY_DST | COPY_SRC`, `+ BLAS_INPUT` where `HwCaps.ray_query`). A region's indices are `arena[index_base..][..index_len]`, into the mesh allocator's vertex slab at the region's slab offset (the draw's `base_vertex`). A BLAS per region takes that range and that slab range; blocks keep their offsets when the arena grows (growth is a GPU copy), and move only when a region re-assembles or leaves.
+
+**The buckets** (`GxIndirect`, rebuilt each frame by `GxBatch::finish`). Two buffers, both `INDIRECT | STORAGE | COPY_DST`: args, 20-byte `DrawIndexedIndirectArgs`, and counts, one `u32` per bucket. A bucket is one `(phase, pipeline, vertex slab)` state of one pass, drawn as one `multi_draw_indexed_indirect_count(args, args_at * 20, counts, count_at * 4, capacity)`; its `capacity` args sit contiguously from `args_at` in `(row, first index)` order, each `index_count`, `instance_count = 1`, `first_index` (`index_base` added), `base_vertex` (slab offset), `first_instance = row`. The CPU writes the count as `capacity`.
+
+**The in-place cull recipe.** Before the pass, per bucket: zero `counts[count_at]`; per candidate draw, read its region's bound from table rows `row + 1` / `row + 2` (its `first_instance`), test it (frustum, Hi-Z), and for a survivor `let slot = atomicAdd(&counts[count_at], 1u)` and write its args at `args[args_at + slot]`. The draw call already reads the count, so the CPU side does not change. The candidates are the CPU-written args, read from a copy or a second range before the cull overwrites them.
 
 ## Planned hooks (not yet landed)
 
