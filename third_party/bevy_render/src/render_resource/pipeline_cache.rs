@@ -221,6 +221,10 @@ pub struct PipelineCache {
     /// only, each with its task entry point (`None`: a mesh stage alone).
     #[cfg(not(target_arch = "wasm32"))]
     mesh_tasks: Mutex<HashMap<CachedPipelineId, Option<Cow<'static, str>>>>,
+    /// benilla fork (seventeenth delta): the pipelines [`Self::queue_multiview_render_pipeline`]
+    /// queued, native only, each with the multiview mask it is created with.
+    #[cfg(not(target_arch = "wasm32"))]
+    multiview_masks: Mutex<HashMap<CachedPipelineId, core::num::NonZeroU32>>,
 }
 
 impl PipelineCache {
@@ -276,6 +280,8 @@ impl PipelineCache {
             disk_cache: default(),
             #[cfg(not(target_arch = "wasm32"))]
             mesh_tasks: default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            multiview_masks: default(),
         }
     }
 
@@ -512,6 +518,35 @@ impl PipelineCache {
         CachedRenderPipelineId::new(index)
     }
 
+    /// benilla fork (seventeenth delta): queue a render pipeline for a multiview render pass,
+    /// native only. It is created with `multiview_mask: Some(mask)` (bevy passes `None` for every
+    /// other pipeline) and may only be used in a pass whose `multiview_mask` is that same mask
+    /// (wgpu-core's `RenderPassContext` compares them). The device needs `Features::MULTIVIEW`,
+    /// and `Features::SELECTIVE_MULTIVIEW` for a mask that is not `2^n - 1`. Read back like any
+    /// render pipeline ([`Self::get_render_pipeline`]); a shader change re-creates it with the
+    /// same mask.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn queue_multiview_render_pipeline(
+        &self,
+        descriptor: RenderPipelineDescriptor,
+        mask: core::num::NonZeroU32,
+    ) -> CachedRenderPipelineId {
+        let mut new_pipelines = self
+            .new_pipelines
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let index = self.pipelines.len() + new_pipelines.len();
+        self.multiview_masks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(index, mask);
+        new_pipelines.push(CachedPipeline {
+            descriptor: PipelineDescriptor::RenderPipelineDescriptor(Box::new(descriptor)),
+            state: CachedPipelineState::Queued,
+        });
+        CachedRenderPipelineId::new(index)
+    }
+
     /// benilla fork (sixteenth delta): [`Self::start_create_render_pipeline`] for a pipeline
     /// [`Self::queue_mesh_pipeline`] queued: the same modules, layout and disk cache, built with
     /// `create_mesh_pipeline`.
@@ -627,6 +662,16 @@ impl PipelineCache {
         let sync = self.synchronous_pipeline_compilation;
         // benilla fork (twelfth delta): the disk cache the pipeline is created with.
         let disk_cache = self.disk_cache.clone();
+        // benilla fork (seventeenth delta): the mask `queue_multiview_render_pipeline` recorded.
+        #[cfg(not(target_arch = "wasm32"))]
+        let multiview_mask = self
+            .multiview_masks
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .copied();
+        #[cfg(target_arch = "wasm32")]
+        let multiview_mask: Option<core::num::NonZeroU32> = None;
         let mut bindgroup_layout_cache = self.bindgroup_layout_cache.lock().unwrap();
         let bind_group_layout = descriptor
             .layout
@@ -694,7 +739,8 @@ impl PipelineCache {
                 };
 
                 let descriptor = RawRenderPipelineDescriptor {
-                    multiview_mask: None,
+                    // benilla fork (seventeenth delta): `None` upstream.
+                    multiview_mask,
                     depth_stencil: descriptor.depth_stencil.clone(),
                     label: descriptor.label.as_deref(),
                     layout: layout.as_ref().map(|layout| -> &PipelineLayout { layout }),

@@ -296,7 +296,7 @@ wait. On wasm32 no queue is ever made, so nothing of it runs.
 | `src/batching/gpu_preprocessing.rs` | two `ComputeTaskPool::get().scope(` (0.19.1 lines ~2355 and ~2657) become `crate::wasm_serial::compute_scope(`, and the now-unused `use bevy_tasks::ComputeTaskPool;` goes |
 | `src/render_asset.rs` | `RenderAsset::DEFERRABLE`, asked by `prepare_assets` before each of its two deferrals (above) |
 | `src/mesh/mod.rs` | `RenderMesh` sets `DEFERRABLE = false` (above) |
-| `src/render_resource/pipeline_cache.rs` | the web's async pipeline creation (fifth delta); `create_pipeline_task` drops its two macOS lines (tenth delta); the `disk_cache` field, passed as each pipeline's `cache` (twelfth delta); `mesh_tasks`, `queue_mesh_pipeline`, `start_create_mesh_pipeline` and the branch into it (sixteenth delta) |
+| `src/render_resource/pipeline_cache.rs` | the web's async pipeline creation (fifth delta); `create_pipeline_task` drops its two macOS lines (tenth delta); the `disk_cache` field, passed as each pipeline's `cache` (twelfth delta); `mesh_tasks`, `queue_mesh_pipeline`, `start_create_mesh_pipeline` and the branch into it (sixteenth delta); `multiview_masks`, `queue_multiview_render_pipeline` and the mask passed in `start_create_render_pipeline` (seventeenth delta) |
 | `src/pipelined_rendering.rs` | `renderer_extract` holds the render app back on the exit frame (eleventh delta) |
 | `src/render_phase/mod.rs` | `render_batchable_meshes` no longer excludes DX12 from multi-draw-indirect-count (thirteenth delta) |
 | `src/lib.rs` | `mod wasm_serial;`; the render worker's lines (eighth delta); `destroy_released_gpu_resources` and its counter (ninth delta) |
@@ -339,6 +339,20 @@ whose vertex stage is read as the mesh stage (no buffers) and records the task e
 `get_render_pipeline`; a shader change re-queues the id and builds it as a mesh pipeline again.
 Native only (`cfg(not(target_arch = "wasm32"))`): the field, the two functions and the branch.
 Nothing changes for a pipeline queued any other way.
+
+## The seventeenth delta: multiview render pipelines in the pipeline cache (native)
+
+`src/render_resource/pipeline_cache.rs`: bevy 0.19.1 creates every render pipeline with
+`multiview_mask: None`, and `RenderPipelineDescriptor` (in `bevy_material`) has no field for one.
+wgpu-core refuses a pipeline in a multiview pass unless the pipeline was created with the pass's
+mask (`RenderPassContext::multiview_mask` is compared), so benilla's multiview shadow cascades
+(`crates/benilla-world/src/static_gx/render/modern_shadow/multiview.rs`) need the mask on the
+pipeline. `PipelineCache::queue_multiview_render_pipeline(descriptor, mask)` queues an ordinary
+render pipeline and records the mask in `multiview_masks` under the pipeline's id;
+`start_create_render_pipeline` reads it before the creation task and passes it as the raw
+descriptor's `multiview_mask` (`None` for any id not in the map, as upstream). A shader change
+re-queues the id and keeps the mask. Native only (`cfg(not(target_arch = "wasm32"))`): the field,
+the function and the lookup; wasm32 passes `None` as before.
 
 ## What this does NOT do
 
