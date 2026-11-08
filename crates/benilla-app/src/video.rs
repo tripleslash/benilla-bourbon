@@ -148,46 +148,15 @@ pub(crate) fn with_render_api(
     plugins.set(bevy::render::RenderPlugin {
         render_creation: bevy::render::settings::WgpuSettings {
             backends: Some(boot_render_backends()),
-            // Pipeline statistics only under `WOW_GPU_STATS` (`benilla_world::boot`'s gate);
-            // fork: no hardware ray tracing with the Ray Tracing setting off.
-            disabled_features: boot_disabled_features(),
+            // Pipeline statistics only under `WOW_GPU_STATS` (`benilla_world::boot`'s gate).
+            // fork: the hardware ray-tracing features stay whatever `rayTracing` says: the option
+            // switches the ray-traced lanes at run time (`benilla_world::modern::RayTracingSetting`).
+            disabled_features: benilla_world::perf_probe::gpu_stats::disabled_features(),
             ..default()
         }
         .into(),
         ..default()
     })
-}
-
-/// fork: the device features the renderer is created without: pipeline statistics outside
-/// `WOW_GPU_STATS`, and with the Ray Tracing setting off ([`boot_ray_tracing`]) every hardware
-/// ray-tracing feature, so `HwCaps::ray_query` is false and every ray-traced lane (the scene, the
-/// probe GI, the shadows and reflections built on it) keeps its raster fallback for the session.
-#[cfg(not(target_arch = "wasm32"))]
-fn boot_disabled_features() -> Option<wgpu::Features> {
-    let mut disabled = benilla_world::perf_probe::gpu_stats::disabled_features()
-        .unwrap_or(wgpu::Features::empty());
-    if !boot_ray_tracing() {
-        disabled |= wgpu::Features::EXPERIMENTAL_RAY_QUERY
-            | wgpu::Features::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN
-            | wgpu::Features::EXTENDED_ACCELERATION_STRUCTURE_VERTEX_FORMATS
-            | wgpu::Features::ACCELERATION_STRUCTURE_BINDING_ARRAY;
-    }
-    Some(disabled)
-}
-
-/// fork: the stored `rayTracing` (the Graphics page's Ray Tracing box), else its registered
-/// default, on: anything but "0" leaves the hardware ray-tracing features to the adapter. Read
-/// before the `App` exists, as the device is created from it; the log plugin does not exist yet,
-/// so the line goes to stdout.
-#[cfg(not(target_arch = "wasm32"))]
-fn boot_ray_tracing() -> bool {
-    let value = crate::cvars::boot_cvar("rayTracing")
-        .or_else(|| crate::cvars::registered_default("rayTracing", 0).map(str::to_string));
-    let on = value.as_deref().is_none_or(|v| v.trim() != "0");
-    if !on {
-        println!("render: rayTracing 0 -> the device is created without hardware ray tracing");
-    }
-    on
 }
 
 /// The web build has one API, the browser's: the plugins as they are.
@@ -513,6 +482,8 @@ pub(crate) struct VideoKnobs<'w> {
         Option<ResMut<'w, benilla_world::modern::look::AutoExposure>>,
         // fork: the terrain horizon (FORK.md) — `lod` and `lodDist`.
         Option<ResMut<'w, benilla_world::horizon::HorizonCulling>>,
+        // fork: native GPU — `rayTracing`, switched at run time.
+        Option<ResMut<'w, benilla_world::modern::RayTracingSetting>>,
     ),
 }
 
@@ -566,6 +537,13 @@ impl VideoKnobs<'_> {
             // The registry refuses a value outside the callback's range (`0x688d40`); the clamp only
             // keeps the knob in it.
             "farclip" => view.farclip = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end()),
+            // fork: native GPU — the ray-traced lanes may run (or not) from the next frame; the
+            // render world keeps them on raster until its scene is rebuilt.
+            "raytracing" => {
+                if let Some(rt) = fork.9.as_deref_mut() {
+                    rt.0 = ev.flag();
+                }
+            }
             // World flag 4 (`0x688920`): the chunk level the horizon rows are taken at.
             "lod" => {
                 if let Some(horizon) = fork.8.as_deref_mut() {

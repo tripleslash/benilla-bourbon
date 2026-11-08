@@ -1076,9 +1076,12 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // ── end fork-owned block ──
     // ── fork-owned block: native GPU (hardware ray tracing) ──
     // `rayTracing` — 1 (the default) lets a native client use the GPU's ray-tracing hardware
-    // where it has it; 0 removes those features from the device the renderer creates
-    // (`video::with_render_api`), so every ray-traced lane keeps its raster fallback. Read as the
-    // device is created: applies at the next start. The web build has no ray tracing to turn off.
+    // where it has it; 0 puts every ray-traced lane (probe GI, shadows, froxel rays) back on its
+    // raster path and frees the ray-traced scene. The knob is
+    // `benilla_world::modern::RayTracingSetting`, extracted each frame: off applies on the next
+    // frame, on as soon as the scene is rebuilt (a few frames, nearest the camera first). The
+    // device keeps the ray-tracing features either way. The web build has no ray tracing to turn
+    // off.
     ours(
         "rayTracing",
         "1",

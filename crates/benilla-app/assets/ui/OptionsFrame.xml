@@ -474,10 +474,11 @@
         if ( BENILLA_NATIVE ) then
             BENILLA_TOOLTIP_RAY_TRACING =
                 "Lets the Modern lighting model use your graphics card's ray-tracing hardware for "
-                .. "the lighting it can trace, such as the light bounced around the world. Turn it "
-                .. "off if it costs too much frame rate or misbehaves: the game then lights the "
-                .. "world the way it does on cards without ray tracing. Cards without it ignore "
-                .. "this box. Takes effect the next time the game starts."
+                .. "the lighting it can trace, such as the light bounced around the world and the "
+                .. "shadows of the world itself. Turn it off if it costs too much frame rate or "
+                .. "misbehaves: the game then lights the world the way it does on cards without ray "
+                .. "tracing. No restart is needed; turned on, it takes a moment to gather the "
+                .. "world around you first. Cards without it ignore this box."
         end
         BENILLA_TOOLTIP_RENDER_SCALE =
             "Draws the 3D world at a fraction of the window's resolution, or larger than it. "
@@ -2948,10 +2949,10 @@
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- fork: native GPU — `rayTracing`, a native
-                                                -- client's own row: off creates the device
-                                                -- without hardware ray tracing at the next start
-                                                -- (`video::with_render_api`), which turns every
-                                                -- ray-traced lane off.
+                                                -- client's own row: off puts every ray-traced
+                                                -- lane back on its raster path from the next
+                                                -- frame, on brings them back once the scene is
+                                                -- rebuilt (`modern::RayTracingSetting`).
                                                 BenillaOptionsRow_OnLoad(this, "rayTracing", "Ray Tracing",
                                                     "BENILLA_TOOLTIP_RAY_TRACING")
                                                 if ( BENILLA_NATIVE ) then this:Show() end
@@ -4492,8 +4493,8 @@
                     name = "BENILLA_GRAPHICS_API", desc = BENILLA_TOOLTIP_GRAPHICS_API,
                     type = "dropdown", identifier = "BenillaGraphicsApi", cvar = "gxApi",
                     restartGx = 1 } })
-                -- fork: native GPU — `rayTracing`, read as the device is created at the next
-                -- start (`video::with_render_api`), so a staged write is all it takes.
+                -- fork: native GPU — `rayTracing`, switched at run time
+                -- (`modern::RayTracingSetting`): the write applies on the next frame.
                 tinsert(rows, { category = PIXEL_SHADERS, row = {
                     name = "BENILLA_RAY_TRACING", desc = BENILLA_TOOLTIP_RAY_TRACING,
                     type = "checkbutton", cvar = "rayTracing" } })
