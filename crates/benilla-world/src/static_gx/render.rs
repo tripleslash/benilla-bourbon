@@ -226,6 +226,10 @@ struct GxCellGpu {
     unready: Vec<u64>,
     /// The textures behind [`Self::unready`]; the region re-assembles once all are resident.
     waiting: Vec<AssetId<Image>>,
+    /// fork: meshlets — per position `k` of [`Self::order`] its first meshlet in the region's
+    /// block (`meshlets::place`); empty where the region has none.
+    #[cfg(not(target_arch = "wasm32"))]
+    meshlet_starts: Vec<u32>,
 }
 
 #[derive(Resource, Default)]
@@ -315,11 +319,18 @@ fn init_pipelines(
         .get_view_layout(MeshPipelineViewLayoutKey::empty())
         .main_layout
         .clone();
+    // fork: meshlets — where the mesh-shader lane can run, the mesh stage runs the vertex path's
+    // body, so the groups every static_gx pipeline shares are visible to it (and the task stage).
+    let mesh = bindless::mesh_capable(caps.as_deref());
+    let mut stages = ShaderStages::VERTEX_FRAGMENT;
+    if mesh {
+        stages |= ShaderStages::TASK | ShaderStages::MESH;
+    }
     // The pass's own extra (group 2): the shared light storage.
     let light_layout = BindGroupLayoutDescriptor::new(
         "static_gx_light_layout",
         &BindGroupLayoutEntries::sequential(
-            ShaderStages::VERTEX_FRAGMENT,
+            stages,
             (
                 storage_buffer_read_only_sized(false, None),
                 // fork: modern lighting (P2) — the modern sun's shadow array, compare sampler, cascades.
@@ -358,7 +369,7 @@ fn init_pipelines(
         ),
     );
     let cell_layout = if bindless {
-        bindless::layout()
+        bindless::layout(mesh)
     } else {
         per_region
     };
@@ -1001,10 +1012,14 @@ fn assemble_region(
         ranges[i as usize] = at..at + len;
         at += len;
     }
+    // fork: meshlets — the region's meshlets in the arena's item order, where it has them.
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut meshlet_starts = Vec::new();
     // Where the indices go: the region's own buffer, or its block of the arena.
     let (binds, indices, index_base) = match (shared, own) {
         (Some(shared), _) => {
-            let slots = shared.place(
+            #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+            let mut slots = shared.place(
                 draw.origin,
                 &draw.aabb,
                 &draw.groups,
@@ -1014,6 +1029,18 @@ fn assemble_region(
                 render_queue,
                 copies,
             );
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                meshlet_starts = meshlets::place(
+                    shared,
+                    &mut slots,
+                    draw,
+                    &order,
+                    render_device,
+                    render_queue,
+                    copies,
+                );
+            }
             let arena = shared.index_buffer().expect("`place` reserves the arena");
             (
                 GxRegionBinds::Shared(slots),
@@ -1082,6 +1109,8 @@ fn assemble_region(
         fog_applied: Vec::new(),
         unready,
         waiting,
+        #[cfg(not(target_arch = "wasm32"))]
+        meshlet_starts,
     })
 }
 

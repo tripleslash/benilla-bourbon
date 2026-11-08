@@ -61,6 +61,19 @@
 //! grows to the next power of two by a GPU copy, submitted at once behind every write and copy
 //! already aimed at the old buffer, so the blocks keep their offsets; the bind group is rebuilt
 //! when the table or the pool's class count changes.
+//!
+//! # The meshlet arena (`meshlets`, native only)
+//!
+//! Where the mesh-shader lane can run (`meshlets::capable`), three more storage buffers hold every
+//! region's meshlets the same way, each region one block of each ([`GxMeshletSlots`]): the
+//! meshlet table (32 bytes a meshlet, two rows: `[first vertex, first triangle, vertex count |
+//! triangle count << 8, cone]` with both offsets absolute in the other two buffers, then
+//! `[mesh-local centre xyz, radius]` in f32 bits), the meshlet vertices (`u32` a vertex, an index
+//! into the region's mesh) and the meshlet triangles (`u32` a triangle, `a | b << 8 | c << 16`
+//! meshlet-local). A region's meshlets sit in its index arena's item order, so a draw's items are
+//! a contiguous run of them. The region table and the index arena are unchanged: the ray-traced
+//! scene and every vertex-path pass read them as before. Group 1's table binding is also visible
+//! to the task and mesh stages there.
 
 use super::super::pool::GxTexturePool;
 use bevy::camera::primitives::Aabb;
@@ -104,12 +117,31 @@ pub(super) fn enabled(caps: Option<&HwCaps>) -> bool {
         && crate::launch_env::var("WOW_GX_BINDLESS").as_deref() != Some("0")
 }
 
-/// The bindless group 1 layout (see the module header).
-pub(super) fn layout() -> BindGroupLayoutDescriptor {
+/// fork: meshlets — whether the mesh-shader lane can run this session (`meshlets::capable`), which
+/// widens group 1 and makes the meshlet arena. Never on wasm32.
+pub(super) fn mesh_capable(caps: Option<&HwCaps>) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        super::meshlets::capable(caps)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = caps;
+        false
+    }
+}
+
+/// The bindless group 1 layout (see the module header); with `mesh` (the mesh-shader lane can run)
+/// the table and samplers are visible to the task and mesh stages too.
+pub(super) fn layout(mesh: bool) -> BindGroupLayoutDescriptor {
+    let mut stages = ShaderStages::VERTEX_FRAGMENT;
+    if mesh {
+        stages |= ShaderStages::TASK | ShaderStages::MESH;
+    }
     BindGroupLayoutDescriptor::new(
         "static_gx_bindless_layout",
         &BindGroupLayoutEntries::sequential(
-            ShaderStages::VERTEX_FRAGMENT,
+            stages,
             (
                 storage_buffer_read_only_sized(false, None),
                 texture_2d_array(TextureSampleType::Float { filterable: true })
@@ -134,6 +166,70 @@ pub(crate) struct GxSlots {
     /// The region's first index in the arena; its run ranges are relative to it.
     pub index_base: u32,
     pub index_len: u32,
+    /// fork: meshlets — its blocks of the meshlet arena; all zero without them.
+    pub meshlets: GxMeshletSlots,
+}
+
+/// fork: meshlets — a region's blocks of the meshlet arena (the module header).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GxMeshletSlots {
+    /// The region's first meshlet in the meshlet table, and how many it holds.
+    pub first: u32,
+    pub count: u32,
+    /// Its block of the meshlet vertices.
+    pub vertex: u32,
+    pub vertices: u32,
+    /// Its block of the meshlet triangles.
+    pub triangle: u32,
+    pub triangles: u32,
+}
+
+/// Bytes of one meshlet in the meshlet table (two rows).
+const MESHLET_BYTES: u64 = 2 * ROW;
+
+/// The meshlet arena's floors: meshlets (2 MiB) and vertices and triangles (16 MiB each).
+const MIN_MESHLETS: u32 = 1 << 16;
+const MIN_MESHLET_WORDS: u32 = 1 << 22;
+
+/// fork: meshlets — the meshlet table, vertices and triangles, suballocated like the index arena.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))] // never made on wasm32
+struct GxMeshletArena {
+    table: GrowBuffer,
+    table_alloc: RangeAlloc,
+    vertices: GrowBuffer,
+    vertex_alloc: RangeAlloc,
+    triangles: GrowBuffer,
+    triangle_alloc: RangeAlloc,
+}
+
+impl GxMeshletArena {
+    fn new() -> Self {
+        let words = |label| GrowBuffer::new(label, BufferUsages::STORAGE, 4, MIN_MESHLET_WORDS);
+        Self {
+            table: GrowBuffer::new(
+                "static_gx_meshlet_table",
+                BufferUsages::STORAGE,
+                MESHLET_BYTES,
+                MIN_MESHLETS,
+            ),
+            table_alloc: RangeAlloc::default(),
+            vertices: words("static_gx_meshlet_vertices"),
+            vertex_alloc: RangeAlloc::default(),
+            triangles: words("static_gx_meshlet_triangles"),
+            triangle_alloc: RangeAlloc::default(),
+        }
+    }
+}
+
+/// The three meshlet buffers, as the mesh group binds them.
+#[derive(Clone, Copy)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))] // read by `meshlets`, native only
+pub(super) struct GxMeshletBuffers<'a> {
+    pub table: &'a Buffer,
+    pub vertices: &'a Buffer,
+    pub triangles: &'a Buffer,
+    /// Meshlets the table holds room for: the drawn bits a view keeps.
+    pub capacity: u32,
 }
 
 /// First-fit suballocation of a `u32` range: free blocks kept sorted and coalesced, and the
@@ -272,6 +368,16 @@ impl GrowBuffer {
     pub(super) fn bytes(&self) -> u64 {
         u64::from(self.capacity) * self.unit
     }
+
+    /// Write `data` at unit `at`, which a [`Self::reserve`] covered.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the meshlet arena's, native only
+    fn write(&self, queue: &RenderQueue, at: u32, data: &[u8]) {
+        if let Some(buffer) = &self.buffer {
+            if !data.is_empty() {
+                queue.write_buffer(buffer, u64::from(at) * self.unit, data);
+            }
+        }
+    }
 }
 
 /// What a bindless draw binds: the shared bind group and the index arena.
@@ -295,6 +401,8 @@ pub(super) struct GxBindless {
     warned_overflow: bool,
     /// fork: GPU cull — regions also hold their selection keys' bounds (the module header).
     key_bounds: bool,
+    /// fork: meshlets — the meshlet arena, where the mesh-shader lane can run.
+    meshlets: Option<GxMeshletArena>,
 }
 
 impl GxBindless {
@@ -326,6 +434,7 @@ impl GxBindless {
             bound: None,
             warned_overflow: false,
             key_bounds: super::batch::gpu_cull_lane(caps),
+            meshlets: mesh_capable(caps).then(GxMeshletArena::new),
         }
     }
 
@@ -379,6 +488,7 @@ impl GxBindless {
             keys,
             index_base,
             index_len,
+            meshlets: GxMeshletSlots::default(),
         };
         self.write_records(queue, slots, records);
         if keys > 0 {
@@ -400,10 +510,81 @@ impl GxBindless {
         }
     }
 
+    /// fork: meshlets — place a region's meshlets: one block of each meshlet buffer, `rows` (two a
+    /// meshlet, offsets relative to `vertices` and `triangles`) rebased onto the blocks. `None`
+    /// without the arena.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // called by `meshlets`, native only
+    pub(super) fn place_meshlets(
+        &mut self,
+        rows: &[[u32; 4]],
+        vertices: &[u32],
+        triangles: &[u32],
+        device: &RenderDevice,
+        queue: &RenderQueue,
+        copies: &mut CommandEncoder,
+    ) -> Option<GxMeshletSlots> {
+        let arena = self.meshlets.as_mut()?;
+        let count = (rows.len() / 2) as u32;
+        let slots = GxMeshletSlots {
+            first: arena.table_alloc.alloc(count),
+            count,
+            vertex: arena.vertex_alloc.alloc(vertices.len() as u32),
+            vertices: vertices.len() as u32,
+            triangle: arena.triangle_alloc.alloc(triangles.len() as u32),
+            triangles: triangles.len() as u32,
+        };
+        arena
+            .table
+            .reserve(arena.table_alloc.end(), device, queue, copies);
+        arena
+            .vertices
+            .reserve(arena.vertex_alloc.end(), device, queue, copies);
+        arena
+            .triangles
+            .reserve(arena.triangle_alloc.end(), device, queue, copies);
+        let rebased: Vec<[u32; 4]> = rows
+            .chunks_exact(2)
+            .flat_map(|pair| {
+                let [v, t, counts, cone] = pair[0];
+                [[v + slots.vertex, t + slots.triangle, counts, cone], pair[1]]
+            })
+            .collect();
+        arena
+            .table
+            .write(queue, slots.first, bytemuck::cast_slice(&rebased));
+        arena
+            .vertices
+            .write(queue, slots.vertex, bytemuck::cast_slice(vertices));
+        arena
+            .triangles
+            .write(queue, slots.triangle, bytemuck::cast_slice(triangles));
+        Some(slots)
+    }
+
+    /// fork: meshlets — the meshlet buffers, once a region's meshlets are placed.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // read by `meshlets`, native only
+    pub(super) fn meshlet_buffers(&self) -> Option<GxMeshletBuffers<'_>> {
+        let arena = self.meshlets.as_ref()?;
+        Some(GxMeshletBuffers {
+            table: arena.table.buffer()?,
+            vertices: arena.vertices.buffer()?,
+            triangles: arena.triangles.buffer()?,
+            capacity: arena.table.capacity,
+        })
+    }
+
     /// Free a region's blocks.
     pub(super) fn release(&mut self, slots: GxSlots) {
         self.rows.free(slots.row, slots.rows);
         self.index_alloc.free(slots.index_base, slots.index_len);
+        if let Some(arena) = &mut self.meshlets {
+            let m = slots.meshlets;
+            if m != GxMeshletSlots::default() {
+                arena.table_alloc.free(m.first, m.count);
+                arena.vertex_alloc.free(m.vertex, m.vertices);
+                arena.triangle_alloc.free(m.triangle, m.triangles);
+            }
+        }
     }
 
     /// The map clear: every block free, the buffers kept, the bind group stale (the pool resets
@@ -412,6 +593,11 @@ impl GxBindless {
         self.rows = RangeAlloc::default();
         self.index_alloc = RangeAlloc::default();
         self.bound = None;
+        if let Some(arena) = &mut self.meshlets {
+            arena.table_alloc = RangeAlloc::default();
+            arena.vertex_alloc = RangeAlloc::default();
+            arena.triangle_alloc = RangeAlloc::default();
+        }
     }
 
     /// The arena the assembly copies a region's indices into; present once a region is placed.
