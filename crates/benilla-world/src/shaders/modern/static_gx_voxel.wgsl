@@ -7,6 +7,10 @@
 // by another; the raster is supersampled against the voxel grid, so a wall thinner than a voxel
 // still fills one.
 //
+// Under `VOXEL_CONSERVATIVE` (native, conservative rasterization) the raster is one pixel a voxel
+// and every pixel a triangle touches runs: each triangle writes only in the sweep down its plane's
+// dominant axis, the one or more voxels its plane crosses over that pixel.
+//
 // Group 1 is static_gx's own cell layout, bound unchanged (see `static_gx.wgsl`); under
 // `GX_BINDLESS` the shared region table (`benilla_modern::gx_bindless`).
 #import benilla_modern::colorspace
@@ -20,7 +24,8 @@ struct VoxelView {
     box_lo: vec4<f32>,
     // xyz = the box's high voxel coord (exclusive), w = voxels per side.
     box_hi: vec4<f32>,
-    // x = the level's slice offset in the texture, y = the alpha key, z = the albedo mip.
+    // x = the level's slice offset in the texture, y = the alpha key, z = the albedo mip,
+    // w = the sweep's axis (0 x, 1 y, 2 z) under `VOXEL_CONSERVATIVE`.
     info: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> vox: VoxelView;
@@ -101,8 +106,21 @@ fn wrap_texel(v: i32, n: i32) -> i32 {
     return ((v % n) + n) % n;
 }
 
+#ifdef VOXEL_CONSERVATIVE
+// `v`'s component along world axis `axis`.
+fn along_axis(v: vec3<f32>, axis: u32) -> f32 {
+    return select(select(v.z, v.y, axis == 1u), v.x, axis == 0u);
+}
+#endif
+
 @fragment
 fn fragment(in: VoxelVsOut) {
+#ifdef VOXEL_CONSERVATIVE
+    // The triangle's plane per pixel step, taken first, in uniform control flow. The plane is exact
+    // under conservative rasterization: a pixel the triangle only grazes extrapolates it.
+    let step_x = dpdx(in.world);
+    let step_y = dpdy(in.world);
+#endif
 #ifdef GX_BINDLESS
     gx_bindless::enter(in.region);
 #endif
@@ -127,6 +145,50 @@ fn fragment(in: VoxelVsOut) {
     // authored value space, and the probes have to match them.
     albedo = colorspace::linear_to_srgb(albedo);
 
+#ifdef VOXEL_CONSERVATIVE
+#ifdef TWO_SIDED
+    let packed = vec4<f32>(0.5, 0.5, 0.5, 0.0);
+#else
+    let packed = vec4<f32>(normalize(in.normal) * 0.5 + vec3<f32>(0.5), 1.0);
+#endif
+    // Only the sweep down the plane's dominant axis writes: there the plane climbs at most one voxel
+    // a pixel, where in another sweep a grazed pixel's extrapolated point can lie far off the
+    // triangle. A tie (a 45-degree plane) writes in each tied sweep; a NaN plane writes nowhere.
+    let axis = u32(vox.info.w);
+    let face = abs(cross(step_x, step_y));
+    let along = along_axis(face, axis);
+    let across = max(max(face.x, face.y), face.z);
+    if (!(along > 0.0) || !(along * 1.001 >= across)) {
+        return;
+    }
+    // The voxels the plane crosses along the sweep over this pixel's square: three at most.
+    let size = vox.box_lo.w;
+    let depth = along_axis(in.world, axis);
+    let reach = 0.5 * (abs(along_axis(step_x, axis)) + abs(along_axis(step_y, axis)));
+    let first = i32(floor((depth - reach) / size));
+    let last = min(i32(floor((depth + reach) / size)), first + 2);
+    let n = i32(vox.box_hi.w);
+    var w = vec3<i32>(floor(in.world / size));
+    for (var k = first; k <= last; k += 1) {
+        if (axis == 0u) {
+            w.x = k;
+        } else if (axis == 1u) {
+            w.y = k;
+        } else {
+            w.z = k;
+        }
+        if (any(w < vec3<i32>(vox.box_lo.xyz)) || any(w >= vec3<i32>(vox.box_hi.xyz))) {
+            continue;
+        }
+        let slot = vec3<i32>(
+            wrap_texel(w.x, n),
+            wrap_texel(w.y, n),
+            wrap_texel(w.z, n) + i32(vox.info.x),
+        );
+        textureStore(vox_albedo, slot, vec4<f32>(albedo, 1.0));
+        textureStore(vox_normal, slot, packed);
+    }
+#else
     let w = vec3<i32>(floor(in.world / vox.box_lo.w));
     if (any(w < vec3<i32>(vox.box_lo.xyz)) || any(w >= vec3<i32>(vox.box_hi.xyz))) {
         return;
@@ -145,5 +207,6 @@ fn fragment(in: VoxelVsOut) {
 #else
     let nrm = normalize(in.normal);
     textureStore(vox_normal, slot, vec4<f32>(nrm * 0.5 + vec3<f32>(0.5), 1.0));
+#endif
 #endif
 }

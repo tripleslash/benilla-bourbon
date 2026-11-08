@@ -11,7 +11,9 @@
 //!    down each axis, so a triangle edge-on to one sweep is caught by another — at several samples
 //!    per voxel. Only *boxes* are ever redone: the slabs the camera scrolled in, and the bounds of
 //!    content that streamed in or out, one union box per level a frame. Nothing else is touched,
-//!    so a standing camera pays nothing.
+//!    so a standing camera pays nothing. fork: where the device rasterizes conservatively
+//!    ([`conservative_lane`]), each sweep is one pixel a voxel over the box's own extent, and a
+//!    triangle writes only in the sweep down its dominant axis (`static_gx_voxel.wgsl`).
 //! 2. **The terrain heightfield.** The resident terrain cells drawn top-down into a depth map (the
 //!    plan's `gi/heightfield.rs`), which is what terrain hits and every ray past the clipmap use.
 //!    Terrain is not voxelized: it is a height per column by construction, and a 2 yd map holds it
@@ -30,6 +32,7 @@ use crate::modern::ActiveLighting;
 use crate::par_encode::Recorder;
 
 /// Samples per voxel edge in the voxelizing raster: a wall thinner than a voxel still fills it.
+/// The conservative lane needs none: every pixel a triangle touches runs.
 const SUPERSAMPLE: u32 = 3;
 /// The heightfield's edge, in texels, and half its world footprint (yd) — about 1.5 yd a texel.
 const HEIGHT_SIZE: u32 = 512;
@@ -80,6 +83,34 @@ struct GiVoxelPipelines {
     clear: CachedComputePipelineId,
     /// Terrain casters carry position at offset 0 whatever their stride (`terrain_shadow.wgsl`).
     height: GiMap<u64, CachedRenderPipelineId>,
+    /// [`conservative_lane`], decided once at startup.
+    conservative: bool,
+}
+
+/// Whether the voxelizer rasterizes conservatively at one pixel a voxel: the device can
+/// ([`HwCaps::conservative_raster`], never on wasm32) and `WOW_GI_CONSERVATIVE=0` did not turn it
+/// off. Otherwise the raster is supersampled [`SUPERSAMPLE`] times over the whole target.
+fn conservative_lane(caps: Option<&HwCaps>) -> bool {
+    caps.is_some_and(|c| c.conservative_raster)
+        && crate::launch_env::var("WOW_GI_CONSERVATIVE").as_deref() != Some("0")
+}
+
+/// The voxel raster's edge in pixels, for a level of `voxels` a side.
+fn raster_size(voxels: u32, conservative: bool) -> u32 {
+    if conservative {
+        voxels
+    } else {
+        voxels * SUPERSAMPLE
+    }
+}
+
+/// The two world axes across sweep `axis`, as [`box_clip`] lays them on the target: (u, v).
+fn sweep_plane(axis: usize) -> (usize, usize) {
+    match axis {
+        0 => (2, 1),
+        1 => (0, 2),
+        _ => (0, 1),
+    }
 }
 
 /// One box of one level to empty and redraw.
@@ -147,7 +178,12 @@ fn init_gi_pipelines(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
+    caps: Option<Res<HwCaps>>,
 ) {
+    let conservative = conservative_lane(caps.as_deref());
+    if conservative {
+        info!("modern GI: conservative voxelizer at 1x (WOW_GI_CONSERVATIVE=0 turns it off)");
+    }
     let view_layout = BindGroupLayoutDescriptor::new(
         "modern_gi_voxel_view",
         &BindGroupLayoutEntries::single(
@@ -189,6 +225,7 @@ fn init_gi_pipelines(
         raster: GiMap::default(),
         clear,
         height: GiMap::default(),
+        conservative,
     });
 }
 
@@ -226,11 +263,8 @@ fn voxel_texture(
 fn box_clip(lo: Vec3, hi: Vec3, axis: usize) -> Mat4 {
     let span = (hi - lo).max(Vec3::splat(1e-3));
     // (u, v) are the two axes across the sweep, `d` the one along it.
-    let (u, v, d) = match axis {
-        0 => (2usize, 1, 0),
-        1 => (0usize, 2, 1),
-        _ => (0usize, 1, 2),
-    };
+    let (u, v) = sweep_plane(axis);
+    let d = axis.min(2);
     let mut rows = [Vec4::ZERO; 4];
     rows[0][u] = 2.0 / span[u];
     rows[0][3] = -1.0 - 2.0 * lo[u] / span[u];
@@ -393,7 +427,7 @@ fn prepare_gi_voxels(
             tier.voxels,
             tier.levels as u32,
         ));
-        let raster = tier.voxels * SUPERSAMPLE;
+        let raster = raster_size(tier.voxels, pipes.conservative);
         let depth = device.create_texture(&TextureDescriptor {
             label: Some("modern_gi_voxel_depth"),
             size: Extent3d {
@@ -609,7 +643,7 @@ fn prepare_gi_voxels(
                     (level as u32 * tier.voxels) as f32,
                     VOXEL_ALPHA_KEY,
                     VOXEL_ALBEDO_MIP,
-                    0.0,
+                    if pipes.conservative { a as f32 } else { 0.0 },
                 ),
             });
         }
@@ -652,6 +686,9 @@ fn prepare_gi_voxels(
             if two_sided {
                 defs.push("TWO_SIDED".into());
             }
+            if pipes.conservative {
+                defs.push("VOXEL_CONSERVATIVE".into());
+            }
             let id = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
                 label: Some("modern_gi_voxelize".into()),
                 layout: vec![
@@ -672,8 +709,10 @@ fn prepare_gi_voxels(
                     entry_point: Some("fragment".into()),
                     targets: vec![],
                 }),
+                // Conservative needs the fill polygon mode, the default.
                 primitive: PrimitiveState {
                     cull_mode: None,
+                    conservative: pipes.conservative,
                     ..default()
                 },
                 // The sweep must see every surface along the axis, so nothing is depth-tested away.
@@ -976,7 +1015,7 @@ pub(crate) fn gi_voxel_pass(
             );
             timing.end(&mut pass);
         }
-        for offset in &job.axis {
+        for (axis, offset) in job.axis.iter().enumerate() {
             let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
                 label: Some("modern_gi_voxelize"),
                 color_attachments: &[],
@@ -993,6 +1032,11 @@ pub(crate) fn gi_voxel_pass(
                 multiview_mask: None,
             });
             let timing = diagnostics.pass_span(&mut pass, "modern_gi_voxelize");
+            if pipes.conservative {
+                // One pixel a voxel: the box's own extent across the sweep, not the whole target.
+                let (u, v) = sweep_plane(axis);
+                pass.set_viewport(0.0, 0.0, span[u] as f32, span[v] as f32, 0.0, 1.0);
+            }
             pass.set_bind_group(0, view_bind, &[*offset]);
             pass.set_bind_group(2, store_bind, &[]);
             batch.emit(&mut pass, &raster, 2);
@@ -1118,6 +1162,42 @@ mod tests {
             let mid = clip.project_point3(0.5 * (lo + hi));
             assert!(mid.x.abs() < 1e-4 && mid.y.abs() < 1e-4, "{axis}: {mid}");
         }
+    }
+
+    /// Under the conservative lane a sweep's viewport is the box's extent across it, so every
+    /// voxel centre lands on a pixel centre: one fragment a voxel column.
+    #[test]
+    fn a_conservative_sweep_puts_each_voxel_on_one_pixel() {
+        let voxel = 1.5;
+        let lo = IVec3::new(-7, 3, 12);
+        let hi = IVec3::new(-2, 9, 15);
+        let (world_lo, world_hi) = level_box(lo, hi, voxel);
+        let span = hi - lo;
+        for axis in 0..3 {
+            let clip = box_clip(world_lo, world_hi, axis);
+            let (u, v) = sweep_plane(axis);
+            for i in 0..span[u] {
+                for j in 0..span[v] {
+                    let mut p = (lo.as_vec3() + 0.5) * voxel;
+                    p[u] = (lo[u] as f32 + i as f32 + 0.5) * voxel;
+                    p[v] = (lo[v] as f32 + j as f32 + 0.5) * voxel;
+                    let ndc = clip.project_point3(p);
+                    let px = (ndc.x * 0.5 + 0.5) * span[u] as f32;
+                    let py = (0.5 - ndc.y * 0.5) * span[v] as f32;
+                    assert!(
+                        (px - (i as f32 + 0.5)).abs() < 1e-3,
+                        "{axis}: {px} for column {i}"
+                    );
+                    // v runs down the target from the box's low side.
+                    assert!(
+                        (py - (j as f32 + 0.5)).abs() < 1e-3,
+                        "{axis}: {py} for row {j}"
+                    );
+                }
+            }
+        }
+        assert_eq!(raster_size(96, true), 96);
+        assert_eq!(raster_size(96, false), 96 * SUPERSAMPLE);
     }
 
     /// The heightfield's view binds the whole of `terrain_shadow.wgsl`'s `CasterView`: a smaller
