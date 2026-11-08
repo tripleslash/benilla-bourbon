@@ -77,7 +77,12 @@ fn get_shared_library_paths() -> Vec<Vec<wchar_t>> {
         .lock()
         .unwrap()
         .as_ref()
-        .map(|(search, _)| search.iter().map(|p| os_str_to_wchar(p.as_os_str())).collect())
+        .map(|(search, _)| {
+            search
+                .iter()
+                .map(|p| os_str_to_wchar(p.as_os_str()))
+                .collect()
+        })
         .unwrap_or_default();
 
     #[cfg(not(target_os = "windows"))]

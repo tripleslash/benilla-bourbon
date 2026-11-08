@@ -50,8 +50,8 @@ impl DlssSdk {
             } else {
                 #[cfg(windows)]
                 {
-                    let raw = crate::d3d12::raw_device(&device)
-                        .ok_or(DlssError::UnsupportedBackend)?;
+                    let raw =
+                        crate::d3d12::raw_device(&device).ok_or(DlssError::UnsupportedBackend)?;
                     parameters = with_feature_info(project_id, Default::default(), |info| {
                         crate::d3d12::init(raw, info)
                     })?;
@@ -108,6 +108,21 @@ impl DlssSdk {
         ok.is_ok() && available != 0
     }
 
+    /// BENILLA: whether NGX reports DLSS Frame Generation on this machine (`FrameGeneration.Available`:
+    /// an RTX 40 or later, with a driver new enough), the gate for
+    /// [`crate::frame_generation::DlssFrameGeneration::new`].
+    pub fn frame_generation_available(&self) -> bool {
+        let mut available = 0;
+        let ok = check_ngx_result(unsafe {
+            NVSDK_NGX_Parameter_GetI(
+                self.parameters,
+                c"FrameGeneration.Available".as_ptr(),
+                &mut available,
+            )
+        });
+        ok.is_ok() && available != 0
+    }
+
     /// Returns the number of bytes of VRAM allocated by DLSS.
     pub fn get_vram_allocated_bytes(&mut self) -> Result<u64, DlssError> {
         let mut vram_allocated_bytes = 0;
@@ -144,6 +159,14 @@ fn check_for_updates(project_id: Uuid) {
         with_feature_info(
             project_id,
             NVSDK_NGX_Feature_NVSDK_NGX_Feature_RayReconstruction,
+            |feature_info| unsafe {
+                NVSDK_NGX_UpdateFeature(&feature_info.Identifier, feature_info.FeatureID);
+            },
+        );
+        // BENILLA: and Frame Generation's snippet.
+        with_feature_info(
+            project_id,
+            NVSDK_NGX_Feature_NVSDK_NGX_Feature_FrameGeneration,
             |feature_info| unsafe {
                 NVSDK_NGX_UpdateFeature(&feature_info.Identifier, feature_info.FeatureID);
             },

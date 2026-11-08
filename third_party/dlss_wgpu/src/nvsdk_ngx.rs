@@ -100,8 +100,14 @@ pub(crate) unsafe fn pin_dlss_45_presets(parameters: *mut NVSDK_NGX_Parameter) {
         (&NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA[..], k),
         (&NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality[..], k),
         (&NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced[..], k),
-        (&NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance[..], m),
-        (&NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance[..], l),
+        (
+            &NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance[..],
+            m,
+        ),
+        (
+            &NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance[..],
+            l,
+        ),
     ] {
         NVSDK_NGX_Parameter_SetUI(parameters, name.as_ptr().cast(), preset);
     }
@@ -153,6 +159,16 @@ pub fn check_ngx_result(result: NVSDK_NGX_Result) -> Result<(), DlssError> {
 }
 
 pub fn texture_to_ngx(texture_view: &TextureView, adapter: &Adapter) -> NVSDK_NGX_Resource_VK {
+    texture_to_ngx_as(texture_view, adapter, texture_view.texture().format())
+}
+
+/// BENILLA: [`texture_to_ngx`] for a view whose format is not its texture's (an sRGB texture read
+/// through its linear view), so NGX is told the view's.
+pub fn texture_to_ngx_as(
+    texture_view: &TextureView,
+    adapter: &Adapter,
+    format: wgpu::TextureFormat,
+) -> NVSDK_NGX_Resource_VK {
     unsafe {
         let raw_view = texture_view.as_hal::<Vulkan>().unwrap().raw_handle();
         let texture = texture_view.texture();
@@ -174,7 +190,7 @@ pub fn texture_to_ngx(texture_view: &TextureView, adapter: &Adapter) -> NVSDK_NG
             adapter
                 .as_hal::<Vulkan>()
                 .unwrap()
-                .texture_format_as_raw(texture.format()),
+                .texture_format_as_raw(format),
             texture.width(),
             texture.height(),
             texture.usage().contains(TextureUsages::STORAGE_BINDING),

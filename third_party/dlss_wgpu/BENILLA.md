@@ -53,6 +53,19 @@ linked: the host loads them from the folder it names (`set_runtime_paths`).
    is the hook `benilla-world/src/dlss/HOOKS.md` describes. `DlssSdk::ray_reconstruction_available`
    reads NGX's `SuperSamplingDenoising.Available`. The OTA update check runs only once NGX reports
    DLSS supported.
+10. **Frame Generation through NGX** (`src/frame_generation.rs`, `src/types.rs`, `src/sdk.rs`,
+    `src/initialization.rs`, `src/d3d12.rs`, `src/nvsdk_ngx.rs`, `src/mock.rs`). Upstream has no
+    DLSS-G. `DlssFrameGeneration::new` / `render` create and evaluate
+    `NVSDK_NGX_Feature_FrameGeneration` (`nvngx_dlssg.dll`) on either backend, so the host keeps its
+    own present (no Streamline). NGX's `nvsdk_ngx_helpers_dlssg_*.h` helpers are C++ `static inline`
+    named-parameter writes, restated in Rust with `nvsdk_ngx_defs_dlssg.h`'s names, so the DLSS-G
+    headers stay out of bindgen. Beside it: `DlssFrameGenerationCamera`,
+    `DlssFrameGenerationRenderParameters` and `FeatureSupport::frame_generation_supported`;
+    `DlssSdk::frame_generation_available` (`FrameGeneration.Available`) and FG's OTA update;
+    FG's Vulkan instance and device extensions registered beside Super Resolution's, deduplicated;
+    D3D12's generic `create_feature`, `set_resource`, `evaluate` and `dxgi_format`;
+    `texture_to_ngx_as` for a view whose format is not its texture's; the mock's
+    `frame_generation` answering `FeatureNotSupported`.
 
 ## How to check
 
@@ -64,4 +77,5 @@ linked: the host loads them from the folder it names (`set_runtime_paths`).
 
 ## When to drop it
 
-When upstream dlss_wgpu supports D3D12 on the wgpu version benilla pins, and builds without the SDK.
+When upstream dlss_wgpu supports D3D12 and DLSS Frame Generation on the wgpu version benilla pins,
+and builds without the SDK.

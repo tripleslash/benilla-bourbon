@@ -67,6 +67,22 @@ pub fn register_instance_extensions(
         Ok((_, false)) => feature_support.ray_reconstruction_supported = false,
         Err(err) => result = Err(err),
     };
+    // BENILLA: Frame Generation's instance extensions too.
+    match required_instance_extensions(
+        project_id,
+        NVSDK_NGX_Feature_NVSDK_NGX_Feature_FrameGeneration,
+        args.entry,
+    ) {
+        Ok((extensions, true)) => {
+            for e in extensions {
+                if !args.extensions.contains(&e) {
+                    args.extensions.push(e);
+                }
+            }
+        }
+        Ok((_, false)) => feature_support.frame_generation_supported = false,
+        Err(err) => result = Err(err),
+    };
     result
 }
 
@@ -139,6 +155,24 @@ pub fn register_device_extensions(
     ) {
         Ok((extensions, true)) => args.extensions.extend(extensions),
         Ok((_, false)) => feature_support.ray_reconstruction_supported = false,
+        Err(err) => result = Err(err),
+    };
+    // BENILLA: Frame Generation's device extensions too.
+    match required_device_extensions(
+        project_id,
+        NVSDK_NGX_Feature_NVSDK_NGX_Feature_FrameGeneration,
+        raw_adapter,
+        raw_instance.handle(),
+        raw_physical_device,
+    ) {
+        Ok((extensions, true)) => {
+            for e in extensions {
+                if !args.extensions.contains(&e) {
+                    args.extensions.push(e);
+                }
+            }
+        }
+        Ok((_, false)) => feature_support.frame_generation_supported = false,
         Err(err) => result = Err(err),
     };
     result

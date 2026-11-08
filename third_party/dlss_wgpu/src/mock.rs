@@ -30,6 +30,10 @@ impl DlssSdk {
         match self._never {}
     }
 
+    pub fn frame_generation_available(&self) -> bool {
+        match self._never {}
+    }
+
     pub fn get_vram_allocated_bytes(&mut self) -> Result<u64, DlssError> {
         match self._never {}
     }
@@ -43,6 +47,7 @@ pub fn register_instance_extensions(
 ) -> Result<(), DlssError> {
     feature_support.super_resolution_supported = false;
     feature_support.ray_reconstruction_supported = false;
+    feature_support.frame_generation_supported = false;
     Ok(())
 }
 
@@ -55,6 +60,7 @@ pub fn register_device_extensions(
 ) -> Result<(), DlssError> {
     feature_support.super_resolution_supported = false;
     feature_support.ray_reconstruction_supported = false;
+    feature_support.frame_generation_supported = false;
     Ok(())
 }
 
@@ -120,5 +126,51 @@ pub mod super_resolution {
             pre_exposure: Option<f32>,
         },
         Automatic,
+    }
+}
+
+pub mod frame_generation {
+    use super::*;
+    use wgpu::TextureFormat;
+
+    pub use crate::types::{DlssFrameGenerationCamera, DlssFrameGenerationRenderParameters};
+
+    pub struct DlssFrameGeneration {
+        _never: std::convert::Infallible,
+    }
+
+    impl DlssFrameGeneration {
+        pub fn new(
+            _display: [u32; 2],
+            _render: [u32; 2],
+            _backbuffer_format: TextureFormat,
+            _sdk: Arc<Mutex<DlssSdk>>,
+            _device: &Device,
+            _queue: &Queue,
+            _adapter: &Adapter,
+        ) -> Result<Self, DlssError> {
+            Err(DlssError::FeatureNotSupported)
+        }
+
+        pub fn display_resolution(&self) -> [u32; 2] {
+            match self._never {}
+        }
+
+        pub fn render_resolution(&self) -> [u32; 2] {
+            match self._never {}
+        }
+
+        pub fn format(&self) -> TextureFormat {
+            match self._never {}
+        }
+
+        pub fn render(
+            &mut self,
+            _params: DlssFrameGenerationRenderParameters,
+            _command_encoder: &mut CommandEncoder,
+            _adapter: &Adapter,
+        ) -> Result<CommandBuffer, DlssError> {
+            match self._never {}
+        }
     }
 }

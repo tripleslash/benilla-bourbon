@@ -29,10 +29,8 @@ fn main() {
         return;
     }
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let dlss_sdk = env::var("DLSS_SDK").map_or_else(
-        |_| manifest.join("../nvidia-dlss"),
-        PathBuf::from,
-    );
+    let dlss_sdk =
+        env::var("DLSS_SDK").map_or_else(|_| manifest.join("../nvidia-dlss"), PathBuf::from);
     let vulkan_include = env::var("VULKAN_SDK").map_or_else(
         |_| manifest.join("../vulkan-headers/include"),
         |sdk| {
@@ -56,8 +54,8 @@ fn main() {
     // BENILLA: the C runtime the target links: the desktop build is `+crt-static`, which needs
     // NGX's static-CRT library (`_s`); the dynamic one (`_d`) otherwise. Both SDK layouts: the
     // DLSS repository's `lib/<platform>/x64/` and Streamline's `lib/<platform>/`.
-    let crt_static = env::var("CARGO_CFG_TARGET_FEATURE")
-        .is_ok_and(|f| f.split(',').any(|f| f == "crt-static"));
+    let crt_static =
+        env::var("CARGO_CFG_TARGET_FEATURE").is_ok_and(|f| f.split(',').any(|f| f == "crt-static"));
     let (lib_file, lib_name) = match (target_os.as_str(), crt_static) {
         ("windows", true) => ("nvsdk_ngx_s.lib", "nvsdk_ngx_s"),
         ("windows", false) => ("nvsdk_ngx_d.lib", "nvsdk_ngx_d"),
@@ -105,9 +103,7 @@ fn main() {
             return;
         }
     };
-    bindings
-        .write_to_file(out_dir.join("bindings.rs"))
-        .unwrap();
+    bindings.write_to_file(out_dir.join("bindings.rs")).unwrap();
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=static={lib_name}");

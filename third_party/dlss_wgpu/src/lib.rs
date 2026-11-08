@@ -10,7 +10,10 @@
 //! `$DLSS_SDK/doc/DLSS_Programming_Guide_Release.pdf`.
 
 mod types;
-pub use types::{DlssBackend, DlssError, DlssFeatureFlags, DlssPerfQualityMode, FeatureSupport};
+pub use types::{
+    DlssBackend, DlssError, DlssFeatureFlags, DlssFrameGenerationCamera,
+    DlssFrameGenerationRenderParameters, DlssPerfQualityMode, FeatureSupport,
+};
 
 #[cfg(not(dlss_mock))]
 #[cfg(windows)]
@@ -24,6 +27,9 @@ mod nvsdk_ngx;
 #[cfg(not(dlss_mock))]
 mod sdk;
 
+/// BENILLA: DLSS Frame Generation through NGX directly.
+#[cfg(not(dlss_mock))]
+pub mod frame_generation;
 /// DLSS Ray Reconstruction (Vulkan; the D3D12 path is the hook `BENILLA.md` describes).
 #[cfg(not(dlss_mock))]
 pub mod ray_reconstruction;
@@ -35,8 +41,8 @@ pub mod super_resolution;
 pub use feature_info::set_runtime_paths;
 #[cfg(not(dlss_mock))]
 pub use initialization::{
-    InitializationError, create_instance, register_device_extensions,
-    register_instance_extensions, request_device,
+    InitializationError, create_instance, register_device_extensions, register_instance_extensions,
+    request_device,
 };
 #[cfg(not(dlss_mock))]
 pub use sdk::DlssSdk;
@@ -45,8 +51,8 @@ pub use sdk::DlssSdk;
 mod mock;
 #[cfg(dlss_mock)]
 pub use mock::{
-    DlssSdk, register_device_extensions, register_instance_extensions, set_runtime_paths,
-    super_resolution,
+    DlssSdk, frame_generation, register_device_extensions, register_instance_extensions,
+    set_runtime_paths, super_resolution,
 };
 
 /// Whether this build carries NGX (`false`: the mock, built without the DLSS SDK).

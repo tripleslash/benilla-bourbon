@@ -221,7 +221,8 @@ impl DlssSuperResolution {
                     InIndicatorInvertXAxis: 0,
                     InIndicatorInvertYAxis: 0,
                     GBufferSurface: NVSDK_NGX_VK_GBuffer {
-                        pInAttrib: [ptr::null_mut(); 16],
+                        // BENILLA: `NVSDK_NGX_GBUFFERTYPE_NUM` entries, 17 since SDK 310.9 (16 before).
+                        pInAttrib: [ptr::null_mut(); _],
                     },
                     InToneMapperType: NVSDK_NGX_ToneMapperType_NVSDK_NGX_TONEMAPPER_STRING,
                     pInMotionVectors3D: ptr::null_mut(),

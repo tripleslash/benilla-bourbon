@@ -197,6 +197,8 @@ impl DlssRayReconstruction {
             InExposureScale: 0.0,
             InIndicatorInvertXAxis: 0,
             InIndicatorInvertYAxis: 0,
+            // BENILLA: SDK 310.9's optional responsivity mask, not provided.
+            pInResponsivityMask: ptr::null_mut(),
             pInReflectedAlbedo: ptr::null_mut(),
             pInColorBeforeParticles: ptr::null_mut(),
             pInColorAfterParticles: ptr::null_mut(),
@@ -232,6 +234,7 @@ impl DlssRayReconstruction {
             pInDiffuseRayDirectionHitDistance: ptr::null_mut(),
             pInSpecularRayDirectionHitDistance: ptr::null_mut(),
             InReflectedAlbedoSubrectBase: NVSDK_NGX_Coordinates { X: 0, Y: 0 },
+            InResponsivityMaskSubrectBase: NVSDK_NGX_Coordinates { X: 0, Y: 0 },
             InColorBeforeParticlesSubrectBase: NVSDK_NGX_Coordinates { X: 0, Y: 0 },
             InColorAfterParticlesSubrectBase: NVSDK_NGX_Coordinates { X: 0, Y: 0 },
             InColorBeforeTransparencySubrectBase: NVSDK_NGX_Coordinates { X: 0, Y: 0 },
@@ -274,7 +277,8 @@ impl DlssRayReconstruction {
                 } => &mut view_to_clip_rows_array as *mut _,
             },
             GBufferSurface: NVSDK_NGX_VK_GBuffer {
-                pInAttrib: [ptr::null_mut(); 16],
+                // BENILLA: `NVSDK_NGX_GBUFFERTYPE_NUM` entries, 17 since SDK 310.9 (16 before).
+                pInAttrib: [ptr::null_mut(); _],
             },
             InToneMapperType: NVSDK_NGX_ToneMapperType_NVSDK_NGX_TONEMAPPER_STRING,
             pInMotionVectors3D: ptr::null_mut(),

@@ -21,7 +21,8 @@ use wgpu::{CommandEncoder, Device, Texture, TextureView, hal::api::Dx12};
 use windows_core::Interface;
 
 type ComPtr = *mut c_void;
-type PFN_NVSDK_NGX_ProgressCallback_C = Option<unsafe extern "C" fn(f32, *mut bool)>;
+/// `PFN_NVSDK_NGX_ProgressCallback_C`.
+type ProgressCallback = Option<unsafe extern "C" fn(f32, *mut bool)>;
 
 unsafe extern "C" {
     fn NVSDK_NGX_D3D12_Init_with_ProjectID(
@@ -37,8 +38,9 @@ unsafe extern "C" {
     fn NVSDK_NGX_D3D12_GetCapabilityParameters(
         out_parameters: *mut *mut NVSDK_NGX_Parameter,
     ) -> NVSDK_NGX_Result;
-    fn NVSDK_NGX_D3D12_DestroyParameters(in_parameters: *mut NVSDK_NGX_Parameter)
-    -> NVSDK_NGX_Result;
+    fn NVSDK_NGX_D3D12_DestroyParameters(
+        in_parameters: *mut NVSDK_NGX_Parameter,
+    ) -> NVSDK_NGX_Result;
     fn NVSDK_NGX_D3D12_CreateFeature(
         in_cmd_list: ComPtr,
         in_feature_id: NVSDK_NGX_Feature,
@@ -50,7 +52,7 @@ unsafe extern "C" {
         in_cmd_list: ComPtr,
         in_feature_handle: *const NVSDK_NGX_Handle,
         in_parameters: *const NVSDK_NGX_Parameter,
-        in_callback: PFN_NVSDK_NGX_ProgressCallback_C,
+        in_callback: ProgressCallback,
     ) -> NVSDK_NGX_Result;
     fn NVSDK_NGX_Parameter_SetD3d12Resource(
         in_parameter: *mut NVSDK_NGX_Parameter,
@@ -79,7 +81,7 @@ pub(crate) fn raw_resource(texture: &Texture) -> ComPtr {
 }
 
 fn view_resource(view: &TextureView) -> ComPtr {
-    raw_resource(&view.texture())
+    raw_resource(view.texture())
 }
 
 /// Run `f` on the encoder's open `ID3D12GraphicsCommandList` (wgpu-hal's
@@ -114,8 +116,7 @@ pub(crate) unsafe fn init(
             NVSDK_NGX_Version_NVSDK_NGX_Version_API,
         ))?;
         let mut parameters = ptr::null_mut();
-        if let Err(e) = check_ngx_result(NVSDK_NGX_D3D12_GetCapabilityParameters(&mut parameters))
-        {
+        if let Err(e) = check_ngx_result(NVSDK_NGX_D3D12_GetCapabilityParameters(&mut parameters)) {
             let _ = NVSDK_NGX_D3D12_Shutdown1(device);
             return Err(e);
         }
@@ -127,12 +128,6 @@ pub(crate) unsafe fn destroy(parameters: *mut NVSDK_NGX_Parameter, device: ComPt
     unsafe {
         let _ = NVSDK_NGX_D3D12_DestroyParameters(parameters);
         let _ = NVSDK_NGX_D3D12_Shutdown1(device);
-    }
-}
-
-pub(crate) unsafe fn destroy_parameters(parameters: *mut NVSDK_NGX_Parameter) {
-    unsafe {
-        let _ = NVSDK_NGX_D3D12_DestroyParameters(parameters);
     }
 }
 
@@ -215,7 +210,10 @@ pub(crate) unsafe fn evaluate_dlss(
         res(NVSDK_NGX_Parameter_Color, view_resource(e.color));
         res(NVSDK_NGX_Parameter_Output, view_resource(e.output));
         res(NVSDK_NGX_Parameter_Depth, view_resource(e.depth));
-        res(NVSDK_NGX_Parameter_MotionVectors, view_resource(e.motion_vectors));
+        res(
+            NVSDK_NGX_Parameter_MotionVectors,
+            view_resource(e.motion_vectors),
+        );
         res(
             NVSDK_NGX_Parameter_ExposureTexture,
             e.exposure.map_or(ptr::null_mut(), view_resource),
@@ -277,12 +275,20 @@ pub(crate) unsafe fn evaluate_dlss(
         NVSDK_NGX_Parameter_SetF(
             p,
             name(NVSDK_NGX_Parameter_DLSS_Pre_Exposure),
-            if e.pre_exposure == 0.0 { 1.0 } else { e.pre_exposure },
+            if e.pre_exposure == 0.0 {
+                1.0
+            } else {
+                e.pre_exposure
+            },
         );
         NVSDK_NGX_Parameter_SetF(
             p,
             name(NVSDK_NGX_Parameter_DLSS_Exposure_Scale),
-            if e.exposure_scale == 0.0 { 1.0 } else { e.exposure_scale },
+            if e.exposure_scale == 0.0 {
+                1.0
+            } else {
+                e.exposure_scale
+            },
         );
         NVSDK_NGX_Parameter_SetI(p, name(NVSDK_NGX_Parameter_DLSS_Indicator_Invert_X_Axis), 0);
         NVSDK_NGX_Parameter_SetI(p, name(NVSDK_NGX_Parameter_DLSS_Indicator_Invert_Y_Axis), 0);
@@ -294,4 +300,66 @@ pub(crate) unsafe fn release(handle: *mut NVSDK_NGX_Handle) {
     unsafe {
         let _ = NVSDK_NGX_D3D12_ReleaseFeature(handle);
     }
+}
+
+/// BENILLA: `NVSDK_NGX_D3D12_CreateFeature` for any feature, its parameters already set (DLSS
+/// Frame Generation's `NGX_D3D12_CREATE_DLSSG` is that, after its named writes).
+pub(crate) unsafe fn create_feature(
+    cmd_list: ComPtr,
+    feature: NVSDK_NGX_Feature,
+    parameters: *mut NVSDK_NGX_Parameter,
+) -> Result<*mut NVSDK_NGX_Handle, crate::DlssError> {
+    unsafe {
+        let mut handle = ptr::null_mut();
+        check_ngx_result(NVSDK_NGX_D3D12_CreateFeature(
+            cmd_list,
+            feature,
+            parameters,
+            &mut handle,
+        ))?;
+        Ok(handle)
+    }
+}
+
+/// BENILLA: one named resource parameter, the view's `ID3D12Resource` or null.
+pub(crate) unsafe fn set_resource(
+    parameters: *mut NVSDK_NGX_Parameter,
+    name: &std::ffi::CStr,
+    view: Option<&TextureView>,
+) {
+    unsafe {
+        NVSDK_NGX_Parameter_SetD3d12Resource(
+            parameters,
+            name.as_ptr(),
+            view.map_or(ptr::null_mut(), view_resource),
+        );
+    }
+}
+
+/// BENILLA: `NVSDK_NGX_D3D12_EvaluateFeature_C` on parameters already set.
+pub(crate) unsafe fn evaluate(
+    cmd_list: ComPtr,
+    handle: *mut NVSDK_NGX_Handle,
+    parameters: *mut NVSDK_NGX_Parameter,
+) -> Result<(), crate::DlssError> {
+    unsafe {
+        check_ngx_result(NVSDK_NGX_D3D12_EvaluateFeature_C(
+            cmd_list, handle, parameters, None,
+        ))
+    }
+}
+
+/// BENILLA: the `DXGI_FORMAT` NGX reads a colour target as, for the formats a swap chain or a
+/// backdrop takes.
+pub(crate) fn dxgi_format(format: wgpu::TextureFormat) -> Option<u32> {
+    use wgpu::TextureFormat as F;
+    Some(match format {
+        F::Rgba16Float => 10,
+        F::Rgb10a2Unorm => 24,
+        F::Rgba8Unorm => 28,
+        F::Rgba8UnormSrgb => 29,
+        F::Bgra8Unorm => 87,
+        F::Bgra8UnormSrgb => 91,
+        _ => return None,
+    })
 }
