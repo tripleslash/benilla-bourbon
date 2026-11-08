@@ -333,4 +333,87 @@ mod tests {
                 });
         }
     }
+    /// fork: N — the modern entity shadow caster (`benilla_world`'s `modern/entity_shadow.wgsl`)
+    /// in every variant `EntityShadowPipelines::descriptor` builds: `SKINNED`, `CUTOUT` and
+    /// `FIXTURE_CLIP` (with `CUTOUT_OR_CLIP`) in each combination, and the sun parts' `MULTIVIEW`
+    /// variants (no fixture clip) under the `MULTIVIEW` capability the multiview lane requires,
+    /// whose vertex stage reads `@builtin(view_index)`. Composed, validated and written as SPIR-V:
+    /// the multiview lane runs on Vulkan and DX12 alone, so not on wasm32 or macOS.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "macos")))]
+    #[test]
+    fn the_entity_shadow_caster_composes_in_every_variant() {
+        use bevy::render::render_resource::{DownlevelFlags, WgpuFeatures};
+        use bevy::shader::{Shader, ShaderCache, ShaderCacheSource, ShaderDefVal};
+        use naga::valid::Capabilities;
+        for multiview in [false, true] {
+            let features = if multiview {
+                WgpuFeatures::MULTIVIEW
+            } else {
+                WgpuFeatures::empty()
+            };
+            let mut cache: ShaderCache<naga::Module, ()> = ShaderCache::new(
+                (),
+                features,
+                DownlevelFlags::all(),
+                |_, source, _| match source {
+                    ShaderCacheSource::Naga(module) => Ok(module),
+                    _ => panic!("a WGSL shader composes to a naga module"),
+                },
+            );
+            let id = AssetId::<Shader>::Uuid {
+                uuid: bevy::asset::uuid::Uuid::from_u128(1),
+            };
+            cache.set_shader(
+                id,
+                Shader::from_wgsl(
+                    include_str!("../../benilla-world/src/shaders/modern/entity_shadow.wgsl"),
+                    "embedded://benilla_world/shaders/modern/entity_shadow.wgsl",
+                ),
+            );
+            // `DownlevelFlags::all()`'s share of what the composer validates against.
+            let mut capabilities = Capabilities::SHADER_FLOAT16_IN_FLOAT32
+                | Capabilities::MULTISAMPLED_SHADING
+                | Capabilities::CUBE_ARRAY_TEXTURES;
+            if multiview {
+                capabilities |= Capabilities::MULTIVIEW;
+            }
+            for bits in 0..8u32 {
+                let (skinned, cutout, clip) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0);
+                // The multiview pass draws the sun cascades' parts, never a lamp's fixture clip.
+                if multiview && clip {
+                    continue;
+                }
+                let mut defs: Vec<ShaderDefVal> = Vec::new();
+                for (on, def) in [
+                    (multiview, "MULTIVIEW"),
+                    (skinned, "SKINNED"),
+                    (cutout, "CUTOUT"),
+                    (clip, "FIXTURE_CLIP"),
+                    (cutout || clip, "CUTOUT_OR_CLIP"),
+                ] {
+                    if on {
+                        defs.push(def.into());
+                    }
+                }
+                let module = cache.get(0, id, &defs).unwrap_or_else(|e| {
+                    panic!("{defs:?}: entity_shadow.wgsl does not compose: {e:?}")
+                });
+                let info =
+                    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), capabilities)
+                        .validate(&module)
+                        .unwrap_or_else(|e| {
+                            panic!("{defs:?}: entity_shadow.wgsl does not validate: {e:?}")
+                        });
+                naga::back::spv::write_vec(
+                    &module,
+                    &info,
+                    &naga::back::spv::Options::default(),
+                    None,
+                )
+                .unwrap_or_else(|e| {
+                    panic!("{defs:?}: entity_shadow.wgsl does not translate to SPIR-V: {e:?}")
+                });
+            }
+        }
+    }
 }
