@@ -838,7 +838,7 @@ impl<'w> GxBatch<'w> {
         let Some(mesh) = indirect.cull_buffers().and_then(|c| c.mesh) else {
             return;
         };
-        let (true, Some((_, args_start)), Some(Some((counts, counts_start)))) =
+        let (true, Some((_, args_start)), Some((counts, counts_start))) =
             (self.meshlets, self.args_at, self.counts_at)
         else {
             return;

@@ -1479,6 +1479,7 @@ pub(crate) fn rt_scene_pass(
     }
     let pipeline_cache = world.resource::<PipelineCache>();
     let diagnostics = render_context.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let encoder = render_context.command_encoder();
 
     if let Some(scratch) = scene.scratch.as_ref().filter(|_| !frame.builds.is_empty()) {

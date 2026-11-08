@@ -100,14 +100,6 @@ impl GxMeshlets {
     pub(crate) fn len(&self) -> u32 {
         (self.rows.len() / 2) as u32
     }
-
-    /// Item `i`'s meshlet count.
-    pub(crate) fn item_count(&self, i: usize) -> u32 {
-        match (self.items.get(i), self.items.get(i + 1)) {
-            (Some(a), Some(b)) => b - a,
-            _ => 0,
-        }
-    }
 }
 
 /// One item's share of the bake: its index range and what its meshlets' bounds must know.
