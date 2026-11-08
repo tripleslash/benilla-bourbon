@@ -1249,10 +1249,13 @@ pub(crate) fn static_gx_pass(
         // The world camera and the water's planar mirror — a booth bake must never receive
         // world cells (see the marker).
         &StaticGxView,
+        // fork: GPU cull — the view's matrices and its pyramid's key (`gpu_cull`).
+        &ExtractedView,
     )>,
     mut render_context: RenderContext,
 ) {
-    let (target, depth, view_bind, _marker) = view.into_inner();
+    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+    let (target, depth, view_bind, _marker, extracted) = view.into_inner();
     {
         let _t = super::gx_perf_guard(4);
         let gx = world.resource::<GxWorld>();
@@ -1311,7 +1314,15 @@ pub(crate) fn static_gx_pass(
         if !batch.has_regions() {
             return;
         }
+        // fork: GPU cull — a view that can run the two-phase Hi-Z cull hands it the batch; `None`
+        // draws as before (`gpu_cull`).
+        #[cfg(not(target_arch = "wasm32"))]
+        let cull = gpu_cull::GxCullPass::new(world, extracted, depth, !pipes.prepass.is_empty());
+        #[cfg(not(target_arch = "wasm32"))]
+        batch.set_culled(cull.is_some());
         batch.finish();
+        #[cfg(not(target_arch = "wasm32"))]
+        let cull = cull.and_then(|c| c.bind(world, &batch));
         let view_offsets = &view_bind.main_offsets;
         // `render/static_gx/elapsed_gpu` on Vulkan and DX12: the perf journal's `gpu_static`.
         // fork: the depth prepass — the same draws in the same order through the depth-only twins,
@@ -1326,11 +1337,21 @@ pub(crate) fn static_gx_pass(
         let depth_attachment = depth.get_attachment(StoreOp::Store);
         jobs.push((Some(target.get_color_attachment()), depth_attachment));
         let batch = &batch;
+        #[cfg(not(target_arch = "wasm32"))]
+        let (cull, view_depth) = (cull.as_ref(), depth);
         crate::par_encode::record(
             &mut render_context,
             jobs,
             |render_context, (color, depth)| {
                 let diagnostics = render_context.diagnostic_recorder();
+                // fork: GPU cull — the prepass job records phase 1 before its pass, and the
+                // pyramid, phase 2 and the late prepass after it (`gpu_cull`).
+                #[cfg(not(target_arch = "wasm32"))]
+                let cull = cull.filter(|_| color.is_none());
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(cull) = cull {
+                    cull.early(render_context);
+                }
                 let (label, table) = if color.is_some() {
                     ("static_gx", &ready)
                 } else {
@@ -1352,6 +1373,26 @@ pub(crate) fn static_gx_pass(
                 pass.set_bind_group(2, &light_bind.0, &[]);
                 batch.emit(&mut pass, table, 0);
                 span.end(&mut pass);
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(cull) = cull {
+                    drop(pass);
+                    cull.pyramid(render_context);
+                    cull.late(render_context);
+                    // After the early prepass took the clear, the attachment loads.
+                    let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+                        label: Some("static_gx_prepass_late"),
+                        color_attachments: &[],
+                        depth_stencil_attachment: Some(view_depth.get_attachment(StoreOp::Store)),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    let span = diagnostics.pass_span(&mut pass, "static_gx_prepass_late");
+                    pass.set_bind_group(0, &view_bind.main, view_offsets);
+                    pass.set_bind_group(2, &light_bind.0, &[]);
+                    batch.emit_late(&mut pass, &ready_pre, 0);
+                    span.end(&mut pass);
+                }
             },
         );
     }
@@ -1421,6 +1462,9 @@ pub(super) fn build(app: &mut App) {
     // fork: the ray-traced scene over the same regions and the terrain, native only.
     #[cfg(not(target_arch = "wasm32"))]
     rt_scene::build(render_app);
+    // fork: the two-phase Hi-Z GPU cull of the retained passes, native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    gpu_cull::build(app);
 }
 
 /// Copy the collector's published half into the extractable resource.
@@ -1567,3 +1611,7 @@ pub(crate) use modern_gi::gi_voxel_pass;
 // (`modern/HOOKS.md`, "Interfaces for the ray-traced lanes"). Native only.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod rt_scene;
+// fork: the two-phase Hi-Z GPU cull of the colour pass and its prepass, and the pyramid later lanes
+// reuse (`modern/HOOKS.md`, "Interfaces for the Hi-Z pyramid"). Native only.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod gpu_cull;

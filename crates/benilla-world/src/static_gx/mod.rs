@@ -37,6 +37,11 @@ pub(crate) use render::gi_voxel_pass;
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(unused_imports)] // the ray-traced lanes' interface
 pub(crate) use render::rt_scene;
+// fork: the GPU cull's Hi-Z pyramid, which the Hi-Z SSR and task-shader cull lanes bind
+// (`modern/HOOKS.md`).
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(unused_imports)] // the Hi-Z lanes' interface
+pub(crate) use render::gpu_cull;
 
 /// The view marker, re-exported for ONE writer: `crate::liquid::reflect`, whose mirrored camera
 /// spawns with [`StaticGxView::MIRROR`] so the buildings and props this pass owns appear in the
