@@ -79,8 +79,6 @@ pub fn render_system(
     #[cfg(feature = "trace")]
     let _span = info_span!("main_render_schedule").entered();
 
-    // benilla fork (BENILLA.md, "The sixteenth delta"): latency markers around submit and present.
-    present_hook::mark(present_hook::Phase::SubmitStart);
     world.run_schedule(RenderGraph);
 
     {
@@ -95,12 +93,10 @@ pub fn render_system(
 
         render_queue.submit([encoder.finish()]);
     }
-    present_hook::mark(present_hook::Phase::SubmitEnd);
 
     {
         #[cfg(feature = "trace")]
         let _span = info_span!("present_frames").entered();
-        present_hook::mark(present_hook::Phase::PresentStart);
 
         world.resource_scope(|world, mut windows: Mut<ExtractedWindows>| {
             let views = state.get(world).unwrap();
@@ -118,8 +114,6 @@ pub fn render_system(
                 }
             }
         });
-
-        present_hook::mark(present_hook::Phase::PresentEnd);
 
         #[cfg(feature = "tracing-tracy")]
         bevy_log::event!(
@@ -432,35 +426,4 @@ pub async fn initialize_renderer(
         #[cfg(feature = "raw_vulkan_init")]
         additional_vulkan_features,
     )
-}
-
-/// benilla fork (BENILLA.md, "The sixteenth delta"): one process-wide callback at the four points of
-/// [`render_system`] a frame-latency marker names: before the render graph records, after the last
-/// submit, and around the window presents. NVIDIA Reflex / PC Latency (Streamline's `sl.pcl`,
-/// which DLSS Frame Generation requires) takes its `eRenderSubmit*` and `ePresent*` markers here.
-/// Unset, each point is one `OnceLock` read.
-pub mod present_hook {
-    use std::sync::OnceLock;
-
-    /// Where in [`super::render_system`] the callback runs.
-    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-    pub enum Phase {
-        SubmitStart,
-        SubmitEnd,
-        PresentStart,
-        PresentEnd,
-    }
-
-    static HOOK: OnceLock<fn(Phase)> = OnceLock::new();
-
-    /// Install the callback, once. `false` if one was already set.
-    pub fn set(hook: fn(Phase)) -> bool {
-        HOOK.set(hook).is_ok()
-    }
-
-    pub(crate) fn mark(phase: Phase) {
-        if let Some(hook) = HOOK.get() {
-            hook(phase);
-        }
-    }
 }

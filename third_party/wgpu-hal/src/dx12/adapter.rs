@@ -1034,12 +1034,8 @@ impl crate::Adapter for super::Adapter {
     ) -> Result<crate::OpenDevice<super::Api>, crate::DeviceError> {
         let queue: Direct3D12::ID3D12CommandQueue = {
             profiling::scope!("ID3D12Device::CreateCommandQueue");
-            // BENILLA: through the present interposer's proxy device, when there is one
-            // (`super::interposer`).
-            let device = super::interposer::upgraded(&self.device)
-                .unwrap_or_else(|| self.device.clone());
             unsafe {
-                device
+                self.device
                     .CreateCommandQueue(&Direct3D12::D3D12_COMMAND_QUEUE_DESC {
                         Type: Direct3D12::D3D12_COMMAND_LIST_TYPE_DIRECT,
                         Priority: Direct3D12::D3D12_COMMAND_QUEUE_PRIORITY_NORMAL.0,

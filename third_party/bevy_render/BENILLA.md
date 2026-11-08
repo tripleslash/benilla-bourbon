@@ -324,13 +324,6 @@ otherwise both are the plain `Instance::new` / `request_device`. The raw device 
 descriptor's `required_limits` rather than `adapter.limits()` (upstream dlss_wgpu 4.0.0 made the same
 fix in its own `request_device`).
 
-## The sixteenth delta: a frame-latency marker hook in `render_system`
-
-`renderer::present_hook::set(fn(Phase))` installs one callback that `render_system` runs before the
-render graph (`SubmitStart`), after the last submit (`SubmitEnd`) and around the window presents
-(`PresentStart`, `PresentEnd`). Streamline's PC Latency markers, which DLSS Frame Generation
-requires, are set there (`benilla-world/src/dlss/streamline.rs`). Unset, a `OnceLock` read per point.
-
 ## What this does NOT do
 
 It does not make the render app single-threaded, and it is not a general fix for "wgpu on a worker".
