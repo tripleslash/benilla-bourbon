@@ -110,8 +110,9 @@ impl HwCaps {
             } else {
                 0
             },
-            multiview_selective: features
-                .contains(WgpuFeatures::MULTIVIEW | WgpuFeatures::SELECTIVE_MULTIVIEW),
+            multiview_selective: features.contains(
+                WgpuFeatures::MULTIVIEW | WgpuFeatures::SELECTIVE_MULTIVIEW,
+            ),
         }
     }
 }
@@ -184,7 +185,8 @@ pub(crate) fn init(
     caps.mesh_shader &= emits_mesh_stages(adapter.0.backend);
     info!(
         "caps: binding_arrays={} mdi_count={} immediates={} ray_query={} conservative_raster={} \
-         async_compute={} mesh_shader={} multiview_views={} multiview_selective={} ({} on {:?})",
+         async_compute={} mesh_shader={} multiview_views={} multiview_selective={} \
+         ({} on {:?})",
         caps.binding_arrays,
         caps.mdi_count,
         caps.immediates,
@@ -248,20 +250,18 @@ mod tests {
         let mut limits = WgpuLimits::default();
         limits.max_multiview_view_count = 4;
         let none = HwCaps::from_parts(WgpuFeatures::empty(), &limits);
-        assert_eq!((none.multiview_views, none.multiview_selective), (0, false));
+        assert_eq!(none.multiview_views, 0);
+        assert!(!none.multiview_selective);
         let plain = HwCaps::from_parts(WgpuFeatures::MULTIVIEW, &limits);
-        let selective = HwCaps::from_parts(
-            WgpuFeatures::MULTIVIEW | WgpuFeatures::SELECTIVE_MULTIVIEW,
-            &limits,
-        );
+        let both = WgpuFeatures::MULTIVIEW | WgpuFeatures::SELECTIVE_MULTIVIEW;
+        let selective = HwCaps::from_parts(both, &limits);
         if cfg!(target_arch = "wasm32") {
             assert_eq!(plain, HwCaps::default());
         } else {
-            assert_eq!((plain.multiview_views, plain.multiview_selective), (4, false));
-            assert_eq!(
-                (selective.multiview_views, selective.multiview_selective),
-                (4, true)
-            );
+            assert_eq!(plain.multiview_views, 4);
+            assert!(!plain.multiview_selective);
+            assert_eq!(selective.multiview_views, 4);
+            assert!(selective.multiview_selective);
         }
     }
 
