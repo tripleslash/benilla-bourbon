@@ -531,3 +531,155 @@ pub(super) fn build(app: &mut App) {
                 .run_if(resource_exists::<GxMeshletLane>),
         );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::static_gx::meshlet::{
+        MESHLET_TRIANGLES, MESHLET_VERTICES, MESH_THREADS, TASK_MESHLETS, TASK_PAYLOAD_BYTES,
+    };
+
+    const MESH: &str = include_str!("../../shaders/modern/static_gx_mesh.wgsl");
+    const CULL: &str = include_str!("../../shaders/modern/gx_cull.wgsl");
+
+    /// The task and mesh stages are sized as the meshlets are cut, and the payload, modes and
+    /// immediates are the Rust side's.
+    #[test]
+    fn the_mesh_stages_agree_with_the_meshlets() {
+        for (what, line) in [
+            (
+                "task threads",
+                format!("const GX_TASK_MESHLETS: u32 = {TASK_MESHLETS}u;"),
+            ),
+            (
+                "mesh threads",
+                format!("const GX_MESH_THREADS: u32 = {MESH_THREADS}u;"),
+            ),
+            (
+                "the task workgroup",
+                format!("@task @payload(gx_payload) @workgroup_size({TASK_MESHLETS}, 1, 1)"),
+            ),
+            (
+                "the mesh workgroup",
+                format!("@payload(gx_payload) @workgroup_size({MESH_THREADS}, 1, 1)"),
+            ),
+            (
+                "the output vertices",
+                format!("array<GxVsOut, {MESHLET_VERTICES}>"),
+            ),
+            (
+                "the prepass output vertices",
+                format!("array<GxPrepassOut, {MESHLET_VERTICES}>"),
+            ),
+            (
+                "the output triangles",
+                format!("array<GxMeshPrimitive, {MESHLET_TRIANGLES}>"),
+            ),
+            (
+                "the payload's meshlets",
+                format!("meshlets: array<u32, {TASK_MESHLETS}>"),
+            ),
+            ("EARLY", format!("const GX_MODE_EARLY: u32 = {MODE_EARLY}u;")),
+            ("LATE", format!("const GX_MODE_LATE: u32 = {MODE_LATE}u;")),
+            (
+                "COLOUR",
+                format!("const GX_MODE_COLOUR: u32 = {MODE_COLOUR}u;"),
+            ),
+        ] {
+            assert!(MESH.contains(&line), "{what}: `{line}` is gone");
+        }
+        // One mesh thread a vertex, two triangles a thread at most.
+        const _: () =
+            assert!(MESHLET_TRIANGLES <= 2 * MESH_THREADS && MESHLET_VERTICES <= MESH_THREADS);
+        assert_eq!(TASK_PAYLOAD_BYTES, 144);
+        assert!(MESH.contains(
+            "    row: u32,\n    base_vertex: i32,\n    mode: u32,\n    pad: u32,\n    meshlets:"
+        ));
+        assert_eq!(IMMEDIATE_BYTES, 8);
+        assert!(MESH.contains("    first_arg: u32,\n    mode: u32,\n}"));
+        // The cull launches a task workgroup per `TASK_MESHLETS` and marks late draws the same.
+        assert!(CULL.contains(&format!("const TASK_MESHLETS: u32 = {TASK_MESHLETS}u;")));
+        assert!(CULL.contains("const LATE_DRAW: u32 = 0x80000000u;"));
+        assert!(MESH.contains("const GX_LATE_DRAW: u32 = 0x80000000u;"));
+        assert!(MESH_SOURCE.starts_with("enable wgpu_mesh_shader, draw_index;\n"));
+    }
+
+    /// The mesh group declares what `mesh_layout` lays out, and the cull's mesh variant the three
+    /// bindings after the cull's ten.
+    #[test]
+    fn the_mesh_group_agrees_with_its_layout() {
+        let bindings = MESH.matches("@group(#{GX_MESH_GROUP}) @binding(").count();
+        assert_eq!(bindings, mesh_layout().entries.len());
+        for i in 0..bindings {
+            assert!(MESH.contains(&format!("@group(#{{GX_MESH_GROUP}}) @binding({i})")));
+        }
+        for i in 10..13 {
+            assert!(CULL.contains(&format!("@group(0) @binding({i})")));
+        }
+    }
+
+    /// The mesh stage reads each attribute from the slab where the vertex layout puts it, and the
+    /// meshlet rows as `GxMeshlets` packs them.
+    #[test]
+    fn the_mesh_stage_reads_the_slab_and_the_rows_as_written() {
+        let layout = super::super::vertex_layout();
+        assert!(MESH.contains(&format!(
+            "const GX_VERTEX_WORDS: u32 = {}u;",
+            layout.array_stride / 4
+        )));
+        for a in &layout.attributes {
+            let word = a.offset / 4;
+            let read = match a.shader_location {
+                0 => format!("v.position = gx_slab_vec3(k, {word}u);"),
+                1 => format!("v.normal = gx_slab_vec3(k, {word}u);"),
+                2 => format!("v.uv = gx_slab_vec2(k, {word}u);"),
+                3 => format!("v.word = gx_slab_word(k, {word}u);"),
+                4 => format!("v.anchor = gx_slab_vec3(k, {word}u);"),
+                5 => format!("gx_slab_word(k, {word}u),\n"),
+                other => panic!("location {other} has no read in the mesh stage"),
+            };
+            assert!(MESH.contains(&read), "`{read}` is gone");
+        }
+        for line in [
+            "let vertices = head.z & 0xffu;",
+            "let triangles = head.z >> 8u;",
+            "gx_occlusion::backfacing(head.w, center, radius, v.eye.xyz)",
+            "let sphere = gx_meshlets[2u * m + 1u];",
+            "return vec3<u32>(c & 0xffu, (c >> 8u) & 0xffu, (c >> 16u) & 0xffu);",
+        ] {
+            assert!(MESH.contains(line), "`{line}` is gone");
+        }
+        let src = include_str!("../../shaders/static_gx.wgsl");
+        assert!(src.contains(
+            "#ifdef GX_MESHLETS\nfn gx_vertex(v: GxVertex) -> GxVsOut {\n#else\n@vertex\n\
+             fn vertex(v: GxVertex) -> GxVsOut {\n#endif\n"
+        ));
+        assert!(src.contains(
+            "#ifdef GX_MESHLETS\nfn gx_prepass_vertex(v: GxPrepassVertex) -> GxPrepassOut {\n\
+             #else\n@vertex\nfn prepass_vertex(v: GxPrepassVertex) -> GxPrepassOut {\n#endif\n"
+        ));
+    }
+
+    /// Three items of 2, 0 and 1 meshlets, assembled in the order 2, 0, 1 with 6, 10 and 0
+    /// indices: a draw over any run of them maps onto exactly their meshlets.
+    #[test]
+    fn a_draw_maps_onto_its_items_meshlets() {
+        let m = GxMeshlets {
+            rows: (0..3u32).flat_map(|k| [[k, 0, 0, 0], [0; 4]]).collect(),
+            vertices: Vec::new(),
+            triangles: Vec::new(),
+            items: vec![0, 2, 2, 3],
+        };
+        let order = [2, 0, 1];
+        let (rows, starts) = arrange(&m, &order);
+        let firsts: Vec<u32> = rows.iter().step_by(2).map(|r| r[0]).collect();
+        assert_eq!(firsts, vec![2, 0, 1], "item 2's meshlet, then item 0's two");
+        assert_eq!(starts, vec![0, 1, 3, 3]);
+        let ranges = [6..16, 16..16, 0..6];
+        let span = |first, count| span(&ranges, &order, &starts, first, count);
+        assert_eq!(span(0, 6), Some((0, 1)), "item 2 alone");
+        assert_eq!(span(6, 10), Some((1, 2)), "item 0 alone");
+        assert_eq!(span(0, 16), Some((0, 3)), "both, fused");
+        assert_eq!(span(16, 0), Some((3, 0)), "the empty item");
+    }
+}
