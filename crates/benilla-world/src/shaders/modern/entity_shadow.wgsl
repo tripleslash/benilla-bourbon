@@ -8,7 +8,17 @@ struct CasterView {
     // the `FIXTURE_CLIP` pipelines.
     clear: vec4<f32>,
 }
+#ifdef MULTIVIEW
+// fork: the multiview cascades (`static_gx/render/modern_shadow/multiview.rs`): one pass draws a
+// part into several cascade layers at once, each view reading its own layer's matrix. The view
+// index is the array layer (the mask's bit index on Vulkan and DX12), so row `i` is cascade `i`.
+struct MultiviewViews {
+    clip_from_world: array<mat4x4<f32>, 4>,
+}
+@group(0) @binding(0) var<uniform> views: MultiviewViews;
+#else
 @group(0) @binding(0) var<uniform> caster: CasterView;
+#endif
 
 struct EntityDraw {
     world_from_local: mat4x4<f32>,
@@ -57,6 +67,13 @@ struct PartVertex {
     @location(10) joint_indices: vec4<u32>,
     @location(11) joint_weights: vec4<f32>,
 #endif
+#ifdef MULTIVIEW
+    // fork: the layer this invocation draws, and the layers this part is culled into: the draw
+    // passes its view mask as its one instance (`first_instance`), and a view outside it gets
+    // nothing, exactly as the per-layer pass that would not have drawn it there.
+    @builtin(view_index) view_index: u32,
+    @builtin(instance_index) view_mask: u32,
+#endif
 }
 
 struct PartVsOut {
@@ -90,9 +107,20 @@ fn vertex(v: PartVertex) -> PartVsOut {
 #else
     let world = (part.world_from_local * vec4<f32>(v.position, 1.0)).xyz;
 #endif
+#ifdef MULTIVIEW
+    out.position = views.clip_from_world[v.view_index] * vec4<f32>(world, 1.0);
+#else
     out.position = caster.clip_from_world * vec4<f32>(world, 1.0);
+#endif
     // Pancake onto the near plane, as the other casters do.
     out.position.z = min(out.position.z, 1.0);
+#ifdef MULTIVIEW
+    // Every vertex of the part lands on one point outside the clip volume in a view it was not
+    // culled into: no triangle of it rasterizes there.
+    if ((v.view_mask >> v.view_index) & 1u) == 0u {
+        out.position = vec4<f32>(2.0, 2.0, 0.5, 1.0);
+    }
+#endif
 #ifdef CUTOUT
     out.uv = v.uv;
 #endif
