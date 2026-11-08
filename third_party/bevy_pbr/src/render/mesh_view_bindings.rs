@@ -246,6 +246,7 @@ fn layout_entries(
         irradiance_volume_entries,
         clustered_decal_entries,
         is_oit_supported,
+        view_stages,
     }: &MeshPipelineViewLayoutParams,
 ) -> [Vec<BindGroupLayoutEntry>; 2] {
     let mut entries = DynamicBindGroupLayoutEntries::new_with_indices(
@@ -254,7 +255,9 @@ fn layout_entries(
             // View
             (
                 0,
-                uniform_buffer::<ViewUniform>(true).visibility(ShaderStages::VERTEX_FRAGMENT),
+                // benilla fork (fifth delta): `view_stages`, the task and mesh stages too where
+                // the device has mesh shaders.
+                uniform_buffer::<ViewUniform>(true).visibility(view_stages),
             ),
             // Lights
             (1, uniform_buffer::<GpuLights>(true)),
@@ -527,6 +530,9 @@ struct MeshPipelineViewLayoutParams {
     irradiance_volume_entries: [BindGroupLayoutEntryBuilder; 2],
     clustered_decal_entries: Option<[BindGroupLayoutEntryBuilder; 3]>,
     is_oit_supported: bool,
+    /// benilla fork (fifth delta): the view uniform's stages: vertex and fragment, plus task and
+    /// mesh where the device has `EXPERIMENTAL_MESH_SHADER` (native only).
+    view_stages: ShaderStages,
 }
 
 /// Stores the view layouts entries for creating bind group layouts of pipeline keys.
@@ -544,6 +550,17 @@ pub fn init_mesh_pipeline_view_layouts(
         render_device.get_supported_read_only_binding_type(CLUSTERED_FORWARD_STORAGE_BUFFER_COUNT);
     let visibility_ranges_buffer_binding_type =
         render_device.get_supported_read_only_binding_type(VISIBILITY_RANGES_STORAGE_BUFFER_COUNT);
+    // benilla fork (fifth delta): a mesh-shader pipeline reads the view from its task and mesh
+    // stages, so the one view layout every pipeline shares names them where the device can.
+    let view_stages = if cfg!(not(target_arch = "wasm32"))
+        && render_device
+            .features()
+            .contains(WgpuFeatures::EXPERIMENTAL_MESH_SHADER)
+    {
+        ShaderStages::VERTEX_FRAGMENT | ShaderStages::TASK | ShaderStages::MESH
+    } else {
+        ShaderStages::VERTEX_FRAGMENT
+    };
 
     let res = MeshPipelineViewLayouts {
         params: Arc::new(MeshPipelineViewLayoutParams {
@@ -566,6 +583,7 @@ pub fn init_mesh_pipeline_view_layouts(
                 &render_device,
                 false,
             ),
+            view_stages,
         }),
     };
 

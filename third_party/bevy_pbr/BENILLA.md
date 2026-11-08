@@ -68,6 +68,19 @@ layout names, so a group bound past a shorter layout (every other material, and 
 session without the lane) is ignored; benilla inserts the resource only where the lane runs, on
 devices whose `max_bind_groups` reaches it. The prepass and shadow draw functions are untouched.
 
+## The fifth delta: the view uniform is visible to task and mesh stages where the device has them
+
+`src/render/mesh_view_bindings.rs`. benilla's static_gx mesh-shader lane (`benilla-world`
+`static_gx/render/meshlets.rs`, native, Vulkan) runs `static_gx.wgsl`'s vertex work in a mesh
+stage and its meshlet cull in a task stage, and both read `view` (group 0, binding 0) as the vertex
+stage does. A binding a stage reads must name that stage, so `MeshPipelineViewLayoutParams` gains
+`view_stages`, set by `init_mesh_pipeline_view_layouts` to `VERTEX_FRAGMENT | TASK | MESH` where the
+device has `Features::EXPERIMENTAL_MESH_SHADER` (never on wasm32), else `VERTEX_FRAGMENT` as
+upstream; `layout_entries` gives the view uniform that visibility. Every pipeline shares the one
+view layout, so on such a device every layout carries the two extra stages; no shader changes. The
+stages are legal only with the feature enabled, which `WgpuSettingsPriority::Functionality`
+requests wherever the adapter has it.
+
 ## Verifying against upstream
 
 ```sh
@@ -80,6 +93,7 @@ binding and the condition it joins, five lines in, one changed), one for `src/pr
 (two parameters, the view's colour cache lookup and the readiness check), one for
 `src/render/light.rs` (the `RecordDiagnostics` import and the span around the shadow phase), one
 for `src/material.rs` (the `DrawMaterial` row, `MaterialExtraBindGroup` and
-`SetMaterialExtraBindGroup`),
+`SetMaterialExtraBindGroup`), one for `src/render/mesh_view_bindings.rs` (`view_stages`: the
+field, its value in `init_mesh_pipeline_view_layouts`, the view uniform's visibility),
 `Only in third_party/bevy_pbr:
 BENILLA.md`, and `Only in <upstream>: .cargo_vcs_info.json`, `Cargo.lock`, `Cargo.toml.orig`.
