@@ -469,13 +469,16 @@
             "The graphics interface the game draws through. DirectX 12 is the default; Vulkan and "
             .. "OpenGL can help with a driver that misbehaves. One your system does not offer falls "
             .. "back to the best it does. Takes effect the next time the game starts."
-        -- fork: native GPU — `rayTracing`; 1.12 has no such box.
-        BENILLA_TOOLTIP_RAY_TRACING =
-            "Lets the Modern lighting model use your graphics card's ray-tracing hardware for "
-            .. "the lighting it can trace, such as the light bounced around the world. Turn it "
-            .. "off if it costs too much frame rate or misbehaves: the game then lights the world "
-            .. "the way it does on cards without ray tracing. Cards without it ignore this box. "
-            .. "Takes effect the next time the game starts."
+        -- fork: native GPU — `rayTracing`; 1.12 has no such box, and the web build, which has no
+        -- hardware ray tracing, defines none of it.
+        if ( BENILLA_NATIVE ) then
+            BENILLA_TOOLTIP_RAY_TRACING =
+                "Lets the Modern lighting model use your graphics card's ray-tracing hardware for "
+                .. "the lighting it can trace, such as the light bounced around the world. Turn it "
+                .. "off if it costs too much frame rate or misbehaves: the game then lights the "
+                .. "world the way it does on cards without ray tracing. Cards without it ignore "
+                .. "this box. Takes effect the next time the game starts."
+        end
         BENILLA_TOOLTIP_RENDER_SCALE =
             "Draws the 3D world at a fraction of the window's resolution, or larger than it. "
             .. "The interface is unaffected at any setting.\n\n"
@@ -4190,8 +4193,8 @@
             -- fork: desktop
             BENILLA_MULTISAMPLE = "Multisampling"
             BENILLA_GRAPHICS_API = "Graphics API"
-            -- fork: native GPU
-            BENILLA_RAY_TRACING = "Ray Tracing"
+            -- fork: native GPU — a native client's row only.
+            if ( BENILLA_NATIVE ) then BENILLA_RAY_TRACING = "Ray Tracing" end
             BENILLA_RENDER_SCALE = "Render Scale"
             -- fork: dlss (FORK.md)
             BENILLA_UPSCALER = "Upscaler"

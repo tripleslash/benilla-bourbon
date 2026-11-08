@@ -278,18 +278,20 @@ fn prepare_gi(
     }
     // fork: the voxel clipmap's two textures, or at the ray-traced tier, which builds none, the
     // stand-in that fills their slots.
-    let voxels = if rt {
-        let stub = frame
+    // Borrowed on the voxel path, exactly as before; the stand-in is touched only at the tier.
+    let stub = rt.then(|| {
+        frame
             .vox_stub
             .get_or_insert_with(|| vox_stub(&device))
-            .clone();
-        Some((stub.clone(), stub))
-    } else {
-        scene
+            .clone()
+    });
+    let voxels = match &stub {
+        Some(stub) => Some((stub, stub)),
+        None => scene
             .albedo
             .as_ref()
             .zip(scene.normal.as_ref())
-            .map(|(a, n)| (a.1.clone(), n.1.clone()))
+            .map(|(a, n)| (&a.1, &n.1)),
     };
     let inputs = (
         pipes.as_deref(),
@@ -426,8 +428,8 @@ fn prepare_gi(
             &shadow.texture_view,
             &shadow.sampler,
             light.0.as_entire_binding(),
-            &albedo,
-            &normal,
+            albedo,
+            normal,
             &height.1,
             uniform.as_entire_binding(),
             scratch.as_entire_binding(),
