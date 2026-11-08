@@ -4269,8 +4269,8 @@
                 cut.WINDOWED_MAXIMIZED = 1
             end
             -- Deviation: Turtle's Multisampling row lists GetMultisampleFormats' entries, the
-            -- first "1x", one sample, which is none; ours (below, native only) names it Off, as
-            -- our window's row does.
+            -- first "1x"; ours (below, native only) names it Off, because one sample is no
+            -- multisampling, as our window's row says.
             cut.MULTISAMPLE = 1
             for i = getn(GameOptions), 1, -1 do
                 local category = GameOptions[i]
