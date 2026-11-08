@@ -621,6 +621,12 @@ pub struct LightParams {
     /// where a ray-traced lamp shadow stops short of the lamp's own glass and frame
     /// (`rtshadow::fixture_entry`). Written on native only; the browser's rows stay padding.
     pub slot_clear: [Vec4; MAX_SHADOWED / 4],
+    /// fork: G — `spare` row 12, the ray-traced lanes the scene group serves this frame: `x` the
+    /// shadows (`shadow::rt_shadows`), `y` the water's reflections (`rt_reflect::rt_reflections`),
+    /// each 1 or 0. The group is bound live while either is, so a lane's shader code asks its own
+    /// lane here besides `rt_scene::live()`. Written in the render world (`node::prepare_lights`),
+    /// native only; zero elsewhere.
+    pub lanes: Vec4,
 }
 
 impl LightParams {
@@ -648,6 +654,7 @@ impl LightParams {
         for s in &self.slot_clear {
             row(*s);
         }
+        row(self.lanes);
         // `spare`: P7's per-zone local-light grading, and the padding that keeps the GI block's
         // probe offset 256-aligned.
         while out.len() - start < LIGHT_PARAM_BYTES {
@@ -726,6 +733,7 @@ pub fn params(lights: &ModernLights, shadow_map_size: u32) -> LightParams {
         slot_fade,
         slot_slack,
         slot_clear,
+        lanes: Vec4::ZERO,
     }
 }
 

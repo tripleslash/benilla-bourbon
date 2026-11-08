@@ -22,6 +22,9 @@ pub mod gi;
 pub mod lights;
 pub mod look;
 mod meter;
+// fork: G — the ray-traced water reflections and their Hi-Z march, native only.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod rt_reflect;
 // fork: F — the ray-traced shadows' render-world plumbing, native only.
 #[cfg(not(target_arch = "wasm32"))]
 mod rt_shadow;
@@ -399,6 +402,7 @@ impl Plugin for ModernLightingPlugin {
         app.add_plugins((
             ExtractResourcePlugin::<RayTracingSetting>::default(),
             rt_shadow::plugin,
+            rt_reflect::plugin,
         ));
     }
 }

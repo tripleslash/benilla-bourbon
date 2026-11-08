@@ -36,7 +36,7 @@ use crate::static_gx::rt_scene::{self, RtScene};
 
 /// `RenderStartup`, after the tier is decided: where the session may trace shadows, publish the
 /// scene's layout to the material lanes and give bevy_pbr's draw command the resource it binds.
-fn init_rt_shadows(mut commands: Commands) {
+pub(super) fn init_rt_shadows(mut commands: Commands) {
     if !super::shadow::rt_shadows_capable() {
         return;
     }
@@ -50,13 +50,17 @@ fn init_rt_shadows(mut commands: Commands) {
     );
 }
 
-/// Every frame: the scene's bind group while the lane is live, else its stand-in, where the
-/// material lanes' draws bind it. After `prepare_rt_scene` (`PrepareResources`), which builds both.
+/// Every frame: the scene's bind group while a lane that binds it here is live (these shadows, or
+/// the water's reflections, `super::rt_reflect`), else its stand-in, where the material lanes' draws
+/// bind it. Each lane's shader code asks its own row of the block (`light_spare[12]`) besides
+/// `rt_scene::live()`, and compiles only where its lane may run, so neither traces for the other.
+/// After `prepare_rt_scene` (`PrepareResources`), which builds both.
 fn bind_rt_shadows(scene: Option<Res<RtScene>>, extra: Option<ResMut<MaterialExtraBindGroup>>) {
     let (Some(scene), Some(mut extra)) = (scene, extra) else {
         return;
     };
-    let next = scene.lane_bind(super::shadow::rt_shadows());
+    let next =
+        scene.lane_bind(super::shadow::rt_shadows() || super::rt_reflect::rt_reflections());
     if extra.0.as_ref().map(|b| b.id()) != next.map(|b| b.id()) {
         extra.0 = next.cloned();
     }

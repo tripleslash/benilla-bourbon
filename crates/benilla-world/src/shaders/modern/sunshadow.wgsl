@@ -33,7 +33,9 @@ struct ModernBlock {
     light_shadow: array<vec4<f32>, 12>,
     // The padding that keeps the probe array behind this region 256-aligned. The REGION is 512 B
     // whatever P8 moved around inside it, which is why the probe offset did not shift a byte (the
-    // far-level row `LightGrid.far` came out of this padding: 15 rows became 14).
+    // far-level row `LightGrid.far` came out of this padding: 15 rows became 14). Rows 0-11 are the
+    // lamp slots' (`LightParams`); row 12 the ray-traced lanes this frame (x shadows, y the water's
+    // reflections), native only.
     light_spare: array<vec4<f32>, 14>,
     light_cells: array<vec4<u32>, 55296>,
     // P5: the probe field itself, last because it is the block's only runtime-sized member.

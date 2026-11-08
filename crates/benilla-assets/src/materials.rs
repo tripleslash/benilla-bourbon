@@ -69,6 +69,39 @@ fn push_rt_shadows(descriptor: &mut RenderPipelineDescriptor) {
     descriptor.layout.push(layout.clone());
 }
 
+/// fork: G — the same scene layout, published at render startup where the water may reflect by ray
+/// (`benilla_world::modern::rt_reflect`, native only); never set anywhere else.
+pub static RT_REFLECT_LAYOUT: std::sync::OnceLock<BindGroupLayoutDescriptor> =
+    std::sync::OnceLock::new();
+
+/// fork: F and G — the water's one scene group: declared where either the ray-traced shadows or the
+/// ray-traced reflections may run, as the group after the material's, with `RT_GROUP` naming it;
+/// `RT_SHADOWS` and `RT_REFLECT` each compile only where their own lane may run, so neither traces
+/// for the other. bevy_pbr's `DrawMaterial` binds `MaterialExtraBindGroup` there.
+fn push_rt_water(descriptor: &mut RenderPipelineDescriptor) {
+    let (shadows, reflect) = (RT_SHADOW_LAYOUT.get(), RT_REFLECT_LAYOUT.get());
+    let Some(layout) = shadows.or(reflect) else {
+        return;
+    };
+    if is_prepass(descriptor) {
+        return;
+    }
+    let Some(fragment) = descriptor.fragment.as_mut() else {
+        return;
+    };
+    let group = descriptor.layout.len() as u32;
+    if shadows.is_some() {
+        fragment.shader_defs.push("RT_SHADOWS".into());
+    }
+    if reflect.is_some() {
+        fragment.shader_defs.push("RT_REFLECT".into());
+    }
+    fragment
+        .shader_defs
+        .push(ShaderDefVal::UInt("RT_GROUP".into(), group));
+    descriptor.layout.push(layout.clone());
+}
+
 /// fork: is `descriptor` a depth-prepass pipeline (`benilla_world::entity_cull`)? Bevy's prepass
 /// specializes a material through the same `specialize` as its colour pass, and marks its own
 /// pipelines with this def.
@@ -922,8 +955,9 @@ impl MaterialExtension for LiquidCataExt {
             ds.bias.constant = 0;
         }
         // fork: F — the surface's and the bed's sun visibility by ray (the modern path is a runtime
-        // branch on this lane, so every pipeline declares the group where the lane runs).
-        push_rt_shadows(descriptor);
+        // branch on this lane, so every pipeline declares the group where the lane runs); G — the
+        // reflection by ray in the same group.
+        push_rt_water(descriptor);
         Ok(())
     }
 }

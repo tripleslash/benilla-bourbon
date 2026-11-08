@@ -119,6 +119,18 @@ fn prepare_lights(
         params.base.w = 0.0;
         params.misc.x = 0.0;
     }
+    // fork: G — the ray-traced lanes this frame, as `update_rt_tier` (`PrepareAssets`) decided them:
+    // the scene group is bound live while either is, and each lane's shader code asks its own here.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let lane = |on: bool| if on { 1.0 } else { 0.0 };
+        params.lanes = Vec4::new(
+            lane(crate::modern::shadow::rt_shadows()),
+            lane(crate::modern::rt_reflect::rt_reflections()),
+            0.0,
+            0.0,
+        );
+    }
     let mut bytes = Vec::with_capacity(LIGHT_PARAM_BYTES);
     params.std430(&mut bytes);
     if block.buffer.size() < LIGHT_OFFSET + BLOCK_LIGHT_BYTES as u64 {
