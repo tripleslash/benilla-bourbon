@@ -59,8 +59,7 @@ fn bind_rt_shadows(scene: Option<Res<RtScene>>, extra: Option<ResMut<MaterialExt
     let (Some(scene), Some(mut extra)) = (scene, extra) else {
         return;
     };
-    let next =
-        scene.lane_bind(super::shadow::rt_shadows() || super::rt_reflect::rt_reflections());
+    let next = scene.lane_bind(super::shadow::rt_shadows() || super::rt_reflect::rt_reflections());
     if extra.0.as_ref().map(|b| b.id()) != next.map(|b| b.id()) {
         extra.0 = next.cloned();
     }

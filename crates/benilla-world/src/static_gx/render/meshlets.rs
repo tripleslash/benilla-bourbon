@@ -47,9 +47,7 @@
 
 use super::batch::{GxBatch, GxIndirect};
 use super::bindless::{GxBindless, GxSlots};
-use super::gpu_cull::{
-    GpuCounters, GxCullPass, GxHiZ, CULL_UNIFORM_SIZE, KEEP_FRAMES, STATS_SIZE,
-};
+use super::gpu_cull::{GpuCounters, GxCullPass, GxHiZ, CULL_UNIFORM_SIZE, KEEP_FRAMES, STATS_SIZE};
 use super::{GxCellDraw, GxGpuCache, StaticGxView};
 use crate::modern::caps::HwCaps;
 use crate::par_encode::Recorder;
@@ -295,12 +293,9 @@ fn prepare_meshlets(
     let now = *frame;
     let meshlets = shared.as_deref().and_then(GxBindless::meshlet_buffers);
     let cull = indirect.cull_buffers();
-    let (Some(hiz), Some(m), Some(c), Some(mesh)) = (
-        hiz.as_deref(),
-        meshlets,
-        cull,
-        cull.and_then(|c| c.mesh),
-    ) else {
+    let (Some(hiz), Some(m), Some(c), Some(mesh)) =
+        (hiz.as_deref(), meshlets, cull, cull.and_then(|c| c.mesh))
+    else {
         return;
     };
     // Every slab a cached region draws from, once; a slab past the storage binding limit gets no
@@ -579,7 +574,10 @@ mod tests {
                 "the payload's meshlets",
                 format!("meshlets: array<u32, {TASK_MESHLETS}>"),
             ),
-            ("EARLY", format!("const GX_MODE_EARLY: u32 = {MODE_EARLY}u;")),
+            (
+                "EARLY",
+                format!("const GX_MODE_EARLY: u32 = {MODE_EARLY}u;"),
+            ),
             ("LATE", format!("const GX_MODE_LATE: u32 = {MODE_LATE}u;")),
             (
                 "COLOUR",

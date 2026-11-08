@@ -299,10 +299,7 @@ pub(crate) fn reflect_hiz_pass(
     mut render_context: RenderContext,
 ) {
     let _world_camera = view.into_inner();
-    if !world
-        .get_resource::<RtReflectLane>()
-        .is_some_and(|l| l.on)
-    {
+    if !world.get_resource::<RtReflectLane>().is_some_and(|l| l.on) {
         return;
     }
     let Some(hiz) = world.get_resource::<ReflectHiZ>() else {

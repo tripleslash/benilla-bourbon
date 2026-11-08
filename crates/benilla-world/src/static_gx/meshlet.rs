@@ -243,7 +243,9 @@ fn cone_of(normals: &[Vec3]) -> u32 {
         return pack_cone(Vec3::ZERO, NO_CONE);
     }
     let cutoff = (1.0 - mindp * mindp).max(0.0).sqrt();
-    let q = (axis * 127.0).round().clamp(Vec3::splat(-127.0), Vec3::splat(127.0));
+    let q = (axis * 127.0)
+        .round()
+        .clamp(Vec3::splat(-127.0), Vec3::splat(127.0));
     let err = (q / 127.0 - axis).abs();
     let cutoff = (127.0 * (cutoff + err.x + err.y + err.z)).ceil().min(127.0) as i8;
     pack_cone(q, cutoff)
@@ -323,7 +325,10 @@ mod tests {
                 }
             }
         }
-        assert_eq!(rebuilt, indices, "the meshlets' triangles are the index list");
+        assert_eq!(
+            rebuilt, indices,
+            "the meshlets' triangles are the index list"
+        );
         // The second item's meshlets start after the first's: no meshlet spans the two.
         let first_end = m.items[1] as usize;
         let tris_before: u32 = (0..first_end).map(|k| m.rows[2 * k][2] >> 8).sum();
@@ -346,7 +351,12 @@ mod tests {
         assert!(backfacing(cone, centre, r, centre - Vec3::Y * 50.0));
         assert!(!backfacing(cone, centre, r, centre + Vec3::Y * 50.0));
         let m = build(&positions, &indices, &[span(true)]);
-        assert!(!backfacing(m.rows[0][3], centre, r, centre - Vec3::Y * 50.0));
+        assert!(!backfacing(
+            m.rows[0][3],
+            centre,
+            r,
+            centre - Vec3::Y * 50.0
+        ));
     }
 
     /// A swaying meshlet's sphere grows by the wind's reach and drops its cone.

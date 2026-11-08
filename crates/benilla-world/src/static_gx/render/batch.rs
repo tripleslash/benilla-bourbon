@@ -428,10 +428,7 @@ pub(super) fn prepare_indirect(mut indirect: ResMut<GxIndirect>, device: Res<Ren
         return;
     }
     let GxIndirect {
-        args,
-        counts,
-        cull,
-        ..
+        args, counts, cull, ..
     } = &mut *indirect;
     args.grow(&device);
     counts.grow(&device);
@@ -760,7 +757,8 @@ impl<'w> GxBatch<'w> {
             let zeros: &[u8] = bytemuck::cast_slice(counts.as_slice());
             let counts_offset = u64::from(counts_start) * COUNT_SIZE;
             self.queue.write_buffer(counts_buffer, counts_offset, zeros);
-            self.queue.write_buffer(cull.late_counts, counts_offset, zeros);
+            self.queue
+                .write_buffer(cull.late_counts, counts_offset, zeros);
             self.cull_range = Some((args_start, args.len() as u32));
         } else {
             self.queue.write_buffer(
@@ -809,7 +807,12 @@ impl<'w> GxBatch<'w> {
     {
         let indirect: &'w GxIndirect = self.indirect;
         if let (Some(_), Some(cull)) = (self.cull_range, indirect.cull_buffers()) {
-            self.emit_from(pass, pipes, counter, Some((cull.late_args, cull.late_counts)));
+            self.emit_from(
+                pass,
+                pipes,
+                counter,
+                Some((cull.late_args, cull.late_counts)),
+            );
         }
     }
 
@@ -1203,7 +1206,8 @@ mod tests {
         let draws = vec![keyed(4, (6, 6)), keyed(3, (0, 6)), keyed(4, (12, 3))];
         let mut culled = draws.clone();
         sort_and_fuse(&mut culled, true);
-        let shape: Vec<(u16, u32, u32)> = culled.iter().map(|d| (d.key, d.first, d.count)).collect();
+        let shape: Vec<(u16, u32, u32)> =
+            culled.iter().map(|d| (d.key, d.first, d.count)).collect();
         assert_eq!(
             shape,
             vec![(3, 0, 6), (4, 6, 9)],

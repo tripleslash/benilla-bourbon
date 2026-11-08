@@ -102,12 +102,7 @@ pub(super) fn wanted(caps: Option<&HwCaps>, count: u32) -> [bool; MASKS.len()] {
 /// ([`holds_entities`]), as one selective mask where the device takes it, else the run of them
 /// from c0. A held layer redrawn whole this frame (re-centred) is outside the mask and draws all
 /// of its parts in its own pass.
-fn pick(
-    wanted: &[bool; MASKS.len()],
-    count: u32,
-    frame_no: u32,
-    selective: bool,
-) -> Option<usize> {
+fn pick(wanted: &[bool; MASKS.len()], count: u32, frame_no: u32, selective: bool) -> Option<usize> {
     let mut drawn = 0u32;
     for i in 0..(count as usize).min(MAX_CASCADES) {
         if !holds_entities(i, frame_no) {

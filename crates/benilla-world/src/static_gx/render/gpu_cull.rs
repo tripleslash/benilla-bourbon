@@ -178,8 +178,7 @@ impl GpuCounters {
     pub(super) fn copy(&self, encoder: &mut CommandEncoder) {
         let at = self.next.fetch_add(1, Ordering::Relaxed) % self.readback.len();
         let r = &self.readback[at];
-        if r
-            .state
+        if r.state
             .compare_exchange(FREE, COPIED, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
         {
@@ -460,10 +459,7 @@ fn init_gpu_cull(
     let target = || texture_storage_2d(TextureFormat::R32Float, StorageTextureAccess::WriteOnly);
     let reduce_layout = BindGroupLayoutDescriptor::new(
         "static_gx_hiz_reduce_layout",
-        &BindGroupLayoutEntries::sequential(
-            ShaderStages::COMPUTE,
-            (texture_depth_2d(), target()),
-        ),
+        &BindGroupLayoutEntries::sequential(ShaderStages::COMPUTE, (texture_depth_2d(), target())),
     );
     let reduce_ms_layout = BindGroupLayoutDescriptor::new(
         "static_gx_hiz_reduce_ms_layout",
@@ -996,7 +992,10 @@ mod tests {
     /// depth it reads.
     #[test]
     fn the_uniform_and_the_pyramid_agree_with_the_shaders() {
-        assert_eq!(CULL_UNIFORM_SIZE, 176, "CullView in gx_occlusion.wgsl is 176 bytes");
+        assert_eq!(
+            CULL_UNIFORM_SIZE, 176,
+            "CullView in gx_occlusion.wgsl is 176 bytes"
+        );
         let lib = include_str!("../../shaders/modern/gx_occlusion.wgsl");
         assert!(lib.contains(&format!("const PREV_VALID: u32 = {PREV_VALID}u;")));
         assert!(lib.contains(&format!("const STATS: u32 = {STATS}u;")));

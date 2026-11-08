@@ -546,7 +546,10 @@ impl GxBindless {
             .chunks_exact(2)
             .flat_map(|pair| {
                 let [v, t, counts, cone] = pair[0];
-                [[v + slots.vertex, t + slots.triangle, counts, cone], pair[1]]
+                [
+                    [v + slots.vertex, t + slots.triangle, counts, cone],
+                    pair[1],
+                ]
             })
             .collect();
         arena
@@ -722,7 +725,11 @@ mod tests {
         let group = Aabb::from_min_max(Vec3::ZERO, Vec3::ONE);
         let rows = key_rows(&region, &[(2, group)], 3);
         assert_eq!(rows.len(), 6, "two rows a key, keys 0..3");
-        assert_eq!(rows[0][0], 0.0f32.to_bits(), "key 0 takes the region's centre");
+        assert_eq!(
+            rows[0][0],
+            0.0f32.to_bits(),
+            "key 0 takes the region's centre"
+        );
         assert_eq!(rows[1][0], 10.0f32.to_bits(), "and its half-extent");
         assert_eq!(rows[4][0], 0.5f32.to_bits(), "key 2 its own centre");
         assert_eq!(rows[5][1], 0.5f32.to_bits(), "and its own half-extent");

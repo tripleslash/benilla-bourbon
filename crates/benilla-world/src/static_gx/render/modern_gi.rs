@@ -1298,6 +1298,10 @@ mod tests {
         // Stored as 16-bit unorm, it still decodes inside the trace's rounding margin.
         let stored = (ndc.z * 65535.0).round() / 65535.0;
         let height = clip.hf.y + stored * clip.hf.z;
-        assert!((height - p.y).abs() < 0.05 * HEIGHT_ROUNDING, "{height} vs {}", p.y);
+        assert!(
+            (height - p.y).abs() < 0.05 * HEIGHT_ROUNDING,
+            "{height} vs {}",
+            p.y
+        );
     }
 }

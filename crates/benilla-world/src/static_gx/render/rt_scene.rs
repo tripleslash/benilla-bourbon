@@ -1106,7 +1106,11 @@ fn geometry_size(
 fn blas_geometries(
     e: &RtEntry,
     first_index: u32,
-) -> (Vec<(BlasTriangleGeometrySizeDescriptor, u32)>, [u32; 2], u32) {
+) -> (
+    Vec<(BlasTriangleGeometrySizeDescriptor, u32)>,
+    [u32; 2],
+    u32,
+) {
     let (len, split, vertices) = (e.source.indices.1, e.split, e.source.vertices.1);
     let opaque = if e.hidden {
         AccelerationStructureGeometryFlags::empty()
@@ -1271,7 +1275,10 @@ fn update_rt_tier(
         );
     } else if live != tier.live && live {
         let (ms, frames) = tier.waiting_since.take().map_or((0.0, 0), |(at, from)| {
-            (at.elapsed().as_secs_f64() * 1000.0, frame.wrapping_sub(from))
+            (
+                at.elapsed().as_secs_f64() * 1000.0,
+                frame.wrapping_sub(from),
+            )
         });
         info!(
             "rt: switch at frame {frame}: requested on, effective on; the scene was ready {ms:.0} \
@@ -1327,8 +1334,7 @@ fn prepare_rt_scene(
     if !last.recorded.load(Ordering::Relaxed) {
         scene.requeue(last);
     }
-    let modern = benilla_assets::materials::MODERN_MODEL_PIPELINES
-        .load(Ordering::Relaxed);
+    let modern = benilla_assets::materials::MODERN_MODEL_PIPELINES.load(Ordering::Relaxed);
     let map_clear = gx.cells.is_empty() && gx.wmos.is_empty() && gx.props.is_empty();
     let shared = match shared {
         Some(shared) if modern && !map_clear => shared,
@@ -1366,10 +1372,9 @@ fn prepare_rt_scene(
         let (Some(draw), GxRegionBinds::Shared(slots)) = (draw, &gpu.binds) else {
             continue;
         };
-        let (Some(mesh), Some(vslice)) = (
-            meshes.get(gpu.mesh),
-            allocator.mesh_vertex_slice(&gpu.mesh),
-        ) else {
+        let (Some(mesh), Some(vslice)) =
+            (meshes.get(gpu.mesh), allocator.mesh_vertex_slice(&gpu.mesh))
+        else {
             continue;
         };
         let Some(layout) = mesh_vertex_words(mesh) else {
@@ -1646,10 +1651,7 @@ pub(super) fn build(render_app: &mut SubApp) {
             init_rt_scene.after(crate::modern::caps::init),
         )
         // The levels are decided before anything in the frame reads them.
-        .add_systems(
-            Render,
-            update_rt_tier.in_set(RenderSystems::PrepareAssets),
-        )
+        .add_systems(Render, update_rt_tier.in_set(RenderSystems::PrepareAssets))
         .add_systems(
             Render,
             prepare_rt_scene
@@ -1693,10 +1695,7 @@ mod tests {
         let repack = include_str!("../../shaders/modern/rt_repack.wgsl");
         assert!(repack.contains(&format!("const ATTRIBUTE_WORDS: u32 = {ATTRIBUTE_WORDS}u;")));
         assert!(repack.contains(&format!("@workgroup_size({REPACK_GROUP})")));
-        assert!(repack.contains(&format!(
-            "const ROW: u32 = {}u;",
-            REPACK_ROW * REPACK_GROUP
-        )));
+        assert!(repack.contains(&format!("const ROW: u32 = {}u;", REPACK_ROW * REPACK_GROUP)));
     }
 
     fn entry(len: u32, split: u32, hidden: bool) -> RtEntry {

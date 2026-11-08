@@ -176,9 +176,7 @@ pub fn rt_froxel_capable() -> bool {
     {
         static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         crate::static_gx::rt_scene::capable()
-            && *CELL.get_or_init(|| {
-                crate::launch_env::var("WOW_RT_FROXEL").as_deref() != Some("0")
-            })
+            && *CELL.get_or_init(|| crate::launch_env::var("WOW_RT_FROXEL").as_deref() != Some("0"))
     }
     #[cfg(target_arch = "wasm32")]
     {
