@@ -74,6 +74,12 @@ async-executor = { path = "third_party/async-executor" }
 # `&RenderDevice`/`&RenderQueue` into `scope.spawn`. The fork reroutes those two through a serial
 # scope on that target alone. `third_party/bevy_render/BENILLA.md` has the diff.
 bevy_render = { path = "third_party/bevy_render" }
+# bevy_pbr 0.19.1, patched for ONE condition in `mesh_preprocess.wgsl`: GPU occlusion culling never
+# culls a `NoFrustumCulling` mesh. Upstream tests every mesh's AABB against the depth pyramid, and a
+# `NoFrustumCulling` mesh's box is the infinite stand-in (NaN corners) or a box its draw leaves (a
+# skinned rig's bind pose), so dress, gear and particles could vanish behind nothing.
+# `third_party/bevy_pbr/BENILLA.md` has the diff.
+bevy_pbr = { path = "third_party/bevy_pbr" }
 # bevy_winit 0.19.1, forked for three pieces of per-frame state its runner rebuilt on every call: a
 # `world.query` on each window event (`RedrawRequested` is one a frame), the focus `SystemState` in
 # `redraw_requested`, and the monitor `SystemState` in `about_to_wait`. A fresh query state scans every
