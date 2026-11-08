@@ -15,6 +15,12 @@
 //! shader translation emits task and mesh stages: naga 29 writes them to SPIR-V only (its HLSL
 //! backend lists no `MESH_SHADER` capability), so DX12 and Metal never claim it.
 //!
+//! [`HwCaps::multiview_views`] and [`HwCaps::multiview_selective`] are what the multiview shadow
+//! cascades need (`static_gx/render/modern_shadow/multiview.rs`): wgpu's `MULTIVIEW` with its view
+//! limit, and `SELECTIVE_MULTIVIEW` for a mask that skips a layer. On Vulkan and DX12 a vertex
+//! stage's `@builtin(view_index)` is the array layer, the mask's bit index (wgpu-hal DX12 lists a
+//! view instance location for every layer up to the mask's highest bit).
+//!
 //! [`alloc_floor`] is the native allocation tier: the floor a native lane's self-growing buffer
 //! opens at, sized against [`HwCaps::buffer_bytes`] instead of the floor the lane began with.
 
@@ -59,6 +65,12 @@ pub struct HwCaps {
     /// groups, [`MESH_STORAGE_BUFFERS`] storage buffers a stage, and a backend naga writes mesh
     /// stages for (Vulkan; `init` clears it elsewhere).
     pub mesh_shader: bool,
+    /// The most views a multiview render pass may span (`Limits::max_multiview_view_count`),
+    /// 0 without `MULTIVIEW`. A pass over array layers `0..n` with the mask `2^n - 1` needs `n`.
+    pub multiview_views: u32,
+    /// `MULTIVIEW` and `SELECTIVE_MULTIVIEW`: a multiview mask may leave layers of the attachment
+    /// out (Vulkan and DX12; wgpu does not expose it on Metal).
+    pub multiview_selective: bool,
 }
 
 /// Storage buffers per shader stage the meshlet lane binds at most: the mesh-variant GPU cull's
@@ -93,6 +105,13 @@ impl HwCaps {
                 .max_storage_buffer_binding_size
                 .min(limits.max_buffer_size),
             mesh_shader: mesh_shader_capable(features, limits),
+            multiview_views: if features.contains(WgpuFeatures::MULTIVIEW) {
+                limits.max_multiview_view_count
+            } else {
+                0
+            },
+            multiview_selective: features
+                .contains(WgpuFeatures::MULTIVIEW | WgpuFeatures::SELECTIVE_MULTIVIEW),
         }
     }
 }
@@ -165,7 +184,7 @@ pub(crate) fn init(
     caps.mesh_shader &= emits_mesh_stages(adapter.0.backend);
     info!(
         "caps: binding_arrays={} mdi_count={} immediates={} ray_query={} conservative_raster={} \
-         async_compute={} mesh_shader={} ({} on {:?})",
+         async_compute={} mesh_shader={} multiview_views={} multiview_selective={} ({} on {:?})",
         caps.binding_arrays,
         caps.mdi_count,
         caps.immediates,
@@ -173,6 +192,8 @@ pub(crate) fn init(
         caps.conservative_raster,
         caps.async_compute,
         caps.mesh_shader,
+        caps.multiview_views,
+        caps.multiview_selective,
         adapter.0.name,
         adapter.0.backend,
     );
@@ -219,6 +240,29 @@ mod tests {
         );
         let count_only = WgpuFeatures::MULTI_DRAW_INDIRECT_COUNT;
         assert!(!HwCaps::from_parts(count_only, &limits).mdi_count);
+    }
+
+    /// Multiview counts views only with the feature; a selective mask needs both features.
+    #[test]
+    fn multiview_needs_its_feature() {
+        let mut limits = WgpuLimits::default();
+        limits.max_multiview_view_count = 4;
+        let none = HwCaps::from_parts(WgpuFeatures::empty(), &limits);
+        assert_eq!((none.multiview_views, none.multiview_selective), (0, false));
+        let plain = HwCaps::from_parts(WgpuFeatures::MULTIVIEW, &limits);
+        let selective = HwCaps::from_parts(
+            WgpuFeatures::MULTIVIEW | WgpuFeatures::SELECTIVE_MULTIVIEW,
+            &limits,
+        );
+        if cfg!(target_arch = "wasm32") {
+            assert_eq!(plain, HwCaps::default());
+        } else {
+            assert_eq!((plain.multiview_views, plain.multiview_selective), (4, false));
+            assert_eq!(
+                (selective.multiview_views, selective.multiview_selective),
+                (4, true)
+            );
+        }
     }
 
     /// The mesh-shader capability needs the feature set and every limit of the meshlet format;
