@@ -293,9 +293,16 @@ struct PassSums {
     seen: Option<bevy::platform::time::Instant>,
 }
 
-/// fork: perf — the timed passes `modern::async_compute` puts on the async queue.
+/// fork: perf — the timed passes `modern::async_compute` puts on the async queue: the light
+/// binning, and the probe GI's classify, trace and blend where the trace runs there
+/// (`modern::gi::node::async_trace`; `WOW_ASYNC_GI=0` is their control).
 fn on_async_queue(pass: &str) -> bool {
     pass.starts_with("modern_light_bin")
+        || (crate::modern::gi::node::async_trace()
+            && matches!(
+                pass,
+                "modern_gi_classify" | "modern_gi_trace" | "modern_gi_trace_rt" | "modern_gi_blend"
+            ))
 }
 
 impl PassSums {

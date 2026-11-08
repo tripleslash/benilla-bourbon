@@ -297,7 +297,9 @@ fn light_bin_pass_async(
 
 /// fork: perf — with the binning on the async queue, its grid copied into the block's light region
 /// on the main queue, after the shadow raster and the probe trace and before the froxels and the
-/// main pass, the first readers of the cells. Every world material binds the block, and wgpu orders
+/// main pass, the first readers of the cells. The probe trace on the async queue
+/// (`gi::node::gi_trace_pass_async`) comes after it instead, so it reads this frame's cells and its
+/// read of the block never meets this write. Every world material binds the block, and wgpu orders
 /// the two queues per buffer, not per range: the binning writing the block itself made the shadow
 /// raster and the probe trace wait for it. The flush in front submits those first, so only the
 /// copy's submission waits. It runs only with the queue (`build`'s run condition).
