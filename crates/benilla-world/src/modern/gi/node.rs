@@ -44,12 +44,15 @@ struct GiPipelines {
     trace: CachedComputePipelineId,
     sum: CachedComputePipelineId,
     blend: CachedComputePipelineId,
-    /// fork: the ray stage as a ray query against the ray-traced scene (`gi_trace_rt.wgsl`), in
-    /// place of `trace` where [`super::rt_gi`] holds; `None` otherwise.
+    /// fork: the ray stage as a ray query against the ray-traced scene (`gi_trace_rt.wgsl`), queued
+    /// where the session may trace probes ([`super::rt_gi_capable`]) and used in place of `trace`
+    /// in a frame [`super::rt_gi`] holds; `None` otherwise.
     rt_trace: Option<CachedComputePipelineId>,
     /// fork: F — the voxel path's `trace` declares the scene at group 1 for its hits' sun term
-    /// (`RT_SHADOWS`): the ray-traced shadows run while the probe rays do not
-    /// (`$WOW_RT_GI=0`), and the cascades no longer hold the static world.
+    /// (`RT_SHADOWS`) wherever the session may trace shadows
+    /// (`modern::shadow::rt_shadows_capable`): the voxel trace runs whenever the probe rays are not
+    /// live, and it is bound the scene while the shadows are (`$WOW_RT_GI=0`; the cascades then hold
+    /// no static world) and the stand-in otherwise, on which `rtshadow` reads the cascades alone.
     voxel_rt: bool,
 }
 
@@ -84,6 +87,12 @@ struct GiFrame {
     /// fork: a 1x1x1 stand-in for the voxel clipmap's two textures, which the ray-traced tier never
     /// builds: the trace's group 0 still has their slots, and only the voxel stage reads them.
     vox_stub: Option<TextureView>,
+    /// fork: last frame's [`super::rt_gi`]; a switch cuts the field ([`Self::cut_frames`]), so no
+    /// probe keeps light the other path traced.
+    rt_was: Option<bool>,
+    /// fork: frames still to trace as a cut (every probe traced and replaced, as after a teleport):
+    /// one probe period from a switch of the ray stage.
+    cut_frames: u32,
     /// Workgroups of the classify pass: one thread per probe of the tier.
     groups: u32,
 }
@@ -167,10 +176,11 @@ fn init_pipelines(
         "embedded://benilla_world/shaders/modern/gi_trace.wgsl",
         "setup_probes",
     );
-    // fork: F — the voxel path's hits take their sun through the scene where the ray-traced
-    // shadows run without the ray-traced probes (native only).
+    // fork: F — the voxel path's hits take their sun through the scene, where the session may trace
+    // shadows: a frame whose probe rays are not ray queries runs this trace, live shadows or not
+    // (native only).
     #[cfg(not(target_arch = "wasm32"))]
-    let voxel_rt = crate::modern::shadow::rt_shadows() && !super::rt_gi();
+    let voxel_rt = crate::modern::shadow::rt_shadows_capable();
     #[cfg(target_arch = "wasm32")]
     let voxel_rt = false;
     #[cfg(not(target_arch = "wasm32"))]
@@ -213,12 +223,14 @@ fn init_pipelines(
         "embedded://benilla_world/shaders/modern/gi_blend.wgsl",
         "blend_probes",
     );
-    // fork: the ray-query stage, over the same group 0 plus the scene at group 1 (native only).
+    // fork: the ray-query stage, over the same group 0 plus the scene at group 1, queued beside the
+    // voxel one so a switch picks between two compiled pipelines (native only).
     #[cfg(not(target_arch = "wasm32"))]
-    let rt_trace = super::rt_gi().then(|| {
+    let rt_trace = super::rt_gi_capable().then(|| {
         let mut shader_defs = crate::static_gx::rt_scene::shader_defs(1);
-        // fork: F — the hits' sun through the scene too, where the cascades hold entities alone.
-        if crate::modern::shadow::rt_shadows() {
+        // fork: F — the hits' sun through the scene too, where the cascades hold entities alone
+        // (this pipeline runs only on a live scene, so the shadows are live with it).
+        if crate::modern::shadow::rt_shadows_capable() {
             shader_defs.push(bevy::shader::ShaderDefVal::from("RT_SHADOWS"));
         }
         pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
@@ -234,7 +246,10 @@ fn init_pipelines(
     #[cfg(target_arch = "wasm32")]
     let rt_trace: Option<CachedComputePipelineId> = None;
     if rt_trace.is_some() {
-        info!("modern GI: probe rays are ray queries against the TLAS (WOW_RT_GI=0 turns it off)");
+        info!(
+            "modern GI: probe rays are ray queries against the TLAS while ray tracing is live \
+             (WOW_RT_GI=0 turns it off)"
+        );
     }
     commands.insert_resource(GiPipelines {
         classify_layout,
@@ -278,9 +293,15 @@ fn prepare_gi(
         return;
     };
     let modern = active.is_some_and(|a| a.is_modern());
-    // fork: the ray-traced trace ([`super::rt_gi`]) casts against the scene's TLAS, whose bind
-    // group exists once the TLAS holds an instance (`RtScene::bind_group`).
+    // fork: the ray-traced trace ([`super::rt_gi`], this frame's decision) casts against the
+    // scene's TLAS, whose bind group exists once the TLAS holds an instance (`RtScene::bind_group`).
     let rt = super::rt_gi();
+    // fork: a switch of the ray stage, either way, cuts the field for a probe period: every probe
+    // is traced again on the new path and replaces its history, as after a teleport.
+    if frame.rt_was.is_some_and(|was| was != rt) {
+        frame.cut_frames = gi.tier.period.max(1);
+    }
+    frame.rt_was = Some(rt);
     #[cfg(not(target_arch = "wasm32"))]
     let rt_bind = rt
         .then(|| rt_scene.as_deref().and_then(|s| s.bind_group().cloned()))
@@ -362,7 +383,11 @@ fn prepare_gi(
         return;
     }
 
-    let uniform_bytes = super::trace_bytes(&gi, &params, &scene.clip);
+    // fork: the switch's cut rides the teleport's (`ModernGi::cut`).
+    let mut traced = *gi;
+    traced.cut |= frame.cut_frames > 0;
+    frame.cut_frames = frame.cut_frames.saturating_sub(1);
+    let uniform_bytes = super::trace_bytes(&traced, &params, &scene.clip);
     let uniform = match &frame.uniform {
         Some(b) if b.size() >= uniform_bytes.len() as u64 => b.clone(),
         _ => {
@@ -493,13 +518,13 @@ fn prepare_gi(
         )),
     ));
     frame.rt_bind = rt_bind;
-    // fork: F — the voxel path's scene for its hits' sun term (the stand-in until the TLAS holds an
-    // instance: the rays then miss, as the scene's own would).
+    // fork: F — the voxel path's scene for its hits' sun term while the shadows are live, else the
+    // stand-in, on which `rtshadow` reads the cascades alone (they hold the static world again).
     #[cfg(not(target_arch = "wasm32"))]
     if pipes.voxel_rt {
         frame.shadow_bind = rt_scene
             .as_deref()
-            .and_then(|s| s.bind_group_or_stub().cloned());
+            .and_then(|s| s.lane_bind(crate::modern::shadow::rt_shadows()).cloned());
     }
     frame.groups = (probes as u32).div_ceil(64);
     bevy::log::info_once!(

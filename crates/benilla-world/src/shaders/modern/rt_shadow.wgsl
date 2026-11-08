@@ -8,6 +8,9 @@ enable wgpu_ray_query;
 //
 // A receiver calls the twin of the `sunshadow` / `locallight` function it called before, under
 // `#ifdef RT_SHADOWS`; its pipeline binds the scene at `RT_GROUP` (`rt_scene::shader_defs`). The
+// pipeline is the same whether the ray tracing is on or off: each twin asks `rt_scene::live()`
+// first, and on the stand-in (the option off, or the scene not ready yet: `RtScene::lane_bind`) it
+// returns exactly what the original returns, with the maps holding the static casters again. The
 // importer declares no ray-query type itself, so it needs no `enable` of its own: the composer's
 // header for this module carries the scene's acceleration structure, and the directive with it.
 //
@@ -145,6 +148,9 @@ fn sun_visibility(
     lite: bool,
     to_sun: vec3<f32>,
 ) -> f32 {
+    if (!rt_scene::live()) {
+        return sunshadow::sun_visibility(map, samp, c, world_pos, normal, view_distance, lite);
+    }
     // No cascades this frame is no modern shadow this frame, as `sunshadow` reads it.
     if (u32(c.params.x) == 0u) {
         return 1.0;
@@ -174,6 +180,9 @@ fn sun_visibility_anywhere(
     world_pos: vec3<f32>,
     to_sun: vec3<f32>,
 ) -> f32 {
+    if (!rt_scene::live()) {
+        return sunshadow::sun_visibility_anywhere(map, samp, c, world_pos);
+    }
     let count = u32(c.params.x);
     if (count == 0u) {
         return 1.0;
@@ -203,6 +212,9 @@ fn sun_visibility_fast(
     view_distance: f32,
     to_sun: vec3<f32>,
 ) -> f32 {
+    if (!rt_scene::live()) {
+        return sunshadow::sun_visibility_fast(map, samp, c, world_pos, view_distance);
+    }
     let count = u32(c.params.x);
     if (count == 0u) {
         return 1.0;
@@ -223,10 +235,11 @@ fn sun_visibility_fast(
 }
 
 // One ray's share alone (the water, whose cascade read `sunshadow::sun_visibility_load` already
-// fades to lit past the cascades): 1 with no cascades this frame, as every `sunshadow` read.
-// `world_pos` is already lifted.
+// fades to lit past the cascades): 1 with no cascades this frame, as every `sunshadow` read, and 1
+// off the scene (the cascades then hold the static casters themselves). `world_pos` is already
+// lifted.
 fn sun_visibility_ray(c: sunshadow::ModernCascades, world_pos: vec3<f32>, to_sun: vec3<f32>) -> f32 {
-    if (u32(c.params.x) == 0u) {
+    if (!rt_scene::live() || u32(c.params.x) == 0u) {
         return 1.0;
     }
     return sun_ray(world_pos, to_sun);
@@ -275,7 +288,7 @@ fn lamp_ray(origin: vec3<f32>, aim: vec3<f32>, light: vec3<f32>, clear: f32, nea
 // A lamp's visibility at a receiver through the static world and the terrain. `taps > 1` (the
 // tier's soft filter): four rays toward a ring at 0.7 of the emitter's radius `emitter` across the
 // light, two first as the sun's; else the one ray to the light. A zero `normal` (a froxel) starts at
-// the point itself.
+// the point itself. 1 off the scene.
 fn lamp_rays(
     p: vec3<f32>,
     normal: vec3<f32>,
@@ -285,6 +298,9 @@ fn lamp_rays(
     emitter: f32,
     taps: u32,
 ) -> f32 {
+    if (!rt_scene::live()) {
+        return 1.0;
+    }
     let to = light - p;
     let dist = length(to);
     if (dist <= near) {
@@ -326,6 +342,9 @@ fn local_visibility(
     near: f32,
     fade: f32,
 ) -> f32 {
+    if (!rt_scene::live()) {
+        return locallight::local_visibility(map, samp, g, slot, anchor, world_pos, normal, near, fade);
+    }
     if (slot >= locallight::MAX_SHADOWED || !locallight::atlas_live(g) || fade <= 0.0) {
         return 1.0;
     }

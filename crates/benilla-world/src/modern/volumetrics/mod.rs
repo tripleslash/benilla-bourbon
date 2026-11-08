@@ -53,6 +53,9 @@ pub const BLOCK_TAIL_BYTES: usize = FOG_BYTES + CLOUD_CELLS * CLOUD_CELLS * 4;
 /// Offset of `alloc.w` (the mode) inside the tail — the render world downgrades a froxel frame to
 /// analytic there while the compute passes are not ready.
 pub(crate) const MODE_OFFSET: usize = 3 * 64 + 3 * 16 + 12;
+/// fork: offset of `medium.w` (the scatter's history weight, 0 = a cut) inside the tail — the render
+/// world cuts the history there on the frame the froxel rays switch (`node::prepare_froxels`).
+pub(crate) const HISTORY_OFFSET: usize = 3 * 64 + 5 * 16 + 12;
 
 /// The integrated volume's allocation: the largest grid the platform's tiers use. A tier writes and
 /// reads its own corner of it, so a quality change never re-creates the texture the materials bind.
@@ -146,17 +149,33 @@ pub struct FroxelTier {
     pub shafts: f32,
 }
 
-/// fork: F — **the froxel rays' lane**: at the ray-traced tier (native,
-/// `rt_scene::tier_active()`), unless `$WOW_RT_FROXEL=0`, the scatter pass takes the sun's
-/// visibility per froxel as a ray query times the cascade tap, and each shadowed lamp's as a ray
-/// to it (`froxel_scatter.wgsl` under `RT_FROXEL`, span `modern_froxel_scatter_rt`). Independent of
-/// [`crate::modern::shadow::rt_shadows`]; `$WOW_RT=0` turns both off. Fixed for the session once
-/// render startup ran (false before).
+/// fork: F — **the froxel rays' lane, this frame**: the ray tracing is live (`rt_scene::live()`:
+/// native, capable, the `rayTracing` option on and the scene ready) and the session may trace froxels
+/// ([`rt_froxel_capable`]). Then the scatter pass takes the sun's visibility per froxel as a ray
+/// query times the cascade tap, and each shadowed lamp's as a ray to it (`froxel_scatter.wgsl`
+/// under `RT_FROXEL`, span `modern_froxel_scatter_rt`). Independent of
+/// [`crate::modern::shadow::rt_shadows`]. Per frame: both scatter pipelines are queued at startup
+/// and `prepare_froxels` picks one, dropping the volume's history on a switch. False before render
+/// startup.
 pub fn rt_froxel() -> bool {
     #[cfg(not(target_arch = "wasm32"))]
     {
+        crate::static_gx::rt_scene::live() && rt_froxel_capable()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
+}
+
+/// fork: **may this session trace its froxels by ray at all?** Capable of ray tracing
+/// (`rt_scene::capable()`) and `$WOW_RT_FROXEL=0` did not turn the lane off (read once): the
+/// `modern_froxel_scatter_rt` pipeline is queued where it holds.
+pub fn rt_froxel_capable() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
         static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        crate::static_gx::rt_scene::tier_active()
+        crate::static_gx::rt_scene::capable()
             && *CELL.get_or_init(|| {
                 crate::launch_env::var("WOW_RT_FROXEL").as_deref() != Some("0")
             })

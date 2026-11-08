@@ -46,6 +46,17 @@ const MASK_ALL: u32 = 15u;
 const NO_GEOMETRY: u32 = 2u;
 const HEADER_ROWS: u32 = 3u;
 const ATTRIBUTE_WORDS: u32 = 5u;
+// The stand-in's instance rows (`rt_scene.rs` STUB_MARK): bound in place of the scene whenever the
+// importer's lane is not live this frame.
+const STUB_MARK: u32 = 0xffffffffu;
+
+// Is the bound group the scene, live this frame (`RtScene::lane_bind`)? False on the stand-in, whose
+// instance row 0 carries the mark; a real scene's row 0 is a slot's kind (or never written, 0). One
+// uniform load: a receiver that declares the scene for the whole session takes its raster path when
+// this is false, so the ray tracing switches at run time without a pipeline of its own.
+fn live() -> bool {
+    return rt_instances[0].x != STUB_MARK;
+}
 
 // static_gx's vertex word bits (`static_gx/mod.rs` WORD_*).
 const WORD_WRAP_X: u32 = 65536u;

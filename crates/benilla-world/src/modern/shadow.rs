@@ -84,17 +84,36 @@ pub fn local_shadow_layers(quality: LightingQuality) -> usize {
     }
 }
 
-/// fork: F — **the ray-traced shadows' lane**: at the ray-traced tier (native,
-/// `rt_scene::tier_active()`), unless `$WOW_RT_SHADOWS=0`, the sun's and the shadowed lamps'
+/// fork: F — **the ray-traced shadows' lane, this frame**: the ray tracing is live
+/// (`rt_scene::live()`: native, capable, the `rayTracing` option on and the scene ready) and the
+/// session may trace shadows ([`rt_shadows_capable`]). Then the sun's and the shadowed lamps'
 /// visibility through the static world and the terrain is a ray query in every receiver
 /// (`benilla_modern::rtshadow`), the cascades draw the entity casters alone (the sky map keeps its
-/// static ones) and the lamp atlas holds no static face. `$WOW_RT=0` turns the tier, and this with
-/// it, off. Fixed for the session once render startup ran (false before).
+/// static ones) and the lamp atlas holds no static face. A per-frame decision: every reader in the
+/// render world sees one value a frame (`rt_scene::update_rt_tier`, `PrepareAssets`), and a switch
+/// redraws the cascades and the atlas with or without their static casters at once
+/// (`static_gx::render::modern_shadow`). False before render startup.
 pub fn rt_shadows() -> bool {
     #[cfg(not(target_arch = "wasm32"))]
     {
+        crate::static_gx::rt_scene::live() && rt_shadows_capable()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
+}
+
+/// fork: **may this session trace shadows at all?** Capable of ray tracing
+/// (`rt_scene::capable()`, fixed at render startup) and `$WOW_RT_SHADOWS=0` did not turn the lane
+/// off (read once). Where it holds, every modern receiver's pipeline compiles `RT_SHADOWS` and
+/// declares the scene for the whole session, and picks the ray or the map path per frame from the
+/// group it is bound ([`rt_shadows`], `RtScene::lane_bind`), so a switch never re-specializes.
+pub fn rt_shadows_capable() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
         static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        crate::static_gx::rt_scene::tier_active()
+        crate::static_gx::rt_scene::capable()
             && *CELL.get_or_init(|| {
                 crate::launch_env::var("WOW_RT_SHADOWS").as_deref() != Some("0")
             })

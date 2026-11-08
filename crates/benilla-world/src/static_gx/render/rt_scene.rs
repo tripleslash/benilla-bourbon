@@ -6,13 +6,35 @@
 //! assembled, read through their blocks of the bindless region table and index arena
 //! (`bindless.rs`), plus the resident terrain cells (`modern::shadow::ModernTerrainCasters`).
 //!
-//! # The tier
+//! # The tier: capable, enabled, live
 //!
-//! On where [`HwCaps::ray_query`] holds and static_gx draws bindless (`bindless::enabled`), unless
-//! `WOW_RT=0`; decided once at render startup ([`RtTier`], [`tier_active`]). The scene is kept
-//! only in a modern-lighting frame: a classic frame drops it, so the classic path pays nothing.
-//! While the tier runs, the regions the camera has not drawn are assembled too, a few a frame
-//! ([`assemble_unseen`]), so the scene holds every streamed region, not only those seen so far.
+//! Three levels, each implying the one before ([`RtTier`]):
+//!
+//! - **capable** ([`capable`]): [`HwCaps::ray_query`] holds, static_gx draws bindless
+//!   (`bindless::enabled`), and `WOW_RT=0` did not turn it off. Decided once at render startup;
+//!   [`RtScene`] exists exactly where it holds, and every pipeline that can trace declares the
+//!   scene for the whole session, so nothing re-specializes on a switch.
+//! - **enabled** ([`enabled`]): capable, and the `rayTracing` option
+//!   ([`crate::modern::RayTracingSetting`], extracted every frame) is on. Read each frame. While it
+//!   holds, the scene is built and kept; when it drops, every BLAS, the TLAS, the arenas and the
+//!   scratch are freed ([`RtScene::free_all`]).
+//! - **live** ([`live`]): enabled, and the scene is ready ([`RtScene::update_ready`]): every region
+//!   static_gx holds and every resident terrain cell has its BLAS, nothing the camera has not drawn
+//!   is still waiting to be assembled, and the TLAS holds them, for [`READY_FRAMES`] frames in a
+//!   row. Once live, streaming does not drop it: only an empty scene, or more entries waiting than
+//!   built, sends the lanes back to raster. The ray-traced lanes (`modern::gi::rt_gi`,
+//!   `modern::shadow::rt_shadows`, `modern::volumetrics::rt_froxel`) key on it, per frame.
+//!
+//! The three are decided once a frame, in `PrepareAssets` ([`update_rt_tier`]), before anything
+//! reads them, so every pass of a frame agrees. A pass that declares the scene binds
+//! [`RtScene::lane_bind`]: the scene while its lane is live, else the stand-in, whose marked
+//! instance row tells the WGSL library it is not (`rt_scene::live`), so the receivers take their
+//! raster path in the same pipeline.
+//!
+//! The scene is kept only in a modern-lighting frame: a classic frame drops it, so the classic path
+//! pays nothing. While enabled, the regions the camera has not drawn are assembled too, a few a
+//! frame ([`assemble_unseen`]), so the scene holds every streamed region, not only those seen so
+//! far.
 //!
 //! # What is built, and when
 //!
@@ -56,7 +78,8 @@
 //! ([`shader_defs`]).
 
 use std::num::NonZero;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::Instant;
 
 use bevy::app::SubApp;
 use bevy::mesh::MeshVertexAttributeId;
@@ -102,27 +125,63 @@ const MAX_SLOTS: u32 = 1 << 24;
 const REPACK_GROUP: u32 = 64;
 const REPACK_ROW: u32 = 65535;
 
-/// The tier's decision, for readers outside the render world (the water's mirror camera).
-static TIER: AtomicBool = AtomicBool::new(false);
+/// Frames in a row the scene must be complete before the lanes go live (the hysteresis's rising
+/// edge; the falling one is [`RtScene::update_ready`]'s loose test).
+const READY_FRAMES: u32 = 8;
+/// Frames in a row with every entry built but regions still unassembled after which the scene
+/// counts as ready anyway: a region whose mesh never reaches the slab must not hold the lanes off.
+const READY_GRACE: u32 = 300;
+/// The stand-in's instance rows (`rt_scene.wgsl`'s `STUB_MARK`): a kind no entry has, which the
+/// library reads as "this is not the scene" (`rt_scene::live`). Keep in sync.
+const STUB_MARK: u32 = u32::MAX;
 
-/// Whether this session runs the ray-traced tier. False until render startup has decided.
-pub(crate) fn tier_active() -> bool {
-    TIER.load(Ordering::Relaxed)
+/// The levels' decisions, for readers in any world ([`capable`], [`enabled`], [`live`]); written once
+/// a frame by [`update_rt_tier`] (and `CAPABLE` once at startup).
+static CAPABLE: AtomicBool = AtomicBool::new(false);
+static ENABLED: AtomicBool = AtomicBool::new(false);
+static LIVE: AtomicBool = AtomicBool::new(false);
+/// Regions the camera has not drawn still waiting to be assembled, as [`assemble_unseen`] left
+/// them this frame: part of the scene's readiness.
+static UNSEEN_BACKLOG: AtomicU32 = AtomicU32::new(0);
+
+/// Whether this session can ray-trace at all (the module header's first level). Fixed once render
+/// startup ran; false before.
+pub(crate) fn capable() -> bool {
+    CAPABLE.load(Ordering::Relaxed)
+}
+
+/// Capable, and the `rayTracing` option on this frame: the scene is (being) built.
+pub(crate) fn enabled() -> bool {
+    ENABLED.load(Ordering::Relaxed)
+}
+
+/// Enabled, and the scene ready this frame: the ray-traced lanes trace. Per frame; outside the
+/// render world, the render world's latest decision.
+pub(crate) fn live() -> bool {
+    LIVE.load(Ordering::Relaxed)
 }
 
 /// The device can (ray queries, and static_gx bindless, whose table and arena the scene reads),
 /// and `WOW_RT=0` did not turn it off. Never on wasm32 (the module is native only).
-fn enabled(caps: Option<&HwCaps>) -> bool {
+fn capable_on(caps: Option<&HwCaps>) -> bool {
     caps.is_some_and(|c| c.ray_query)
         && bindless::enabled(caps)
         && crate::launch_env::var("WOW_RT").as_deref() != Some("0")
 }
 
-/// The ray-traced tier's decision, in the render world from render startup on. The lanes that
-/// trace key on it; [`RtScene`] is present exactly when `active`.
-#[derive(Resource, Clone, Copy, Debug)]
+/// The ray-traced tier's three levels (the module header), in the render world from render
+/// startup on: `capable` fixed, `enabled` and `live` decided each frame by [`update_rt_tier`].
+/// [`RtScene`] is present exactly when `capable`.
+#[derive(Resource, Clone, Copy, Debug, Default)]
 pub(crate) struct RtTier {
-    pub active: bool,
+    pub capable: bool,
+    pub enabled: bool,
+    pub live: bool,
+    /// Render frames since startup: the switch lines' clock.
+    pub frame: u32,
+    /// When the lanes started waiting for a ready scene (the option came on, or a live scene fell
+    /// back), as (instant, frame): what the line at the next going-live measures.
+    waiting_since: Option<(Instant, u32)>,
 }
 
 /// The scene's bind group layout (the module header has the table).
@@ -279,7 +338,8 @@ struct BindKey {
     classes: u32,
 }
 
-/// The ray-traced scene. Present in the render world exactly while [`RtTier::active`].
+/// The ray-traced scene. Present in the render world exactly while [`RtTier::capable`]; holds
+/// entries, structures and arenas only while [`RtTier::enabled`].
 #[derive(Resource)]
 pub(crate) struct RtScene {
     layout: BindGroupLayoutDescriptor,
@@ -312,11 +372,35 @@ pub(crate) struct RtScene {
     bound: Option<BindKey>,
     /// Entries were waiting at the last frame's end: the settled line is due when none are.
     was_pending: bool,
-    /// fork: F — the stand-in bind group ([`Self::bind_group_or_stub`]) over an empty TLAS, built
+    /// fork: F — the stand-in bind group ([`Self::lane_bind`]) over an empty TLAS, built
     /// once, and what it holds (kept beside it, never read).
     stub: Option<BindGroup>,
     #[allow(dead_code)]
     stub_parts: Option<(Tlas, Buffer)>,
+    /// The scene is ready for the lanes ([`Self::update_ready`]): what makes [`RtTier::live`].
+    ready: bool,
+    /// Frames in a row every entry has been built ([`Self::update_ready`]'s rising edge).
+    complete_frames: u32,
+}
+
+/// The hit attributes' arena, empty.
+fn attribute_arena() -> GrowBuffer {
+    GrowBuffer::new(
+        "rt_attributes",
+        BufferUsages::STORAGE,
+        u64::from(ATTRIBUTE_WORDS) * 4,
+        MIN_ATTRIBUTES,
+    )
+}
+
+/// The terrain cells' index arena, empty.
+fn terrain_arena() -> GrowBuffer {
+    GrowBuffer::new(
+        "rt_terrain_indices",
+        BufferUsages::STORAGE | BufferUsages::BLAS_INPUT,
+        4,
+        MIN_TERRAIN_INDICES,
+    )
 }
 
 fn create_tlas(device: &RenderDevice, max_instances: u32) -> Tlas {
@@ -343,25 +427,17 @@ impl RtScene {
             entries: HashMap::default(),
             free_slots: Vec::new(),
             next_slot: 0,
-            tlas: create_tlas(device, MIN_INSTANCES),
+            // One instance until the first build grows it (`ensure_tlas`): a session that starts
+            // with the option off holds no TLAS memory to speak of.
+            tlas: create_tlas(device, 1),
             tlas_generation: 0,
             built: 0,
             instances: Vec::new(),
             instance_buffer: None,
             dirty_slots: Vec::new(),
-            attributes: GrowBuffer::new(
-                "rt_attributes",
-                BufferUsages::STORAGE,
-                u64::from(ATTRIBUTE_WORDS) * 4,
-                MIN_ATTRIBUTES,
-            ),
+            attributes: attribute_arena(),
             attribute_alloc: RangeAlloc::default(),
-            terrain_indices: GrowBuffer::new(
-                "rt_terrain_indices",
-                BufferUsages::STORAGE | BufferUsages::BLAS_INPUT,
-                4,
-                MIN_TERRAIN_INDICES,
-            ),
+            terrain_indices: terrain_arena(),
             terrain_alloc: RangeAlloc::default(),
             scratch: None,
             scratch_bytes: 0,
@@ -373,28 +449,36 @@ impl RtScene {
             was_pending: false,
             stub: None,
             stub_parts: None,
+            ready: false,
+            complete_frames: 0,
         }
     }
 
     /// The scene's bind group ([`layout`]), once the TLAS holds an instance. [`rt_scene_pass`]
-    /// (re)builds that TLAS in the same frame, so a pass binding it orders after that pass.
+    /// (re)builds that TLAS in the same frame, so a pass binding it orders after that pass. A lane
+    /// that may only trace a ready scene takes [`Self::lane_bind`] instead.
     #[allow(dead_code)] // the ray-traced lanes' interface
     pub(crate) fn bind_group(&self) -> Option<&BindGroup> {
         self.bind.as_ref()
     }
 
-    /// fork: F — [`Self::bind_group`], or where it does not exist (no instance yet, a classic frame,
-    /// a map change) the stand-in: an empty TLAS that every ray misses, one-row buffers and the
-    /// pool's white class in every texture slot. For the pipelines that declare the scene for the
-    /// whole session whether or not it is ready — the ray-traced shadows' receivers
-    /// (`modern::rt_shadow`) — which must bind something at every draw. `None` only before the
-    /// first [`prepare_rt_scene`].
-    pub(crate) fn bind_group_or_stub(&self) -> Option<&BindGroup> {
-        self.bind.as_ref().or(self.stub.as_ref())
+    /// The group a pipeline that declares the scene for the whole session binds this frame: the
+    /// scene while its lane is `live` (and the scene's group exists), else the stand-in — an empty
+    /// TLAS every ray misses, one-row buffers holding [`STUB_MARK`] (so `rt_scene::live()` is false
+    /// in the shader and the receivers take their raster path) and the pool's white class in every
+    /// texture slot. Binding never changes a pipeline, so a switch costs no specialization. `None`
+    /// only before the first [`prepare_rt_scene`].
+    pub(crate) fn lane_bind(&self, live: bool) -> Option<&BindGroup> {
+        if live {
+            self.bind.as_ref().or(self.stub.as_ref())
+        } else {
+            self.stub.as_ref()
+        }
     }
 
     /// fork: F — build the stand-in once. Its TLAS is built here, empty, and submitted at once, so
-    /// any pass that binds it later is recorded after its build (wgpu refuses an unbuilt TLAS).
+    /// any pass that binds it later is recorded after its build (wgpu refuses an unbuilt TLAS). Its
+    /// rows hold [`STUB_MARK`]: the library's `live()` reads instance row 0.
     fn ensure_stub(
         &mut self,
         pool: &mut GxTexturePool,
@@ -407,13 +491,12 @@ impl RtScene {
             return;
         }
         let tlas = create_tlas(device, 1);
-        // One row is all a shader's runtime-sized arrays need to bind; nothing ever reads it, as no
-        // ray hits.
-        let rows = device.create_buffer(&BufferDescriptor {
+        // One row is all a shader's runtime-sized arrays need to bind; no ray hits, so only
+        // `rt_scene::live()` reads it: instance row 0's kind, the mark.
+        let rows = device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("rt_stub_rows"),
-            size: 64,
+            contents: bytemuck::cast_slice(&[STUB_MARK; 16]),
             usage: BufferUsages::STORAGE,
-            mapped_at_creation: false,
         });
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("rt_stub_tlas"),
@@ -451,8 +534,11 @@ impl RtScene {
         self.entries.values().filter(|e| e.blas.is_none()).count()
     }
 
-    /// Drop every entry: a classic frame, or a map change. The buffers and the TLAS stay.
+    /// Drop every entry: a classic frame, or a map change. The buffers and the TLAS stay. The lanes
+    /// go back to raster until the scene is ready again.
     fn clear(&mut self) {
+        self.ready = false;
+        self.complete_frames = 0;
         if self.entries.is_empty() && self.built == 0 {
             return;
         }
@@ -471,6 +557,67 @@ impl RtScene {
         self.bind = None;
         self.bound = None;
         self.was_pending = false;
+    }
+
+    /// The `rayTracing` option is off: drop every entry and free the memory the scene holds — every
+    /// BLAS (with its entry and its TLAS instance), the TLAS (replaced by a one-instance one, grown
+    /// again on the first build), the instance table, the attribute and terrain-index arenas, the
+    /// scratch and the repack jobs. Only the stand-in stays. Dropping a handle while a submitted
+    /// frame still uses the object is safe: wgpu-core keeps it alive until that submission is done.
+    fn free_all(&mut self, device: &RenderDevice) {
+        self.clear();
+        let holds = self.tlas.get().len() > 1
+            || self.instance_buffer.is_some()
+            || self.scratch.is_some()
+            || self.attributes.buffer().is_some()
+            || self.terrain_indices.buffer().is_some();
+        if !holds {
+            return;
+        }
+        let freed = self.attributes.bytes() + self.scratch_bytes;
+        self.tlas = create_tlas(device, 1);
+        self.tlas_generation += 1;
+        self.instances = Vec::new();
+        self.instance_buffer = None;
+        self.attributes = attribute_arena();
+        self.terrain_indices = terrain_arena();
+        self.scratch = None;
+        self.scratch_bytes = 0;
+        self.repack_jobs = DynamicUniformBuffer::default();
+        self.frame = RtFrame::default();
+        info!(
+            "rt_scene: freed every BLAS, the TLAS, the arenas and the scratch ({:.1} MiB of \
+             attributes and scratch besides the structures)",
+            freed as f64 / (1024.0 * 1024.0)
+        );
+    }
+
+    /// The scene's readiness for the lanes, once a frame after the plan, with hysteresis. Rising:
+    /// no entry waits for its BLAS, no region the camera has not drawn waits to be assembled
+    /// ([`UNSEEN_BACKLOG`]; after [`READY_GRACE`] frames of nothing else missing it is let go), the
+    /// TLAS holds an instance and its bind group exists — for [`READY_FRAMES`] frames in a row, so
+    /// the builds the last plan made have been recorded. Falling (while ready): the scene is empty,
+    /// or more entries wait than are built (a teleport, a burst far larger than the scene). A cell
+    /// streaming in while ready only waits its turn: the lanes stay on rays, as the far geometry a
+    /// ray misses for a frame or two is what the raster path's own streaming shows too.
+    fn update_ready(&mut self) {
+        let pending = self.entries.values().filter(|e| e.blas.is_none()).count();
+        let built = self.built as usize;
+        if self.ready {
+            if built == 0 || self.bind.is_none() || pending > built {
+                self.ready = false;
+                self.complete_frames = 0;
+            }
+            return;
+        }
+        if pending > 0 || built == 0 || self.bind.is_none() {
+            self.complete_frames = 0;
+            return;
+        }
+        self.complete_frames = self.complete_frames.saturating_add(1);
+        let assembled = UNSEEN_BACKLOG.load(Ordering::Relaxed) == 0;
+        self.ready = (assembled && self.complete_frames >= READY_FRAMES)
+            || self.complete_frames >= READY_GRACE;
     }
 
     /// Keep `key` if its source and layout stand; else free the old entry and add a waiting one,
@@ -1041,8 +1188,8 @@ fn mesh_vertex_words(mesh: &RenderMesh) -> Option<VertexLayout> {
     })
 }
 
-/// `RenderStartup`: decide the tier, and set the scene up where it runs. A lane's startup system
-/// that reads [`RtTier`] orders after this.
+/// `RenderStartup`: decide whether the session is capable, and set the scene up where it is. A
+/// lane's startup system that reads [`RtTier`] or [`capable`] orders after this.
 pub(crate) fn init_rt_scene(
     mut commands: Commands,
     caps: Option<Res<HwCaps>>,
@@ -1050,10 +1197,13 @@ pub(crate) fn init_rt_scene(
     asset_server: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
 ) {
-    let active = enabled(caps.as_deref());
-    TIER.store(active, Ordering::Relaxed);
-    commands.insert_resource(RtTier { active });
-    if !active {
+    let capable = capable_on(caps.as_deref());
+    CAPABLE.store(capable, Ordering::Relaxed);
+    commands.insert_resource(RtTier {
+        capable,
+        ..default()
+    });
+    if !capable {
         return;
     }
     let repack_layout = BindGroupLayoutDescriptor::new(
@@ -1080,14 +1230,74 @@ pub(crate) fn init_rt_scene(
         .and_then(|v| v.parse::<u32>().ok())
         .filter(|&b| b > 0)
         .unwrap_or(DEFAULT_BUDGET);
-    info!("rt_scene: ray-traced tier on, {budget} triangles a frame (WOW_RT=0 turns it off)");
+    info!(
+        "rt_scene: ray tracing capable, {budget} triangles a frame; the rayTracing option switches \
+         it at run time (WOW_RT=0 turns it off for the session)"
+    );
     commands.insert_resource(RtScene::new(&device, repack_layout, repack, budget));
 }
 
-/// Diff the scene against the regions and cells, plan this frame's builds, and keep the bind
-/// group current. After `prepare_static_gx`, whose assemblies and evictions it reads.
+/// `PrepareAssets`, first thing each frame: decide [`RtTier::enabled`] (capable and the
+/// `rayTracing` option) and [`RtTier::live`] (enabled and the scene ready as the last frame left
+/// it), publish both for every world ([`enabled`], [`live`]), and log one line at each switch: the
+/// requested and the effective state, the frame, and at a going-live how long the scene took.
+fn update_rt_tier(
+    setting: Option<Res<crate::modern::RayTracingSetting>>,
+    tier: Option<ResMut<RtTier>>,
+    scene: Option<Res<RtScene>>,
+) {
+    let Some(mut tier) = tier else {
+        return;
+    };
+    tier.frame = tier.frame.wrapping_add(1);
+    let frame = tier.frame;
+    let requested = setting.is_none_or(|s| s.0);
+    let enabled = tier.capable && requested;
+    let scene = scene.as_deref();
+    let live = enabled && scene.is_some_and(|s| s.ready);
+    let on_off = |b: bool| if b { "on" } else { "off" };
+    if enabled != tier.enabled && !enabled {
+        tier.waiting_since = None;
+        info!(
+            "rt: switch at frame {frame}: requested off, effective off (was {}); the lanes are on \
+             raster and the scene is freed",
+            on_off(tier.live)
+        );
+    } else if enabled != tier.enabled {
+        tier.waiting_since = Some((Instant::now(), frame));
+        info!(
+            "rt: switch at frame {frame}: requested on, effective off until the scene is ready \
+             (built nearest the camera first, WOW_RT_BUDGET triangles a frame)"
+        );
+    } else if live != tier.live && live {
+        let (ms, frames) = tier.waiting_since.take().map_or((0.0, 0), |(at, from)| {
+            (at.elapsed().as_secs_f64() * 1000.0, frame.wrapping_sub(from))
+        });
+        info!(
+            "rt: switch at frame {frame}: requested on, effective on; the scene was ready {ms:.0} \
+             ms ({frames} frames) after the lanes asked for it, {} entries",
+            scene.map_or(0, |s| s.entries.len())
+        );
+    } else if live != tier.live {
+        tier.waiting_since = Some((Instant::now(), frame));
+        info!(
+            "rt: switch at frame {frame}: requested on, effective off; the scene is not ready (a \
+             classic frame, a map change, or more waiting than built), the lanes are on raster \
+             until it is"
+        );
+    }
+    tier.enabled = enabled;
+    tier.live = live;
+    ENABLED.store(enabled, Ordering::Relaxed);
+    LIVE.store(live, Ordering::Relaxed);
+}
+
+/// Diff the scene against the regions and cells, plan this frame's builds, keep the bind group
+/// current and judge the scene's readiness. With the option off, free it all instead. After
+/// `prepare_static_gx`, whose assemblies and evictions it reads.
 #[allow(clippy::too_many_arguments)]
 fn prepare_rt_scene(
+    tier: Res<RtTier>,
     scene: ResMut<RtScene>,
     gx: Res<GxWorld>,
     cache: Res<GxGpuCache>,
@@ -1105,9 +1315,15 @@ fn prepare_rt_scene(
     // `WOW_GX_PERF`: counted in static_gx's `prepare=`, the phase it extends.
     let _t = crate::static_gx::gx_perf_guard(3);
     let scene = scene.into_inner();
-    // fork: F — before any early return: the stand-in is what a classic frame binds too.
+    // fork: F — before any early return: the stand-in is what a classic frame binds too, and every
+    // frame the lanes are not live.
     scene.ensure_stub(&mut pool, &pipes, &pipeline_cache, &device, &queue);
     let last = std::mem::take(&mut scene.frame);
+    // The option is off: nothing is built or kept, and `assemble_unseen` does not run.
+    if !tier.enabled {
+        scene.free_all(&device);
+        return;
+    }
     if !last.recorded.load(Ordering::Relaxed) {
         scene.requeue(last);
     }
@@ -1121,8 +1337,10 @@ fn prepare_rt_scene(
             return;
         }
     };
-    // No region placed yet this map: there is no arena to bind.
+    // No region placed yet this map: there is no arena to bind, and nothing ready.
     let Some(arena) = shared.index_buffer().cloned() else {
+        scene.ready = false;
+        scene.complete_frames = 0;
         return;
     };
     scene.frame_no = scene.frame_no.wrapping_add(1);
@@ -1233,6 +1451,7 @@ fn prepare_rt_scene(
     queue.submit([copies.finish()]);
     scene.refresh_bind(&shared, &mut pool, &pipes, &pipeline_cache, &device, &queue);
     scene.log_settled(&device);
+    scene.update_ready();
 }
 
 /// Record this frame's builds: the raw copies, the attribute repack (span `modern_rt_repack`), the
@@ -1318,9 +1537,10 @@ pub(crate) fn rt_scene_pass(
     }
 }
 
-/// While the tier runs, assemble up to [`UNSEEN_BUDGET`] regions a frame that the camera has not
-/// drawn (or whose held-back textures arrived out of view), so the scene holds every streamed
-/// region. Called by `prepare_static_gx` after the visible regions, into the same `copies`.
+/// While the tier is enabled, assemble up to [`UNSEEN_BUDGET`] regions a frame that the camera has
+/// not drawn (or whose held-back textures arrived out of view), so the scene holds every streamed
+/// region. Called by `prepare_static_gx` after the visible regions, into the same `copies`. The
+/// regions still not held after it ([`UNSEEN_BACKLOG`]) hold the scene's readiness back.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn assemble_unseen(
     gx: &GxWorld,
@@ -1347,6 +1567,7 @@ pub(super) fn assemble_unseen(
         copies,
         budget: UNSEEN_BUDGET,
         placed: false,
+        backlog: 0,
     };
     assembly.unseen(&gx.cells, &mut cache.cells);
     assembly.unseen(&gx.wmos, &mut cache.wmos);
@@ -1354,6 +1575,7 @@ pub(super) fn assemble_unseen(
     if assembly.placed {
         cache.rev += 1;
     }
+    UNSEEN_BACKLOG.store(assembly.backlog, Ordering::Relaxed);
 }
 
 /// [`assemble_region`]'s inputs, carried across the three region maps.
@@ -1369,6 +1591,9 @@ struct Assembly<'a> {
     copies: &'a mut CommandEncoder,
     budget: u32,
     placed: bool,
+    /// Regions not held at all and left for a later frame (past the budget, or not assemblable
+    /// yet): what [`UNSEEN_BACKLOG`] publishes.
+    backlog: u32,
 }
 
 impl Assembly<'_> {
@@ -1378,13 +1603,15 @@ impl Assembly<'_> {
         held: &mut HashMap<K, GxCellGpu>,
     ) {
         for (key, draw) in drawn {
-            if self.budget == 0 {
-                return;
+            let current = held.get(key);
+            if current.is_some_and(|g| !g.wants_reassembly(self.images)) {
+                continue;
             }
-            if held
-                .get(key)
-                .is_some_and(|g| !g.wants_reassembly(self.images))
-            {
+            // A held region waiting for a texture is in the scene already; only a missing one
+            // counts against readiness.
+            let missing = current.is_none();
+            if self.budget == 0 {
+                self.backlog += u32::from(missing);
                 continue;
             }
             self.budget -= 1;
@@ -1400,6 +1627,7 @@ impl Assembly<'_> {
                 self.allocator,
                 self.copies,
             ) else {
+                self.backlog += u32::from(missing);
                 continue;
             };
             if let Some(old) = held.insert(*key, gpu) {
@@ -1417,12 +1645,17 @@ pub(super) fn build(render_app: &mut SubApp) {
             bevy::render::RenderStartup,
             init_rt_scene.after(crate::modern::caps::init),
         )
+        // The levels are decided before anything in the frame reads them.
+        .add_systems(
+            Render,
+            update_rt_tier.in_set(RenderSystems::PrepareAssets),
+        )
         .add_systems(
             Render,
             prepare_rt_scene
                 .in_set(RenderSystems::PrepareResources)
                 .after(prepare_static_gx)
-                .run_if(|tier: Option<Res<RtTier>>| tier.is_some_and(|t| t.active)),
+                .run_if(|tier: Option<Res<RtTier>>| tier.is_some_and(|t| t.capable)),
         )
         .add_systems(Core3d, rt_scene_pass.before(Core3dSystems::MainPass));
 }
@@ -1440,6 +1673,7 @@ mod tests {
         )));
         assert!(lib.contains(&format!("const ATTRIBUTE_WORDS: u32 = {ATTRIBUTE_WORDS}u;")));
         assert!(lib.contains(&format!("const NO_GEOMETRY: u32 = {NO_GEOMETRY}u;")));
+        assert!(lib.contains(&format!("const STUB_MARK: u32 = {STUB_MARK:#x}u;")));
         assert!(lib.contains(&format!(
             "const HEADER_ROWS: u32 = {}u;",
             bindless::HEADER_ROWS

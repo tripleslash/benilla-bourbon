@@ -171,6 +171,20 @@ impl Default for LightingSettings {
     }
 }
 
+/// fork: native GPU — the `rayTracing` option: may the ray-traced lanes run? Written by
+/// `benilla-app`'s CVar callback, extracted to the render world every frame (native only), where
+/// `static_gx::rt_scene::update_rt_tier` turns it into the frame's `enabled` and `live` levels; a
+/// switch takes effect within a few frames, no restart. Default on, the registered default. Has no
+/// effect where the session cannot ray-trace, and none on the web build.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, ExtractResource)]
+pub struct RayTracingSetting(pub bool);
+
+impl Default for RayTracingSetting {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
 /// What this world session actually renders with.
 ///
 /// fork: the MODEL is **live** in the world, like the tier: a flip re-keys every model and terrain
@@ -379,8 +393,13 @@ impl Plugin for ModernLightingPlugin {
                 lights::plugin,
                 weather::plugin,
             ));
+        // fork: native GPU — the `rayTracing` option, read by the render world each frame.
+        app.init_resource::<RayTracingSetting>();
         #[cfg(not(target_arch = "wasm32"))]
-        app.add_plugins(rt_shadow::plugin);
+        app.add_plugins((
+            ExtractResourcePlugin::<RayTracingSetting>::default(),
+            rt_shadow::plugin,
+        ));
     }
 }
 

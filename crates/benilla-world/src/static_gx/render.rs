@@ -257,19 +257,22 @@ struct GxPipelines {
     /// fork: this session draws bindless (`bindless::enabled`, fixed at startup): `cell_layout` is
     /// the shared layout and every static_gx pipeline takes [`Self::layout_defs`].
     bindless: bool,
-    /// fork: F — the colour pipelines declare the ray-traced scene as group 3 and trace the sun's
-    /// and the lamps' visibility (`modern::rt_shadow`, [`rt_shadow_layout`]); `static_gx_pass`
-    /// binds it. The prepass twins never do. Always false on wasm32, where nothing reads it.
+    /// fork: F — the colour pipelines declare the ray-traced scene as group 3 and, in a frame the
+    /// lane is live, trace the sun's and the lamps' visibility (`modern::rt_shadow`,
+    /// [`rt_shadow_layout`]); `static_gx_pass` binds the scene or its stand-in. The prepass twins
+    /// never do. Always false on wasm32, where nothing reads it.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     rt: bool,
 }
 
-/// fork: F — the ray-traced scene's layout for a modern colour pipeline where the ray-traced
-/// shadows run (`modern::shadow::rt_shadows`), bound as group 3; `None` everywhere else.
+/// fork: F — the ray-traced scene's layout for a modern colour pipeline where the session may
+/// trace shadows (`modern::shadow::rt_shadows_capable`, fixed for the session), bound as group 3;
+/// `None` everywhere else. The pipeline is the same with the ray tracing on or off: the group bound
+/// (`RtScene::lane_bind`) picks the path per frame.
 fn rt_shadow_layout(modern: bool) -> Option<BindGroupLayoutDescriptor> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        (modern && crate::modern::shadow::rt_shadows()).then(rt_scene::layout)
+        (modern && crate::modern::shadow::rt_shadows_capable()).then(rt_scene::layout)
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -495,7 +498,7 @@ fn prepare_static_gx(
         pipes.pipelines.clear();
         pipes.prepass.clear();
         let prepassed = modern && prepass_enabled();
-        // fork: F — the colour pipelines' ray-traced scene, where the lane runs.
+        // fork: F — the colour pipelines' ray-traced scene, where the session may trace shadows.
         let rt_layout = rt_shadow_layout(modern);
         pipes.rt = rt_layout.is_some();
         for cutout in [false, true] {
@@ -776,10 +779,10 @@ fn prepare_static_gx(
             cache.rev += 1;
         }
     }
-    // fork: rt_scene — with the ray-traced tier on, the regions the camera has not drawn are
+    // fork: rt_scene — with the ray tracing enabled, the regions the camera has not drawn are
     // assembled too, a few a frame, so its BLASes hold every streamed region.
     #[cfg(not(target_arch = "wasm32"))]
-    if modern && rt_scene::tier_active() {
+    if modern && rt_scene::enabled() {
         rt_scene::assemble_unseen(
             &gx,
             &mut cache,
@@ -1371,13 +1374,14 @@ pub(crate) fn static_gx_pass(
         let batch = &batch;
         #[cfg(not(target_arch = "wasm32"))]
         let (cull, view_depth) = (cull.as_ref(), depth);
-        // fork: F — the scene the colour pipelines trace against, or its stand-in; with neither
-        // (before the scene's first prepare) a pipeline that declares it cannot draw.
+        // fork: F — the scene the colour pipelines trace against while the lane is live, else its
+        // stand-in (the shader then takes the cascades' path); with neither (before the scene's
+        // first prepare) a pipeline that declares it cannot draw.
         #[cfg(not(target_arch = "wasm32"))]
         let rt_bind = if pipes.rt {
             let Some(bind) = world
                 .get_resource::<rt_scene::RtScene>()
-                .and_then(|s| s.bind_group_or_stub())
+                .and_then(|s| s.lane_bind(crate::modern::shadow::rt_shadows()))
             else {
                 return;
             };

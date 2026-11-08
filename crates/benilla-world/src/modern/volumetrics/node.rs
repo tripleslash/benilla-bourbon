@@ -40,8 +40,9 @@ struct FroxelPipelines {
     integrate_layout: BindGroupLayoutDescriptor,
     scatter: CachedComputePipelineId,
     integrate: CachedComputePipelineId,
-    /// fork: F — the scatter with the froxel rays (`RT_FROXEL`, the scene at group 1), in place of
-    /// `scatter` where [`super::rt_froxel`] holds; `None` otherwise.
+    /// fork: F — the scatter with the froxel rays (`RT_FROXEL`, the scene at group 1), queued where
+    /// the session may trace froxels ([`super::rt_froxel_capable`]) and used in place of `scatter`
+    /// in a frame [`super::rt_froxel`] holds; `None` otherwise.
     scatter_rt: Option<CachedComputePipelineId>,
     composite_shader: Handle<Shader>,
     /// Per MSAA sample count: the depth binding's type and the target's sample count differ. The
@@ -68,9 +69,12 @@ struct FroxelTargets {
     repeat: Option<Sampler>,
     scatter_bind: Option<BindGroup>,
     integrate_bind: Option<BindGroup>,
-    /// fork: F — the ray-traced scene, or its stand-in, for the froxel rays' group 1; `Some`
-    /// exactly when this frame's scatter is [`FroxelPipelines::scatter_rt`].
+    /// fork: F — the ray-traced scene for the froxel rays' group 1; `Some` exactly when this
+    /// frame's scatter is [`FroxelPipelines::scatter_rt`] (the lane live this frame).
     scatter_rt_bind: Option<BindGroup>,
+    /// fork: last frame's scatter path (true = the froxel rays); a switch cuts the volume's history,
+    /// so no froxel keeps light the other path scattered.
+    rt_was: Option<bool>,
     ready: bool,
     /// fork: a one-texel depth map the ground-fog banks read when the GI heightfield is absent.
     ground_stub: Option<(Texture, TextureView)>,
@@ -136,9 +140,10 @@ fn init_pipelines(
         "integrate",
     );
     // fork: F — the froxel rays: the same scatter over the same group 0, with the ray-traced scene
-    // at group 1 (native only).
+    // at group 1, queued beside the plain one so a switch picks between two compiled pipelines
+    // (native only).
     #[cfg(not(target_arch = "wasm32"))]
-    let scatter_rt = super::rt_froxel().then(|| {
+    let scatter_rt = super::rt_froxel_capable().then(|| {
         let mut shader_defs = crate::static_gx::rt_scene::shader_defs(1);
         shader_defs.push(ShaderDefVal::from("RT_FROXEL"));
         pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
@@ -155,7 +160,10 @@ fn init_pipelines(
     #[cfg(target_arch = "wasm32")]
     let scatter_rt: Option<CachedComputePipelineId> = None;
     if scatter_rt.is_some() {
-        info!("froxels: sun and lamp visibility by ray (WOW_RT_FROXEL=0 turns it off)");
+        info!(
+            "froxels: sun and lamp visibility by ray while ray tracing is live (WOW_RT_FROXEL=0 \
+             turns it off)"
+        );
     }
     commands.insert_resource(FroxelPipelines {
         scatter_layout,
@@ -316,20 +324,19 @@ fn prepare_froxels(
             let allocated = integrated.texture_descriptor.size.width >= grid.x
                 && integrated.texture_descriptor.size.height >= grid.y
                 && integrated.texture_descriptor.size.depth_or_array_layers >= grid.z;
-            // fork: F — the froxel rays' scatter and the scene it traces (or its stand-in, whose
-            // rays all miss, until the TLAS holds an instance).
+            // fork: F — the froxel rays' scatter and the scene it traces, in a frame the lane is
+            // live (and the scene's group exists); the plain scatter otherwise.
             #[cfg(not(target_arch = "wasm32"))]
             let rt_bind = pipes
                 .scatter_rt
+                .filter(|_| super::rt_froxel())
                 .and_then(|_| rt_scene.as_deref())
-                .and_then(|s| s.bind_group_or_stub().cloned());
+                .and_then(|s| s.bind_group().cloned());
             #[cfg(target_arch = "wasm32")]
             let rt_bind: Option<BindGroup> = None;
-            let scatter_ready = match pipes.scatter_rt {
-                Some(id) => {
-                    rt_bind.is_some() && pipeline_cache.get_compute_pipeline(id).is_some()
-                }
-                None => pipeline_cache.get_compute_pipeline(pipes.scatter).is_some(),
+            let scatter_ready = match (pipes.scatter_rt, &rt_bind) {
+                (Some(id), Some(_)) => pipeline_cache.get_compute_pipeline(id).is_some(),
+                _ => pipeline_cache.get_compute_pipeline(pipes.scatter).is_some(),
             };
             let compiled = scatter_ready
                 && pipeline_cache
@@ -421,6 +428,14 @@ fn prepare_froxels(
                 );
                 targets.scatter_bind = Some(scatter_bind);
                 targets.integrate_bind = Some(integrate_bind);
+                // fork: a switch of the scatter path cuts the history this frame (`medium.w` = 0),
+                // as a jump does.
+                let rt = rt_bind.is_some();
+                if targets.rt_was.is_some_and(|was| was != rt) {
+                    tail[super::HISTORY_OFFSET..super::HISTORY_OFFSET + 4]
+                        .copy_from_slice(bytemuck::bytes_of(&0.0f32));
+                }
+                targets.rt_was = Some(rt);
                 targets.scatter_rt_bind = rt_bind;
                 targets.front = 1 - front;
                 targets.ready = true;

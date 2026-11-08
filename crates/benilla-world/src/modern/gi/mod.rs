@@ -261,17 +261,34 @@ pub fn gi_enabled() -> bool {
     *CELL.get_or_init(|| crate::launch_env::var("WOW_MODERN_GI").as_deref() != Some("0"))
 }
 
-/// fork: **does the probe trace cast its rays against the ray-traced scene?** Native only: the
-/// ray-traced tier runs (`static_gx::rt_scene::tier_active`, so `WOW_RT=0` turns this off too) and
-/// `$WOW_RT_GI=0` did not turn it off. Then each probe ray is a ray query against the TLAS
-/// (`gi_trace_rt.wgsl`) and the voxel clipmap is never built (`static_gx::render::modern_gi`); the
+/// fork: **does the probe trace cast its rays against the ray-traced scene this frame?** Native
+/// only: the ray tracing is live (`static_gx::rt_scene::live`: capable, the `rayTracing` option on
+/// and the scene ready) and the session may trace probes ([`rt_gi_capable`]). Then each probe ray is
+/// a ray query against the TLAS (`gi_trace_rt.wgsl`) and the voxel clipmap is not kept
+/// (`static_gx::render::modern_gi` frees it, and rebuilds it on the frame this turns false); the
 /// terrain heightfield still is, for the probes' under-ground test and the froxels' ground banks.
-/// Otherwise the voxel DDA runs as it always has. False until render startup has decided the tier.
+/// Otherwise the voxel DDA runs as it always has. Per frame; a switch cuts the field's history
+/// (`gi::node::prepare_gi`). False before render startup.
 pub fn rt_gi() -> bool {
     #[cfg(not(target_arch = "wasm32"))]
     {
+        crate::static_gx::rt_scene::live() && rt_gi_capable()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
+}
+
+/// fork: **may this session trace its probes by ray at all?** Capable of ray tracing
+/// (`rt_scene::capable()`) and `$WOW_RT_GI=0` did not turn the lane off (read once). Where it
+/// holds, both trace pipelines are queued at startup (`modern_gi_trace` and `modern_gi_trace_rt`)
+/// and [`rt_gi`] picks one per frame.
+pub fn rt_gi_capable() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
         static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        crate::static_gx::rt_scene::tier_active()
+        crate::static_gx::rt_scene::capable()
             && *CELL.get_or_init(|| crate::launch_env::var("WOW_RT_GI").as_deref() != Some("0"))
     }
     #[cfg(target_arch = "wasm32")]

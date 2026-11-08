@@ -1,14 +1,18 @@
 //! fork: F — **ray-traced shadows**, the render-world plumbing (native only).
 //!
-//! Where [`super::shadow::rt_shadows`] holds, every modern receiver of the sun and of the shadowed
-//! lamps takes their visibility through the static world and the terrain as a ray query against
-//! the ray-traced scene (`static_gx::rt_scene`), through `benilla_modern::rtshadow`, and the maps
+//! Where [`super::shadow::rt_shadows`] holds this frame, every modern receiver of the sun and of
+//! the shadowed lamps takes their visibility through the static world and the terrain as a ray
+//! query against the ray-traced scene (`static_gx::rt_scene`), through `benilla_modern::rtshadow`,
+//! and the maps
 //! keep only what the scene does not hold: the cascades draw the entity casters alone and the lamp
 //! atlas no static face (`static_gx::render::modern_shadow`). The sky map keeps its static casters
 //! (the ambient's open-sky read and the debug views use it).
 //!
-//! The receivers bind the scene for the whole session, whether it is ready or not
-//! (`RtScene::bind_group_or_stub`, an empty TLAS before the first instance and in a classic frame):
+//! Where the session may trace shadows ([`super::shadow::rt_shadows_capable`]), the receivers
+//! declare the scene for the whole session, and are bound the scene while the lane is live or the
+//! stand-in otherwise (`RtScene::lane_bind`: an empty TLAS whose marked rows make
+//! `rt_scene::live()` false, so each `rtshadow` twin returns its map-only original). The ray
+//! tracing then switches at run time with no pipeline re-specialized:
 //!
 //! - the Bevy material lanes (`wow_model.wgsl` under `WOW_MODERN`, `terrain.wgsl` under
 //!   `WOW_MODERN`, `liquid_cata.wgsl`) declare it as the group after the material's
@@ -16,8 +20,9 @@
 //!   `DrawMaterial` binds `MaterialExtraBindGroup` there (`third_party/bevy_pbr/BENILLA.md`, the
 //!   fourth delta), which this module fills every frame;
 //! - static_gx's colour pipelines declare it as group 3 and `static_gx_pass` binds it;
-//! - the probe trace binds it at group 1 (`modern::gi`), the froxels at group 1 under their own
-//!   lane ([`super::volumetrics::rt_froxel`]).
+//! - the voxel probe trace binds it at group 1 (`modern::gi`, where it compiles `RT_SHADOWS`);
+//!   the ray-traced probe trace and the froxel rays have pipelines of their own, picked per frame
+//!   ([`super::gi::rt_gi`], [`super::volumetrics::rt_froxel`]).
 //!
 //! No pass of its own: the rays run inside the receivers' fragment stages, so their cost is read
 //! as the colour passes' (`static_gx`, `main_opaque_pass_3d`) against a `WOW_RT_SHADOWS=0` run,
@@ -29,28 +34,29 @@ use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
 use crate::static_gx::rt_scene::{self, RtScene};
 
-/// `RenderStartup`, after the tier is decided: publish the scene's layout to the material lanes
-/// and give bevy_pbr's draw command the resource it binds.
+/// `RenderStartup`, after the tier is decided: where the session may trace shadows, publish the
+/// scene's layout to the material lanes and give bevy_pbr's draw command the resource it binds.
 fn init_rt_shadows(mut commands: Commands) {
-    if !super::shadow::rt_shadows() {
+    if !super::shadow::rt_shadows_capable() {
         return;
     }
     // A second startup (a test app, a renderer rebuilt) finds it set to the same layout.
     let _ = benilla_assets::materials::RT_SHADOW_LAYOUT.set(rt_scene::layout());
     commands.insert_resource(MaterialExtraBindGroup::default());
     info!(
-        "rt shadows: sun and lamp visibility by ray, cascades and lamp atlas for entities only \
-         (WOW_RT_SHADOWS=0 turns it off)"
+        "rt shadows: the receivers declare the scene; while ray tracing is live, sun and lamp \
+         visibility by ray, cascades and lamp atlas for entities only (WOW_RT_SHADOWS=0 turns it \
+         off)"
     );
 }
 
-/// Every frame: the scene's bind group, or its stand-in, where the material lanes' draws bind it.
-/// After `prepare_rt_scene` (`PrepareResources`), which builds both.
+/// Every frame: the scene's bind group while the lane is live, else its stand-in, where the
+/// material lanes' draws bind it. After `prepare_rt_scene` (`PrepareResources`), which builds both.
 fn bind_rt_shadows(scene: Option<Res<RtScene>>, extra: Option<ResMut<MaterialExtraBindGroup>>) {
     let (Some(scene), Some(mut extra)) = (scene, extra) else {
         return;
     };
-    let next = scene.bind_group_or_stub();
+    let next = scene.lane_bind(super::shadow::rt_shadows());
     if extra.0.as_ref().map(|b| b.id()) != next.map(|b| b.id()) {
         extra.0 = next.cloned();
     }
