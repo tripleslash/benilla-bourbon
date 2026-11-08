@@ -1146,6 +1146,9 @@ pub(crate) fn gx_shadow_pass(
             return;
         };
         let now = Instant::now();
+        // fork: F — at the ray-traced shadows' lane the receivers trace the static world and the
+        // terrain (`modern::rt_shadow`): the cascades and the lamp atlas keep the entities alone.
+        let rt = crate::modern::shadow::rt_shadows();
 
         // The local-light atlas is the layer after the sky map and is its own job below: it is
         // not a cascade, it is not cleared every frame, and no entity is drawn into it.
@@ -1164,7 +1167,13 @@ pub(crate) fn gx_shadow_pass(
             } else {
                 cascades.clip_from_world[i]
             };
-            let (key, layer_casters) = if active {
+            // fork: F — a cascade at the ray-traced shadows' lane draws no static caster: its static
+            // pass only clears, and its key follows the light clip alone. The sky map keeps its
+            // static casters (the ambient's open-sky read and the debug views read it).
+            let statics = is_sky || !rt;
+            let (key, layer_casters) = if !active {
+                (0, 0)
+            } else if statics {
                 layer_key(
                     frame,
                     i,
@@ -1175,7 +1184,7 @@ pub(crate) fn gx_shadow_pass(
                     now,
                 )
             } else {
-                (0, 0)
+                layer_key(frame, i, &clip_from_world, 0, &[], None, now)
             };
             let slot = &frame.cache_keys[i];
             let drawn = slot.load(std::sync::atomic::Ordering::Relaxed);
@@ -1264,8 +1273,8 @@ pub(crate) fn gx_shadow_pass(
                     }
                 }
             } else {
-                // Static pass: clear, then terrain and the static world.
-                let mut complete = ready.is_some();
+                // Static pass: clear, then terrain and the static world (where `statics`).
+                let mut complete = ready.is_some() || !statics;
                 {
                     let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
                         label: Some("modern_shadow_static"),
@@ -1283,7 +1292,7 @@ pub(crate) fn gx_shadow_pass(
                         multiview_mask: None,
                     });
                     let span = diagnostics.pass_span(&mut pass, LAYER_SPANS[i][0]);
-                    if active {
+                    if active && statics {
                         pass.set_bind_group(0, view_bind, &[frame.offsets[i]]);
                         if let (Some(t), Some(tp)) = (terrain, terrain_pipes) {
                             for (mesh_id, center, half, _) in &t.cells {
@@ -1503,13 +1512,21 @@ pub(crate) fn gx_shadow_pass(
         // atlas. Every face is static content lit by a light that does not move, so the whole layer
         // is redrawn only when the chosen set or the static world changes; a settled room pays
         // nothing at all after the first frame.
+        // fork: F — at the ray-traced shadows' lane no static face is drawn: a slot's static phase
+        // only clears its tiles, under a key the streaming world never moves, and the rays to
+        // the light take the static world and the terrain.
+        let (atlas_casters, atlas_hash) = if rt {
+            (&[][..], 0)
+        } else {
+            (&casters[..], static_hash)
+        };
         let atlas_job = |render_context: &mut Recorder<'_>| {
             draw_local_atlas(
                 render_context,
                 world,
                 frame,
-                &casters,
-                static_hash,
+                atlas_casters,
+                atlas_hash,
                 atlas_ready,
                 pipeline_cache,
                 meshes,
@@ -1663,7 +1680,13 @@ fn draw_local_atlas(
                 slot.attempts = 0;
             }
             slot.waited += 1;
-            if slot.waited >= ATLAS_SETTLE_FRAMES {
+            // fork: F — nothing static to wait out at the ray-traced shadows' lane.
+            let settle = if crate::modern::shadow::rt_shadows() {
+                1
+            } else {
+                ATLAS_SETTLE_FRAMES
+            };
+            if slot.waited >= settle {
                 build |= 1 << (s - slots.start);
             }
         }
