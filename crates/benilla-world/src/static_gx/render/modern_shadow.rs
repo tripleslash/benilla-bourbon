@@ -371,6 +371,13 @@ struct ModernShadowFrame {
     layer_casters: std::sync::Mutex<[LayerCasters; SKY_LAYER + 1]>,
     bind: Option<BindGroup>,
     count: u32,
+    /// fork: last frame's `modern::shadow::rt_shadows` (the cascades and the atlas without their
+    /// static casters); a switch invalidates every cached layer ([`prepare_modern_shadow`]).
+    rt_was: Option<bool>,
+    /// fork: until this frame (`frame_no`), a lamp slot's static faces are drawn on the first frame
+    /// they are wanted, not after [`ATLAS_SETTLE_FRAMES`]: set by a ray-tracing switch, which
+    /// changes what every slot holds at once with nothing streaming to wait out.
+    hurry_until: u32,
 }
 
 /// fork (perf): one shadow layer's static casters. The cached layer used to be keyed on the whole
@@ -690,6 +697,19 @@ fn prepare_modern_shadow(
     frame.bind = None;
     frame.frame_no = frame.frame_no.wrapping_add(1);
     *frame.restore_next.get_mut() = 0;
+    // fork: the ray-traced shadows switched (on or off): every cascade and the sky map redraw from
+    // their casters this frame (a cleared key is never cached, and `defers_redraw` waits on none),
+    // so the static casters leave or come back at once, and the lamp slots redraw their static
+    // faces without the settle wait. The lamp slots' own keys follow the switch (no casters and hash
+    // 0 at the lane), so they need no clearing.
+    let rt = crate::modern::shadow::rt_shadows();
+    if frame.rt_was.is_some_and(|was| was != rt) {
+        for key in &frame.cache_keys {
+            key.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        frame.hurry_until = frame.frame_no.wrapping_add(ATLAS_SETTLE_FRAMES);
+    }
+    frame.rt_was = Some(rt);
     if let Some(plane) = uploaded_plane.as_deref_mut() {
         plane.0 = None;
     }
@@ -1680,8 +1700,10 @@ fn draw_local_atlas(
                 slot.attempts = 0;
             }
             slot.waited += 1;
-            // fork: F — nothing static to wait out at the ray-traced shadows' lane.
-            let settle = if crate::modern::shadow::rt_shadows() {
+            // fork: F — nothing static to wait out at the ray-traced shadows' lane, nor right after
+            // a ray-tracing switch, which changes every slot at once with nothing streaming.
+            let hurried = (frame.hurry_until.wrapping_sub(frame.frame_no) as i32) > 0;
+            let settle = if crate::modern::shadow::rt_shadows() || hurried {
                 1
             } else {
                 ATLAS_SETTLE_FRAMES

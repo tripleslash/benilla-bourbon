@@ -19,9 +19,10 @@
 //!    Terrain is not voxelized: it is a height per column by construction, and a 2 yd map holds it
 //!    more finely than a 12 yd voxel could.
 //!
-//! fork: at the ray-traced tier (`gi::rt_gi`) the probes cast their rays against
-//! `rt_scene`'s TLAS, so only the heightfield is kept: the clipmap is never allocated and no voxel
-//! is drawn.
+//! fork: in a frame the probe rays are ray queries (`gi::rt_gi`, live per frame) they cast against
+//! `rt_scene`'s TLAS, so only the heightfield is kept: the clipmap is freed (or never allocated) and
+//! no voxel is drawn. The frame the ray tracing stops being live, the clipmap is created again and
+//! refilled from scratch, its raster pipelines queued on first use.
 
 use bevy::app::SubApp;
 use bevy::platform::collections::HashMap as GiMap;
@@ -432,19 +433,34 @@ fn prepare_gi_voxels(
     }
     let tier = gi.tier;
     let n = tier.voxels as i32;
-    // fork: at the ray-traced tier (`gi::rt_gi`, fixed for the session) the probe rays are ray
-    // queries against the TLAS and nothing reads the clipmap: it is never allocated, no caster is
-    // diffed, no box is queued and no voxel raster pipeline is built, so `gi_voxel_pass` draws no
-    // voxels. The heightfield still is: the trace's under-ground test and the froxels' ground banks
-    // read it.
+    // fork: in a frame the probe rays are ray queries against the TLAS (`gi::rt_gi`, this frame's
+    // decision) nothing reads the clipmap: it is freed (or never allocated), no caster is diffed, no
+    // box is queued and no voxel raster pipeline is built, so `gi_voxel_pass` draws no voxels. The
+    // heightfield still is: the trace's under-ground test and the froxels' ground banks read it.
     let rt = gi::rt_gi();
+    // fork: the ray tracing went live with a clipmap standing: free it and forget what it held, so
+    // the frame it stops being live finds no clipmap and makes a fresh one.
+    let freed = rt && state.albedo.is_some();
+    if freed {
+        state.albedo = None;
+        state.normal = None;
+        state.depth = None;
+        state.store_bind = None;
+        state.casters.clear();
+        state.diffed_rev = None;
+        state.backlog = false;
+        state.caster_top = 0.0;
+    }
 
-    // A new clipmap shape (or the first modern frame) re-creates the clipmap, and everything in it is
-    // new. The probe cascades are not part of it: the interior sub-grid a room adds
-    // (`GiTier::with_interior`) leaves the voxels as they are, so a camera passing in and out of
-    // rooms keeps its textures instead of reallocating three 3D textures at every crossing.
-    let fresh = !rt && state.tier.map(|t| clipmap_shape(&t)) != Some(clipmap_shape(&tier));
-    if rt && state.tier.is_none() {
+    // A new clipmap shape (or the first modern frame, or the first frame off the ray-traced probes)
+    // re-creates the clipmap, and everything in it is new. The probe cascades are not part of it:
+    // the interior sub-grid a room adds (`GiTier::with_interior`) leaves the voxels as they are, so a
+    // camera passing in and out of rooms keeps its textures instead of reallocating three 3D textures
+    // at every crossing.
+    let fresh = !rt
+        && (state.albedo.is_none()
+            || state.tier.map(|t| clipmap_shape(&t)) != Some(clipmap_shape(&tier)));
+    if rt && (state.tier.is_none() || freed) {
         info!(
             "modern GI: ray-traced probes, no voxel clipmap (WOW_RT_GI=0 restores it), heightfield {HEIGHT_SIZE}^2 over {} yd",
             2.0 * HEIGHT_HALF,
