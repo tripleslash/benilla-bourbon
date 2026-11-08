@@ -9,6 +9,10 @@
 #import benilla_modern::froxelfog
 #import benilla_modern::probegi
 #import benilla_modern::locallight
+// fork: F — the froxel rays (`modern::volumetrics::rt_froxel`, native only): the scene at group 1.
+#ifdef RT_FROXEL
+#import benilla_modern::rtshadow
+#endif
 
 // The shared light buffer's prefix (`lighting::global_light`): the header rows and the point table,
 // packed nearest-to-camera first.
@@ -222,12 +226,48 @@ fn point_in_scatter(i: u32, p: vec3<f32>, to_eye: vec3<f32>, room: f32, halo_cou
     return PointScatter(lit * (far + excess), lit * (excess * lamp));
 }
 
+#ifdef RT_FROXEL
+// fork: F — how much of table light `id`, which holds shadow slot `slot`, reaches the froxel at `p`:
+// one ray to it through the static world and the terrain (stopped at its fixture box and the cube's
+// near plane), under the slot's shade floor and cross-fade as the surfaces take it. The spare rows
+// are loaded whole before a component is picked, as the surface lanes do.
+fn froxel_lamp(id: u32, slot: u32, p: vec3<f32>) -> f32 {
+    let g = modern_block.lights;
+    if (!locallight::atlas_live(g)) {
+        return 1.0;
+    }
+    let frow = modern_block.light_spare[3u + slot / 4u];
+    let fade = frow[slot % 4u];
+    if (fade <= 0.0) {
+        return 1.0;
+    }
+    let row = modern_block.light_spare[slot / 4u];
+    let crow = modern_block.light_spare[9u + slot / 4u];
+    let light = light_table.points[2u * id].xyz;
+    let v = rtshadow::lamp_rays(p, vec3<f32>(0.0), light, crow[slot % 4u], row[slot % 4u], 0.0, 1u);
+    return mix(1.0, mix(1.0 - g.soft.z, 1.0, v), fade);
+}
+#endif
+
 // Every light one grid cell names, at a froxel.
 fn cell_in_scatter(cell: vec4<u32>, p: vec3<f32>, to_eye: vec3<f32>, room: f32, halo_count: u32, lamp_sigma: f32) -> PointScatter {
     var sum = PointScatter(vec3<f32>(0.0), vec3<f32>(0.0));
     let count = locallight::cell_count(cell);
     for (var i = 0u; i < count; i = i + 1u) {
+#ifdef RT_FROXEL
+        // fork: F — a lamp that holds a shadow slot is shadowed in the air too (its shafts), where
+        // it scatters at all.
+        let id = locallight::cell_light(cell, i);
+        var one = point_in_scatter(id, p, to_eye, room, halo_count, lamp_sigma);
+        let slot = locallight::cell_slot(cell, i);
+        if (slot < locallight::MAX_SHADOWED && (any(one.medium > vec3<f32>(0.0)) || any(one.lamp > vec3<f32>(0.0)))) {
+            let vis = froxel_lamp(id, slot, p);
+            one.medium = one.medium * vis;
+            one.lamp = one.lamp * vis;
+        }
+#else
         let one = point_in_scatter(locallight::cell_light(cell, i), p, to_eye, room, halo_count, lamp_sigma);
+#endif
         sum.medium = sum.medium + one.medium;
         sum.lamp = sum.lamp + one.lamp;
     }
@@ -328,10 +368,20 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     // a partial value instead of flipping on and off with the per-frame jitter.
     // Slices are quadratic in depth (d = far * s^2), so a slice is 2 * sqrt(far * d) / n deep.
     let along = normalize(p - f.camera.xyz) * max(0.5 * sqrt(f.grid.w * d) / n.z, 0.1);
+#ifdef RT_FROXEL
+    // fork: F — each tap is the cascade tap (the entities, and the static world where the cascades
+    // still draw it) times one ray to the sun through the scene; the volume's blur and its history
+    // filter the two taps as they did the two compares.
+    let sun_vis = 0.5 * cloud * (1.0 - under_sea(f, p)) * (
+        rtshadow::sun_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p - along, d, f.sun_dir.xyz)
+            + rtshadow::sun_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p + along, d, f.sun_dir.xyz)
+    );
+#else
     let sun_vis = 0.5 * cloud * (1.0 - under_sea(f, p)) * (
         sunshadow::sun_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p - along, d)
             + sunshadow::sun_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p + along, d)
     );
+#endif
     let sky = sunshadow::sky_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p);
     // fork: modern lighting (FORK.md, P5) — where the probe field reaches this
     // froxel, its mean radiance against an open-field probe's is the ambient that reaches the air: dark

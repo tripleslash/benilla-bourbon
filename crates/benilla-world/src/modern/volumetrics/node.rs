@@ -40,6 +40,9 @@ struct FroxelPipelines {
     integrate_layout: BindGroupLayoutDescriptor,
     scatter: CachedComputePipelineId,
     integrate: CachedComputePipelineId,
+    /// fork: F — the scatter with the froxel rays (`RT_FROXEL`, the scene at group 1), in place of
+    /// `scatter` where [`super::rt_froxel`] holds; `None` otherwise.
+    scatter_rt: Option<CachedComputePipelineId>,
     composite_shader: Handle<Shader>,
     /// Per MSAA sample count: the depth binding's type and the target's sample count differ. The
     /// layout, the composite and the lamp-halo pipeline (`fs_halo`), which share it.
@@ -65,6 +68,9 @@ struct FroxelTargets {
     repeat: Option<Sampler>,
     scatter_bind: Option<BindGroup>,
     integrate_bind: Option<BindGroup>,
+    /// fork: F — the ray-traced scene, or its stand-in, for the froxel rays' group 1; `Some`
+    /// exactly when this frame's scatter is [`FroxelPipelines::scatter_rt`].
+    scatter_rt_bind: Option<BindGroup>,
     ready: bool,
     /// fork: a one-texel depth map the ground-fog banks read when the GI heightfield is absent.
     ground_stub: Option<(Texture, TextureView)>,
@@ -129,11 +135,34 @@ fn init_pipelines(
         "embedded://benilla_world/shaders/modern/froxel_integrate.wgsl",
         "integrate",
     );
+    // fork: F — the froxel rays: the same scatter over the same group 0, with the ray-traced scene
+    // at group 1 (native only).
+    #[cfg(not(target_arch = "wasm32"))]
+    let scatter_rt = super::rt_froxel().then(|| {
+        let mut shader_defs = crate::static_gx::rt_scene::shader_defs(1);
+        shader_defs.push(ShaderDefVal::from("RT_FROXEL"));
+        pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("modern_froxel_scatter_rt".into()),
+            layout: vec![scatter_layout.clone(), crate::static_gx::rt_scene::layout()],
+            immediate_size: 0,
+            shader: asset_server
+                .load("embedded://benilla_world/shaders/modern/froxel_scatter.wgsl"),
+            shader_defs,
+            entry_point: Some("scatter".into()),
+            zero_initialize_workgroup_memory: false,
+        })
+    });
+    #[cfg(target_arch = "wasm32")]
+    let scatter_rt: Option<CachedComputePipelineId> = None;
+    if scatter_rt.is_some() {
+        info!("froxels: sun and lamp visibility by ray (WOW_RT_FROXEL=0 turns it off)");
+    }
     commands.insert_resource(FroxelPipelines {
         scatter_layout,
         integrate_layout,
         scatter,
         integrate,
+        scatter_rt,
         composite_shader: asset_server
             .load("embedded://benilla_world/shaders/modern/fog_composite.wgsl"),
         composites: HashMap::default(),
@@ -228,6 +257,7 @@ fn prepare_froxels(
     scene: Option<Res<crate::modern::gi::ModernGiScene>>,
     mut targets: ResMut<FroxelTargets>,
     held: Option<Res<crate::fsr::FsrHeld>>,
+    #[cfg(not(target_arch = "wasm32"))] rt_scene: Option<Res<crate::static_gx::rt_scene::RtScene>>,
 ) {
     // fork: fsr (FORK.md) — a held frame runs no froxel pass, so it must not flip `front`:
     // the next world frame would read the never-written slot as its history.
@@ -237,6 +267,7 @@ fn prepare_froxels(
     targets.ready = false;
     targets.scatter_bind = None;
     targets.integrate_bind = None;
+    targets.scatter_rt_bind = None;
     let (Some(volume), Some(block)) = (volume, buffers.get(MODERN_SHADOW_CASCADES.id())) else {
         return;
     };
@@ -285,7 +316,22 @@ fn prepare_froxels(
             let allocated = integrated.texture_descriptor.size.width >= grid.x
                 && integrated.texture_descriptor.size.height >= grid.y
                 && integrated.texture_descriptor.size.depth_or_array_layers >= grid.z;
-            let compiled = pipeline_cache.get_compute_pipeline(pipes.scatter).is_some()
+            // fork: F — the froxel rays' scatter and the scene it traces (or its stand-in, whose
+            // rays all miss, until the TLAS holds an instance).
+            #[cfg(not(target_arch = "wasm32"))]
+            let rt_bind = pipes
+                .scatter_rt
+                .and_then(|_| rt_scene.as_deref())
+                .and_then(|s| s.bind_group_or_stub().cloned());
+            #[cfg(target_arch = "wasm32")]
+            let rt_bind: Option<BindGroup> = None;
+            let scatter_ready = match pipes.scatter_rt {
+                Some(id) => {
+                    rt_bind.is_some() && pipeline_cache.get_compute_pipeline(id).is_some()
+                }
+                None => pipeline_cache.get_compute_pipeline(pipes.scatter).is_some(),
+            };
+            let compiled = scatter_ready
                 && pipeline_cache
                     .get_compute_pipeline(pipes.integrate)
                     .is_some();
@@ -375,6 +421,7 @@ fn prepare_froxels(
                 );
                 targets.scatter_bind = Some(scatter_bind);
                 targets.integrate_bind = Some(integrate_bind);
+                targets.scatter_rt_bind = rt_bind;
                 targets.front = 1 - front;
                 targets.ready = true;
             }
@@ -500,8 +547,14 @@ pub(crate) fn froxel_pass(
         };
         let pipes = world.resource::<FroxelPipelines>();
         let pipeline_cache = world.resource::<PipelineCache>();
+        // fork: F — the froxel rays' scatter, with the scene at group 1, under a span of its own so
+        // the two paths compare by name.
+        let (scatter_id, label) = match (pipes.scatter_rt, &targets.scatter_rt_bind) {
+            (Some(id), Some(_)) => (id, "modern_froxel_scatter_rt"),
+            _ => (pipes.scatter, "modern_froxel_scatter"),
+        };
         let (Some(scatter), Some(integrate)) = (
-            pipeline_cache.get_compute_pipeline(pipes.scatter),
+            pipeline_cache.get_compute_pipeline(scatter_id),
             pipeline_cache.get_compute_pipeline(pipes.integrate),
         ) else {
             return;
@@ -513,12 +566,15 @@ pub(crate) fn froxel_pass(
         let encoder = render_context.command_encoder();
         {
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("modern_froxel_scatter"),
+                label: Some(label),
                 timestamp_writes: None,
             });
-            let span = diagnostics.pass_span(&mut pass, "modern_froxel_scatter");
+            let span = diagnostics.pass_span(&mut pass, label);
             pass.set_pipeline(scatter);
             pass.set_bind_group(0, scatter_bind, &[]);
+            if let (Some(_), Some(rt_bind)) = (pipes.scatter_rt, &targets.scatter_rt_bind) {
+                pass.set_bind_group(1, rt_bind, &[]);
+            }
             pass.dispatch_workgroups(grid.x.div_ceil(4), grid.y.div_ceil(4), grid.z.div_ceil(4));
             span.end(&mut pass);
         }
@@ -663,9 +719,18 @@ fn run_fog_pass(
 }
 
 pub(super) fn build(render_app: &mut SubApp) {
+    // fork: F — native only: the pipelines read the froxel rays' lane, decided with the ray-traced
+    // tier, and the rays cast against the TLAS `rt_scene_pass` (re)builds this frame.
+    #[cfg(not(target_arch = "wasm32"))]
+    let (init, froxel) = (
+        init_pipelines.after(crate::static_gx::rt_scene::init_rt_scene),
+        froxel_pass.after(crate::static_gx::rt_scene::rt_scene_pass),
+    );
+    #[cfg(target_arch = "wasm32")]
+    let (init, froxel) = (init_pipelines, froxel_pass);
     render_app
         .init_resource::<FroxelTargets>()
-        .add_systems(RenderStartup, init_pipelines)
+        .add_systems(RenderStartup, init)
         .add_systems(
             Render,
             specialize_composites.in_set(RenderSystems::PrepareResources),
@@ -680,7 +745,7 @@ pub(super) fn build(render_app: &mut SubApp) {
         .add_systems(
             Core3d,
             (
-                froxel_pass
+                froxel
                     .after(per_view_shadow_pass::<LATE_SHADOW_PASS>)
                     .after(crate::static_gx::gx_shadow_pass)
                     .before(Core3dSystems::MainPass),
