@@ -400,6 +400,37 @@ const LAYER_SETTLE_FRAMES: u32 = 30;
 const LAYER_MAX_DEFER: Duration = Duration::from_secs(2);
 const LAYER_MAX_DEFER_FRAMES: u32 = 120;
 
+/// Each layer's pass-span names, `[static, dynamic, restore]`, the sky map's last: one name per
+/// cascade, so each reads on its own in `PERF_PASSES` and `GPU_STATS`. The layers record as
+/// parallel jobs (`crate::par_encode`), so their order within a frame cannot tell them apart.
+const LAYER_SPANS: [[&str; 3]; SKY_LAYER + 1] = [
+    [
+        "modern_shadow_static_c0",
+        "modern_shadow_dynamic_c0",
+        "modern_shadow_restore_c0",
+    ],
+    [
+        "modern_shadow_static_c1",
+        "modern_shadow_dynamic_c1",
+        "modern_shadow_restore_c1",
+    ],
+    [
+        "modern_shadow_static_c2",
+        "modern_shadow_dynamic_c2",
+        "modern_shadow_restore_c2",
+    ],
+    [
+        "modern_shadow_static_c3",
+        "modern_shadow_dynamic_c3",
+        "modern_shadow_restore_c3",
+    ],
+    [
+        "modern_shadow_static_sky",
+        "modern_shadow_dynamic_sky",
+        "modern_shadow_restore_sky",
+    ],
+];
+
 /// fork (perf): the first cascade whose entity casters are redrawn every other frame.
 ///
 /// Such a cascade starts 60 yd out or more on the tiers that have it and resolves a fifth of a
@@ -1217,7 +1248,7 @@ pub(crate) fn gx_shadow_pass(
                                     occlusion_query_set: None,
                                     multiview_mask: None,
                                 });
-                            let span = diagnostics.pass_span(&mut pass, "modern_shadow_restore");
+                            let span = diagnostics.pass_span(&mut pass, LAYER_SPANS[i][2]);
                             pass.set_render_pipeline(restore);
                             pass.set_bind_group(0, &bind, &[]);
                             pass.draw(0..6, 0..data.len() as u32);
@@ -1225,7 +1256,7 @@ pub(crate) fn gx_shadow_pass(
                         }
                         _ => {
                             let encoder = render_context.command_encoder();
-                            let span = diagnostics.time_span(encoder, "modern_shadow_restore");
+                            let span = diagnostics.time_span(encoder, LAYER_SPANS[i][2]);
                             copy_layer(encoder, static_cache, working, i as u32);
                             span.end(encoder);
                         }
@@ -1250,7 +1281,7 @@ pub(crate) fn gx_shadow_pass(
                         occlusion_query_set: None,
                         multiview_mask: None,
                     });
-                    let span = diagnostics.pass_span(&mut pass, "modern_shadow_static");
+                    let span = diagnostics.pass_span(&mut pass, LAYER_SPANS[i][0]);
                     if active {
                         pass.set_bind_group(0, view_bind, &[frame.offsets[i]]);
                         if let (Some(t), Some(tp)) = (terrain, terrain_pipes) {
@@ -1394,7 +1425,7 @@ pub(crate) fn gx_shadow_pass(
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            let span = diagnostics.pass_span(&mut pass, "modern_shadow_dynamic");
+            let span = diagnostics.pass_span(&mut pass, LAYER_SPANS[i][1]);
             pass.set_bind_group(0, view_bind, &[frame.offsets[i]]);
             // Whether anything is actually ISSUED, not whether the list was non-empty: every
             // command is still cascade-culled below, so a far cascade can hold a full draw list
