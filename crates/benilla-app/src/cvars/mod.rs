@@ -2080,7 +2080,8 @@ mod tests {
             d["frameGeneration"] != 0.0,
             benilla_world::fsr::FrameGeneration::default().0
         );
-        // fork: dlss (FORK.md) — the upscaler boots at the engine's default, DLSS.
+        // fork: dlss (FORK.md) — the upscaler boots at the engine's default, DLSS natively
+        // (FSR on the web build).
         assert_eq!(
             crate::cvars::registered_default("upscaler", 0),
             Some(benilla_world::dlss::Upscaler::default().as_cvar())

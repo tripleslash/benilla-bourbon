@@ -48,10 +48,10 @@ pub const PROJECT_ID: &str = "6f1e2b7c-3a94-4d8e-b1c5-0d7a9e4f2c61";
 pub const RUNTIME_FILES: &[&str] = &["nvngx_dlss.dll", "nvngx_dlssg.dll"];
 
 /// The temporal upscaler the player picked, the `upscaler` CVar.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Upscaler {
-    /// DLSS 4.5 Super Resolution, FSR where NGX reports no support.
-    #[default]
+    /// DLSS 4.5 Super Resolution, FSR where NGX reports no support. Native only: the web build
+    /// has no NGX, so there it is never chosen ([`Upscaler::from_cvar`]).
     Dlss,
     /// FSR 3.1.5.
     Fsr,
@@ -59,13 +59,28 @@ pub enum Upscaler {
     Off,
 }
 
+impl Default for Upscaler {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 impl Upscaler {
-    /// The CVar's value, case-blind; anything else is the default.
+    /// DLSS on a native client, FSR on the web build, which has no NGX.
+    pub const DEFAULT: Self = if cfg!(target_arch = "wasm32") {
+        Self::Fsr
+    } else {
+        Self::Dlss
+    };
+
+    /// The CVar's value, case-blind; anything else is the default. `dlss` on the web build is
+    /// FSR, what it would fall back to there.
     pub fn from_cvar(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "fsr" => Self::Fsr,
             "off" | "none" | "0" => Self::Off,
-            _ => Self::Dlss,
+            "dlss" if !cfg!(target_arch = "wasm32") => Self::Dlss,
+            _ => Self::DEFAULT,
         }
     }
 

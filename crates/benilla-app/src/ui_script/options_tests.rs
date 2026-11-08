@@ -1886,6 +1886,39 @@ fn the_render_scale_row_shows_a_percentage_and_defers_to_apply() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// fork: dlss (FORK.md) — the Upscaler row offers DLSS only on a native client
+/// (`BENILLA_NATIVE`); the web build, which has no NGX, lists FSR and Off, and its tooltips name
+/// no DLSS. Turtle's window reads the same entries.
+#[test]
+fn the_upscaler_row_offers_dlss_only_on_a_native_client() {
+    benilla_formats::wow_data_or_skip!();
+    for (native, want) in [(false, "fsr,off"), (true, "dlss,fsr,off")] {
+        let s = audio_harness();
+        if native {
+            s.lua().globals().set("BENILLA_NATIVE", 1).unwrap();
+        }
+        let s = harness_on(s);
+        let listed: String = s
+            .eval(
+                "local row = BenillaOptionsFrameContainerBodyGraphicsRowUpscaler \
+                 assert(row.entries == BENILLA_UPSCALER_ENTRIES) \
+                 local t = {} \
+                 for _, e in ipairs(row.entries) do t[getn(t) + 1] = e.value end \
+                 return table.concat(t, ',')",
+            )
+            .unwrap();
+        assert_eq!(listed, want, "native {native}");
+        let tips_name_dlss: bool = s
+            .eval(
+                "return string.find(BENILLA_TOOLTIP_UPSCALER, 'DLSS') ~= nil \
+                 and string.find(BENILLA_TOOLTIP_FRAME_GENERATION, 'DLSS') ~= nil",
+            )
+            .unwrap();
+        assert_eq!(tips_name_dlss, native, "native {native}");
+        assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    }
+}
+
 /// fork: fsr (FORK.md) — Render Scale's marked stops: 67% (FSR's quality ratio) and 100%
 /// carry a tick and a label on the groove, the 0.01 grid reaches 0.67, and a drag that ends
 /// within 0.03 of a mark lands on it.

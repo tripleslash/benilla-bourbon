@@ -1062,10 +1062,15 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `dlss` (NVIDIA DLSS 4.5 Super Resolution and Frame Generation through NGX; FSR's wherever NGX
     // reports no support), `fsr` (FSR 3.1.5) or `off` (the
     // bilinear stretch, no frame generation). The knob is `benilla_world::dlss::UpscalerChoice`,
-    // its default `Upscaler::default()` (welded below). Applies to the next frame.
+    // its default `Upscaler::DEFAULT` (welded below): `dlss` natively, `fsr` on the web build,
+    // which has no NGX. Applies to the next frame.
     ours(
         "upscaler",
-        "dlss",
+        if cfg!(target_arch = "wasm32") {
+            "fsr"
+        } else {
+            "dlss"
+        },
         "benilla's own — 1.12 has no upscaler to choose",
     ),
     // ── end fork-owned block ──

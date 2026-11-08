@@ -476,20 +476,52 @@
             .. "resolution from several frames; above 100% is supersampling, which smooths edges "
             .. "at the cost of frame rate. Applies when you click Apply."
 
-        -- fork: fsr (FORK.md) — 1.12 has no such checkbox.
-        BENILLA_TOOLTIP_FRAME_GENERATION =
-            "Shows a generated frame between every two the game draws, nearly doubling the "
-            .. "frames you see for one frame of added latency: NVIDIA DLSS Frame Generation with "
-            .. "the DLSS upscaler where it runs, AMD FSR 3.1 frame generation otherwise.\n\n"
-            .. "Render Scale is held at 100% or below while it is on. Applies when you click Apply."
+        -- fork: fsr (FORK.md) — 1.12 has no such checkbox. fork: dlss (FORK.md) —
+        -- DLSS is NGX's, which only a native client (`BENILLA_NATIVE`) carries.
+        if ( BENILLA_NATIVE ) then
+            BENILLA_TOOLTIP_FRAME_GENERATION =
+                "Shows a generated frame between every two the game draws, nearly doubling the "
+                .. "frames you see for one frame of added latency: NVIDIA DLSS Frame Generation "
+                .. "with the DLSS upscaler where it runs, AMD FSR 3.1 frame generation "
+                .. "otherwise.\n\n"
+                .. "Render Scale is held at 100% or below while it is on. Applies when you click "
+                .. "Apply."
+        else
+            BENILLA_TOOLTIP_FRAME_GENERATION =
+                "Shows a generated frame between every two the game draws, nearly doubling the "
+                .. "frames you see for one frame of added latency, with AMD FSR 3.1 frame "
+                .. "generation.\n\n"
+                .. "Render Scale is held at 100% or below while it is on. Applies when you click "
+                .. "Apply."
+        end
 
-        -- fork: dlss (FORK.md) — 1.12 has no upscaler to choose.
-        BENILLA_TOOLTIP_UPSCALER =
-            "Which upscaler rebuilds the picture when Render Scale is below 100% or frame "
-            .. "generation is on. NVIDIA DLSS 4.5 (RTX cards) also uses DLSS Frame Generation "
-            .. "where your card and the DLSS runtime support it; elsewhere it falls back to AMD "
-            .. "FSR 3.1. Off stretches the picture with no upscaler and no frame generation.\n\n"
-            .. "Switching applies at once."
+        -- fork: dlss (FORK.md) — 1.12 has no upscaler to choose. The Upscaler dropdown's
+        -- entries, which both windows read: DLSS only on a native client, the web build having
+        -- no NGX.
+        if ( BENILLA_NATIVE ) then
+            BENILLA_TOOLTIP_UPSCALER =
+                "Which upscaler rebuilds the picture when Render Scale is below 100% or frame "
+                .. "generation is on. NVIDIA DLSS 4.5 (RTX cards) also uses DLSS Frame Generation "
+                .. "where your card and the DLSS runtime support it; elsewhere it falls back to "
+                .. "AMD FSR 3.1. Off stretches the picture with no upscaler and no frame "
+                .. "generation.\n\n"
+                .. "Switching applies at once."
+            BENILLA_UPSCALER_ENTRIES = {
+                { text = "NVIDIA DLSS 4.5", value = "dlss" },
+                { text = "AMD FSR 3.1", value = "fsr" },
+                { text = "Off", value = "off" },
+            }
+        else
+            BENILLA_TOOLTIP_UPSCALER =
+                "Which upscaler rebuilds the picture when Render Scale is below 100% or frame "
+                .. "generation is on: AMD FSR 3.1, or Off, which stretches the picture with no "
+                .. "upscaler and no frame generation.\n\n"
+                .. "Switching applies at once."
+            BENILLA_UPSCALER_ENTRIES = {
+                { text = "AMD FSR 3.1", value = "fsr" },
+                { text = "Off", value = "off" },
+            }
+        end
 
         -- fork: fsr (FORK.md) — 1.12 has no such slider.
         BENILLA_TOOLTIP_RCAS_SHARPNESS =
@@ -2497,11 +2529,8 @@
                                                 -- own row. Live: the slot switches next frame.
                                                 BenillaOptionsRow_OnLoad(this, "upscaler", "Upscaler",
                                                     "BENILLA_TOOLTIP_UPSCALER")
-                                                BenillaOptionsDropdownRow_Setup(this, {
-                                                    { text = "NVIDIA DLSS 4.5", value = "dlss" },
-                                                    { text = "AMD FSR 3.1", value = "fsr" },
-                                                    { text = "Off", value = "off" },
-                                                })
+                                                BenillaOptionsDropdownRow_Setup(this,
+                                                    BENILLA_UPSCALER_ENTRIES)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowRcasSharpness" inherits="BenillaOptionsSliderRowTemplate">
@@ -4180,11 +4209,7 @@
             end
             -- The entries our own rows offer, in their order.
             -- fork: dlss (FORK.md)
-            BenillaUpscalerDropdown_Init = dropdown("upscaler", {
-                { text = "NVIDIA DLSS 4.5", value = "dlss" },
-                { text = "AMD FSR 3.1", value = "fsr" },
-                { text = "Off", value = "off" },
-            })
+            BenillaUpscalerDropdown_Init = dropdown("upscaler", BENILLA_UPSCALER_ENTRIES)
             BenillaLightingModelDropdown_Init = dropdown("lightingModel", {
                 { text = "Classic", value = "0" },
                 { text = "Modern", value = "1" },
