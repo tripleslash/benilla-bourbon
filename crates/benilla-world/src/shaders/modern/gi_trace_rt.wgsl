@@ -19,6 +19,10 @@ enable wgpu_ray_query;
 #import benilla_modern::locallight
 #import benilla_modern::colorspace
 #import benilla_modern::rt_scene
+// fork: F — the ray-traced shadows, where they run.
+#ifdef RT_SHADOWS
+#import benilla_modern::rtshadow
+#endif
 
 // `gi_trace.wgsl`'s `LightRows`.
 struct LightRows {
@@ -225,12 +229,24 @@ fn trace_rays(
                 backface = 1.0;
             }
             let lift = hit.pos + nrm * trace.tune.y;
+#ifdef RT_SHADOWS
+            // fork: F — the cascades hold the entities alone; one ray takes the static world and the
+            // terrain (`benilla_modern::rtshadow`, the scene at group 1).
+            let sun_vis = rtshadow::sun_visibility_anywhere(
+                shadow_map,
+                shadow_samp,
+                modern_block.cascades,
+                lift,
+                to_sun,
+            );
+#else
             let sun_vis = sunshadow::sun_visibility_anywhere(
                 shadow_map,
                 shadow_samp,
                 modern_block.cascades,
                 lift,
             );
+#endif
             let direct = key * (max(dot(nrm, to_sun), 0.0) * sun_vis);
             radiance = albedo * (direct + local_light_at(lift, nrm) + bounce_at(g, lift, nrm));
         }

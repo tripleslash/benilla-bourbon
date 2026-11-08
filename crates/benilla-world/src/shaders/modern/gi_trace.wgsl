@@ -10,6 +10,10 @@
 #import benilla_modern::probegi
 #import benilla_modern::sunshadow
 #import benilla_modern::locallight
+// fork: F — the ray-traced shadows (native only), where the voxel path runs beside them.
+#ifdef RT_SHADOWS
+#import benilla_modern::rtshadow
+#endif
 
 // The shared light buffer as this pass reads it (`lighting::global_light`): header rows 0 ambient,
 // 1 diffuse, 2 sun, 20 `.x` the live point count — then the point table, which P6's bounce needs so
@@ -365,12 +369,24 @@ fn trace_rays(
             let lift = hit.pos + nrm * trace.tune.y;
             // Placed by the map that holds it, never by where the camera looks: a hit behind the
             // player is as shaded as one in front (`sun_visibility_anywhere`).
+#ifdef RT_SHADOWS
+            // fork: F — the cascades hold the entities alone; one ray takes the static world and the
+            // terrain (`benilla_modern::rtshadow`, the scene at group 1).
+            let sun_vis = rtshadow::sun_visibility_anywhere(
+                shadow_map,
+                shadow_samp,
+                modern_block.cascades,
+                lift,
+                to_sun,
+            );
+#else
             let sun_vis = sunshadow::sun_visibility_anywhere(
                 shadow_map,
                 shadow_samp,
                 modern_block.cascades,
                 lift,
             );
+#endif
             let direct = key * (max(dot(nrm, to_sun), 0.0) * sun_vis);
             // P6: the local lights too, so a room whose only light is a hearth still bounces.
             radiance = albedo * (direct + local_light_at(lift, nrm) + bounce_at(g, lift, nrm));

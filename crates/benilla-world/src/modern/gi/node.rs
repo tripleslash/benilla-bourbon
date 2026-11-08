@@ -47,6 +47,10 @@ struct GiPipelines {
     /// fork: the ray stage as a ray query against the ray-traced scene (`gi_trace_rt.wgsl`), in
     /// place of `trace` where [`super::rt_gi`] holds; `None` otherwise.
     rt_trace: Option<CachedComputePipelineId>,
+    /// fork: F — the voxel path's `trace` declares the scene at group 1 for its hits' sun term
+    /// (`RT_SHADOWS`): the ray-traced shadows run while the probe rays do not
+    /// (`$WOW_RT_GI=0`), and the cascades no longer hold the static world.
+    voxel_rt: bool,
 }
 
 /// The trace's dispatch is rows of this many workgroups (`gi_classify.wgsl`'s `GROUP_ROW`): one
@@ -74,6 +78,9 @@ struct GiFrame {
     /// fork: the ray-traced scene's bind group (group 1 of the ray-query stage) where this frame's
     /// rays are ray queries ([`super::rt_gi`]); `None` on the voxel path.
     rt_bind: Option<BindGroup>,
+    /// fork: F — the scene, or its stand-in, for the voxel path's `trace` where
+    /// [`GiPipelines::voxel_rt`]; `None` otherwise.
+    shadow_bind: Option<BindGroup>,
     /// fork: a 1x1x1 stand-in for the voxel clipmap's two textures, which the ray-traced tier never
     /// builds: the trace's group 0 still has their slots, and only the voxel stage reads them.
     vox_stub: Option<TextureView>,
@@ -160,6 +167,34 @@ fn init_pipelines(
         "embedded://benilla_world/shaders/modern/gi_trace.wgsl",
         "setup_probes",
     );
+    // fork: F — the voxel path's hits take their sun through the scene where the ray-traced
+    // shadows run without the ray-traced probes (native only).
+    #[cfg(not(target_arch = "wasm32"))]
+    let voxel_rt = crate::modern::shadow::rt_shadows() && !super::rt_gi();
+    #[cfg(target_arch = "wasm32")]
+    let voxel_rt = false;
+    #[cfg(not(target_arch = "wasm32"))]
+    let trace = if voxel_rt {
+        let mut shader_defs = crate::static_gx::rt_scene::shader_defs(1);
+        shader_defs.push(bevy::shader::ShaderDefVal::from("RT_SHADOWS"));
+        pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("modern_gi_trace".into()),
+            layout: vec![trace_layout.clone(), crate::static_gx::rt_scene::layout()],
+            immediate_size: 0,
+            shader: asset_server.load("embedded://benilla_world/shaders/modern/gi_trace.wgsl"),
+            shader_defs,
+            entry_point: Some("trace_rays".into()),
+            zero_initialize_workgroup_memory: false,
+        })
+    } else {
+        compute(
+            "modern_gi_trace",
+            &trace_layout,
+            "embedded://benilla_world/shaders/modern/gi_trace.wgsl",
+            "trace_rays",
+        )
+    };
+    #[cfg(target_arch = "wasm32")]
     let trace = compute(
         "modern_gi_trace",
         &trace_layout,
@@ -181,12 +216,17 @@ fn init_pipelines(
     // fork: the ray-query stage, over the same group 0 plus the scene at group 1 (native only).
     #[cfg(not(target_arch = "wasm32"))]
     let rt_trace = super::rt_gi().then(|| {
+        let mut shader_defs = crate::static_gx::rt_scene::shader_defs(1);
+        // fork: F — the hits' sun through the scene too, where the cascades hold entities alone.
+        if crate::modern::shadow::rt_shadows() {
+            shader_defs.push(bevy::shader::ShaderDefVal::from("RT_SHADOWS"));
+        }
         pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("modern_gi_trace_rt".into()),
             layout: vec![trace_layout.clone(), crate::static_gx::rt_scene::layout()],
             immediate_size: 0,
             shader: asset_server.load("embedded://benilla_world/shaders/modern/gi_trace_rt.wgsl"),
-            shader_defs: crate::static_gx::rt_scene::shader_defs(1),
+            shader_defs,
             entry_point: Some("trace_rays".into()),
             zero_initialize_workgroup_memory: false,
         })
@@ -206,6 +246,7 @@ fn init_pipelines(
         sum,
         blend,
         rt_trace,
+        voxel_rt,
     });
 }
 
@@ -231,6 +272,7 @@ fn prepare_gi(
     frame.trace_bind = None;
     frame.blend_bind = None;
     frame.rt_bind = None;
+    frame.shadow_bind = None;
     frame.groups = 0;
     let (Some(gi), Some(block)) = (gi, buffers.get(MODERN_SHADOW_CASCADES.id())) else {
         return;
@@ -451,6 +493,14 @@ fn prepare_gi(
         )),
     ));
     frame.rt_bind = rt_bind;
+    // fork: F — the voxel path's scene for its hits' sun term (the stand-in until the TLAS holds an
+    // instance: the rays then miss, as the scene's own would).
+    #[cfg(not(target_arch = "wasm32"))]
+    if pipes.voxel_rt {
+        frame.shadow_bind = rt_scene
+            .as_deref()
+            .and_then(|s| s.bind_group_or_stub().cloned());
+    }
     frame.groups = (probes as u32).div_ceil(64);
     bevy::log::info_once!(
         "modern GI: probes live — {} in {} cascade(s), {} rays, 1/{} traced a frame",
@@ -517,6 +567,10 @@ pub(crate) fn gi_trace_pass(
     ) else {
         return;
     };
+    // fork: F — a voxel trace that declares the scene cannot run without it.
+    if pipes.voxel_rt && frame.shadow_bind.is_none() && frame.rt_bind.is_none() {
+        return;
+    }
     // fork: at the ray-traced tier the ray stage is the ray query, with the scene at group 1.
     let rt_stage = match &frame.rt_bind {
         Some(bind) => match pipes
@@ -566,7 +620,13 @@ pub(crate) fn gi_trace_pass(
                 pass.set_pipeline(rt_trace);
                 pass.set_bind_group(1, rt_bind, &[]);
             }
-            None => pass.set_pipeline(trace),
+            None => {
+                pass.set_pipeline(trace);
+                // fork: F — the voxel path's hits trace their sun (`GiPipelines::voxel_rt`).
+                if let Some(bind) = &frame.shadow_bind {
+                    pass.set_bind_group(1, bind, &[]);
+                }
+            }
         }
         pass.dispatch_workgroups_indirect(dispatch, 0);
         pass.set_pipeline(sum);
