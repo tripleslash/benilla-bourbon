@@ -60,6 +60,8 @@ pub(crate) fn modern_libraries(app: &mut App) {
         // fork: static_gx's Hi-Z pyramid and two-phase GPU cull (`gpu_cull.rs`), native only.
         bevy::asset::embedded_asset!(app, "shaders/modern/gx_hiz.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/modern/gx_cull.wgsl");
+        // fork: the probe trace's ray-query stage (`modern::gi::rt_gi`), native only.
+        bevy::asset::embedded_asset!(app, "shaders/modern/gi_trace_rt.wgsl");
     }
     bevy::asset::embedded_asset!(app, "shaders/modern/froxel_scatter.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/modern/froxel_integrate.wgsl");
