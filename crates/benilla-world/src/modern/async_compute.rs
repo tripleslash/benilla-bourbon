@@ -6,8 +6,15 @@
 //!
 //! Where each overlaps, from what it reads:
 //! - **Light binning** reads only CPU-written buffers (the light table, the ranks, the grid
-//!   parameters), so it is recorded before the shadow raster and runs beside it. The shadow pass
-//!   binds the light table too, for reading only.
+//!   parameters), so it is recorded before the shadow raster and runs beside it and the probe
+//!   trace. The shadow pass binds the light table too, for reading only. It writes a private grid,
+//!   copied into the storage block (`MODERN_SHADOW_CASCADES`) after a flush in front of the froxels:
+//!   every world material and the probe trace bind that block, and wgpu orders the two queues per
+//!   buffer, not per range, so the binning writing the block's light region made them all wait for
+//!   it (measured on DX12: `PERF_OVERLAP` 0.000 of 0.107 ms, every frame waiting on the block). The
+//!   probes stay in the block: the trace writes them on the main queue before the froxels are
+//!   submitted, and it runs on the world view alone, so nothing writes them while async work that
+//!   reads them is in flight.
 //! - **Froxels** read this frame's shadow cascades, so they follow the shadow raster and run beside
 //!   the opaque and static_gx raster. Every world material binds the fog volume, so the integrate
 //!   pass writes a private one, copied into `MODERN_FOG_VOLUME` after a flush in front of the fog
@@ -18,10 +25,6 @@
 //!   place: reading last frame's would mean a full copy of it each frame.
 //! - **The meter** reads the scene before the combine exposes it, and runs beside the
 //!   post-process. Its grid is read back a frame or more later in any case.
-//!
-//! None of them overlaps yet: the light grid and the GI probes live in the one storage block
-//! (`MODERN_SHADOW_CASCADES`) that the binning writes here, the GI passes write on the main queue
-//! and every world material reads, and wgpu orders the two queues per buffer, not per range.
 //!
 //! `WOW_ASYNC_COMPUTE=0` keeps everything on the main queue; so does the browser, which has no
 //! second queue.

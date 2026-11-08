@@ -400,7 +400,7 @@ fn prepare_gi(
 /// mirror and the booths, which read none of it, each ran it again ([`world_view_only`]).
 ///
 /// [`world_view_only`]: crate::modern::world_view_only
-fn gi_trace_pass(
+pub(crate) fn gi_trace_pass(
     world: &World,
     view: ViewQuery<Has<crate::modern::volumetrics::ModernFogView>>,
     mut render_context: RenderContext,

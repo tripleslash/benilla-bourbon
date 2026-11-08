@@ -40,6 +40,9 @@ struct LightPipelines {
     bin: CachedComputePipelineId,
     /// The table's steady strengths ([`LightRank`]), which the binning pass ranks a cell by.
     rank: Buffer,
+    /// fork: perf — the light region the binning writes on the async queue, laid out as the
+    /// block's, which [`copy_light_grid`] copies into the block on the main queue.
+    grid: Buffer,
 }
 
 #[derive(Resource, Default)]
@@ -71,6 +74,12 @@ fn init_pipelines(
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    let grid = device.create_buffer(&BufferDescriptor {
+        label: Some("modern_light_grid"),
+        size: BLOCK_LIGHT_BYTES as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     let bin = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some("modern_light_bin".into()),
         layout: vec![layout.clone()],
@@ -80,7 +89,12 @@ fn init_pipelines(
         entry_point: Some("bin_lights".into()),
         zero_initialize_workgroup_memory: false,
     });
-    commands.insert_resource(LightPipelines { layout, bin, rank });
+    commands.insert_resource(LightPipelines {
+        layout,
+        bin,
+        rank,
+        grid,
+    });
 }
 
 /// Write the grid's parameters and get the binning pass ready. The parameters go out every modern
@@ -98,6 +112,7 @@ fn prepare_lights(
     pipes: Option<Res<LightPipelines>>,
     pipeline_cache: Res<PipelineCache>,
     uploaded_plane: Option<Res<crate::modern::shadow::UploadedMirrorPlane>>,
+    async_queue: Option<Res<RenderAsyncComputeQueue>>,
     mut frame: ResMut<LightFrame>,
 ) {
     frame.bind = None;
@@ -152,6 +167,14 @@ fn prepare_lights(
         return;
     };
     queue.write_buffer(&pipes.rank, 0, bytemuck::cast_slice(&rank.0));
+    // fork: perf — on the async queue the binning writes its own grid, whose parameters it reads
+    // as it does the block's; the block keeps the copy above for a frame the binning skips.
+    let (grid, grid_offset) = if async_queue.is_some() {
+        queue.write_buffer(&pipes.grid, 0, &bytes);
+        (&pipes.grid, 0)
+    } else {
+        (&block.buffer, LIGHT_OFFSET)
+    };
     frame.bind = Some(
         device.create_bind_group(
             "modern_light_bin",
@@ -161,8 +184,8 @@ fn prepare_lights(
                 // The light region of the block alone: the rest of it is read-only storage in the same
                 // frame's render passes, and a writable binding is exclusive per buffer, not per range.
                 BindingResource::Buffer(BufferBinding {
-                    buffer: &block.buffer,
-                    offset: LIGHT_OFFSET,
+                    buffer: grid,
+                    offset: grid_offset,
                     size: Some(
                         std::num::NonZero::new(BLOCK_LIGHT_BYTES as u64)
                             .expect("the light region is never empty"),
@@ -221,9 +244,9 @@ fn light_bin_pass(
 }
 
 /// fork: perf — [`light_bin_pass`] on the async compute queue (`modern::async_compute`). It reads
-/// only what `prepare_lights` uploaded, so it is recorded in front of the shadow raster and runs
-/// beside it; the cells are written before anything that reads them is submitted (the froxels,
-/// the main pass), and wgpu has those wait for it.
+/// only what `prepare_lights` uploaded and writes [`LightPipelines::grid`], so it is recorded in
+/// front of the shadow raster and runs beside it; [`copy_light_grid`] brings the cells into the
+/// block before anything reads them.
 fn light_bin_pass_async(
     frame: Res<LightFrame>,
     pipes: Res<LightPipelines>,
@@ -256,6 +279,42 @@ fn light_bin_pass_async(
     span.end(&mut pass);
 }
 
+/// fork: perf — with the binning on the async queue, its grid copied into the block's light region
+/// on the main queue, after the shadow raster and the probe trace and before the froxels and the
+/// main pass, the first readers of the cells. Every world material binds the block, and wgpu orders
+/// the two queues per buffer, not per range: the binning writing the block itself made the shadow
+/// raster and the probe trace wait for it. The flush in front submits those first, so only the
+/// copy's submission waits.
+fn copy_light_grid(
+    frame: Res<LightFrame>,
+    pipes: Res<LightPipelines>,
+    buffers: Res<RenderAssets<GpuShaderBuffer>>,
+    view: ViewQuery<Has<crate::modern::volumetrics::ModernFogView>>,
+    async_queue: Option<Res<RenderAsyncComputeQueue>>,
+    // Before `render_context`: its buffer (the copy) is applied after the flush.
+    mut flush: crate::modern::async_compute::FlushMainQueue,
+    mut render_context: RenderContext,
+) {
+    if async_queue.is_none() || !crate::modern::world_view_only(view.into_inner()) {
+        return;
+    }
+    // The bind group exists only on a frame the binning runs.
+    if frame.bind.is_none() || frame.groups == 0 {
+        return;
+    }
+    let Some(block) = buffers.get(MODERN_SHADOW_CASCADES.id()) else {
+        return;
+    };
+    flush.flush();
+    render_context.command_encoder().copy_buffer_to_buffer(
+        &pipes.grid,
+        0,
+        &block.buffer,
+        LIGHT_OFFSET,
+        BLOCK_LIGHT_BYTES as u64,
+    );
+}
+
 pub(super) fn build(render_app: &mut SubApp) {
     render_app
         .init_resource::<LightFrame>()
@@ -279,6 +338,13 @@ pub(super) fn build(render_app: &mut SubApp) {
                     .before(crate::static_gx::gx_shadow_pass)
                     .before(bevy::pbr::per_view_shadow_pass::<{ bevy::pbr::EARLY_SHADOW_PASS }>)
                     .before(bevy::pbr::per_view_shadow_pass::<{ bevy::pbr::LATE_SHADOW_PASS }>)
+                    .before(crate::modern::volumetrics::froxel_pass)
+                    .before(Core3dSystems::MainPass),
+                copy_light_grid
+                    .after(crate::static_gx::gx_shadow_pass)
+                    .after(bevy::pbr::per_view_shadow_pass::<{ bevy::pbr::EARLY_SHADOW_PASS }>)
+                    .after(bevy::pbr::per_view_shadow_pass::<{ bevy::pbr::LATE_SHADOW_PASS }>)
+                    .after(crate::modern::gi::node::gi_trace_pass)
                     .before(crate::modern::volumetrics::froxel_pass)
                     .before(Core3dSystems::MainPass),
             ),
