@@ -75,11 +75,3 @@ __pycache__/
 # beside `WoW`, or `BENILLA_ADDON_CORPUS`.
 /wow-addons-vanilla
 
-# fork: dlss (FORK.md) — NVIDIA's DLSS / Streamline runtimes and the NGX SDK are the
-# player's or developer's own, under NVIDIA's licences: never in the tree, wherever they land.
-nvngx_*.dll
-libnvidia-ngx-*.so*
-sl.*.dll
-nvsdk_ngx*.lib
-libnvsdk_ngx*.a
-nvsdk_ngx*.h
