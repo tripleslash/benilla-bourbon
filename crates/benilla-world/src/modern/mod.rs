@@ -16,6 +16,7 @@ use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use crate::view::WorldCamera;
 
 pub(crate) mod async_compute;
+pub mod caps;
 mod cloud_bake;
 pub mod gi;
 pub mod lights;
@@ -363,6 +364,7 @@ impl Plugin for ModernLightingPlugin {
             )
             .add_plugins((
                 async_compute::plugin,
+                caps::plugin,
                 sun_arc::plugin,
                 shadow::plugin,
                 look::plugin,

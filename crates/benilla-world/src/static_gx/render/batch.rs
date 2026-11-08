@@ -27,9 +27,10 @@ use bevy::render::mesh::allocator::MeshAllocator;
 use bevy::render::render_phase::TrackedRenderPass;
 use bevy::render::render_resource::{
     BindGroupId, Buffer, BufferDescriptor, BufferId, BufferUsages, DrawIndexedIndirectArgs,
-    IndexFormat, RenderPipeline, WgpuFeatures,
+    IndexFormat, RenderPipeline,
 };
 use bevy::render::renderer::{RenderDevice, RenderQueue};
+use crate::modern::caps::HwCaps;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::{Mutex, PoisonError};
 
@@ -117,19 +118,12 @@ pub(super) struct GxIndirect {
     cursor: AtomicU32,
 }
 
-/// Whether the device draws a multi-draw natively. Never on wasm32: WebGPU has no multi-draw and
-/// wgpu would loop `draw_indexed_indirect`, each one validated, which is dearer than direct draws.
-fn multi_draw_native(device: &RenderDevice) -> bool {
-    !cfg!(target_arch = "wasm32")
-        && device
-            .features()
-            .contains(WgpuFeatures::MULTI_DRAW_INDIRECT_COUNT)
-        && crate::launch_env::var("WOW_STATIC_GX_MDI").as_deref() != Some("0")
-}
-
-pub(super) fn init_indirect(mut commands: Commands, device: Res<RenderDevice>) {
+/// `RenderStartup`, after [`crate::modern::caps::init`]: multi-draw where the device draws one in
+/// hardware ([`HwCaps::mdi_count`], never on wasm32) and the lever leaves it on.
+pub(super) fn init_indirect(mut commands: Commands, caps: Option<Res<HwCaps>>) {
     commands.insert_resource(GxIndirect {
-        native: multi_draw_native(&device),
+        native: caps.is_some_and(|c| c.mdi_count)
+            && crate::launch_env::var("WOW_STATIC_GX_MDI").as_deref() != Some("0"),
         buffer: None,
         capacity: 0,
         cursor: AtomicU32::new(0),

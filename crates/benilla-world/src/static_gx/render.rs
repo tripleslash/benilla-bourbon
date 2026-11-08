@@ -1184,8 +1184,10 @@ pub(super) fn build(app: &mut App) {
         .add_systems(
             bevy::render::RenderStartup,
             (
-                init_pipelines.after(bevy::pbr::MeshPipelineSystems),
-                batch::init_indirect,
+                init_pipelines
+                    .after(bevy::pbr::MeshPipelineSystems)
+                    .after(crate::modern::caps::init),
+                batch::init_indirect.after(crate::modern::caps::init),
             ),
         )
         .add_systems(
