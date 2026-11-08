@@ -222,6 +222,16 @@ fn sun_visibility_fast(
     return ent * sun_ray(world_pos, to_sun);
 }
 
+// One ray's share alone (the water, whose cascade read `sunshadow::sun_visibility_load` already
+// fades to lit past the cascades): 1 with no cascades this frame, as every `sunshadow` read.
+// `world_pos` is already lifted.
+fn sun_visibility_ray(c: sunshadow::ModernCascades, world_pos: vec3<f32>, to_sun: vec3<f32>) -> f32 {
+    if (u32(c.params.x) == 0u) {
+        return 1.0;
+    }
+    return sun_ray(world_pos, to_sun);
+}
+
 // Where a ray from `origin` along `dir` toward a point `dist` away by a lamp at `light` stops: short
 // of the lamp's own fixture box (`ShadowLight::clear`, half-extent `clear` about the light, 0 =
 // none), whose glass and frame the atlas never drew either (`FIXTURE_CLIP`), and never nearer the

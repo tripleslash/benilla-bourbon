@@ -573,12 +573,14 @@ fn prepare_static_gx(
                     });
                     pipes.prepass.insert((cutout, two_sided), pre);
                 }
-                // fork: F — the colour pipeline alone traces; after the prepass twin took its defs.
+                // fork: F — the colour pipeline's fragment stage alone traces (the scene's layout
+                // is visible to the fragment and compute stages only).
                 let mut layout = vec![
                     pipes.view_layout.clone(),
                     pipes.cell_layout.clone(),
                     pipes.light_layout.clone(),
                 ];
+                let vertex_defs = defs.clone();
                 if let Some(rt) = &rt_layout {
                     layout.push(rt.clone());
                     defs.push(ShaderDefVal::from("RT_SHADOWS"));
@@ -591,7 +593,7 @@ fn prepare_static_gx(
                     layout,
                     vertex: VertexState {
                         shader: shader.clone(),
-                        shader_defs: defs.clone(),
+                        shader_defs: vertex_defs,
                         entry_point: Some("vertex".into()),
                         buffers: vec![vertex_layout()],
                     },

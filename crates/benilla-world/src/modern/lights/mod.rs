@@ -617,6 +617,10 @@ pub struct LightParams {
     /// fork: the twelve per-slot match radii ([`ShadowLight::slack`]) — `spare` rows 6-8, read by
     /// `light_bin.wgsl`'s `shadow_slot`.
     pub slot_slack: [Vec4; MAX_SHADOWED / 4],
+    /// fork: F — the twelve per-slot fixture boxes ([`ShadowLight::clear`]) — `spare` rows 9-11,
+    /// where a ray-traced lamp shadow stops short of the lamp's own glass and frame
+    /// (`rtshadow::fixture_entry`). Written on native only; the browser's rows stay padding.
+    pub slot_clear: [Vec4; MAX_SHADOWED / 4],
 }
 
 impl LightParams {
@@ -639,6 +643,9 @@ impl LightParams {
             row(*s);
         }
         for s in &self.slot_slack {
+            row(*s);
+        }
+        for s in &self.slot_clear {
             row(*s);
         }
         // `spare`: P7's per-zone local-light grading, and the padding that keeps the GI block's
@@ -672,10 +679,14 @@ pub fn params(lights: &ModernLights, shadow_map_size: u32) -> LightParams {
     // lookup toward full visibility by it.
     let mut slot_fade = [Vec4::ZERO; MAX_SHADOWED / 4];
     let mut slot_slack = [Vec4::splat(MATCH_SLACK); MAX_SHADOWED / 4];
+    let mut slot_clear = [Vec4::ZERO; MAX_SHADOWED / 4];
     for (slot, held) in lights.shadowed.iter().enumerate().take(MAX_SHADOWED) {
         if let Some(held) = held {
             shadow[slot] = held.light.pos.extend(held.light.range);
             slot_slack[slot / 4][slot % 4] = held.light.slack.max(MATCH_SLACK);
+            if cfg!(not(target_arch = "wasm32")) {
+                slot_clear[slot / 4][slot % 4] = held.light.clear;
+            }
             slot_fade[slot / 4][slot % 4] = (held.fade
                 * shadow_distance_weight(tier, held.light.pos.distance(lights.eye)))
             .clamp(0.0, 1.0);
@@ -714,6 +725,7 @@ pub fn params(lights: &ModernLights, shadow_map_size: u32) -> LightParams {
         slot_near,
         slot_fade,
         slot_slack,
+        slot_clear,
     }
 }
 

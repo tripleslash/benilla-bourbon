@@ -14,6 +14,10 @@
 #import benilla_modern::sunshadow
 #import benilla_modern::probegi
 #import benilla_modern::locallight
+// fork: F — the ray-traced shadows (`benilla_modern::rtshadow`, native only), where the lane runs.
+#ifdef RT_SHADOWS
+#import benilla_modern::rtshadow
+#endif
 #import benilla::env_frame
 // fork: rain on surfaces (the Everwood port).
 #import benilla::wet_hook
@@ -206,6 +210,24 @@ fn modern_cell_lights(
             // takes, and what it costs is the whole module.
             let row = modern_block.light_spare[slot / 4u];
             let frow = modern_block.light_spare[3u + slot / 4u];
+#ifdef RT_SHADOWS
+            // fork: F — the atlas holds the entities alone; rays to the light (stopped at the
+            // fixture box, spare rows 9-11) take the static world and the terrain.
+            let crow = modern_block.light_spare[9u + slot / 4u];
+            vis = rtshadow::local_visibility(
+                modern_shadow_map,
+                modern_shadow_samp,
+                g,
+                slot,
+                modern_block.light_shadow[slot].xyz,
+                pos_range.xyz,
+                crow[slot % 4u],
+                p,
+                nrm,
+                row[slot % 4u],
+                frow[slot % 4u],
+            );
+#else
             vis = locallight::local_visibility(
                 modern_shadow_map,
                 modern_shadow_samp,
@@ -217,6 +239,7 @@ fn modern_cell_lights(
                 row[slot % 4u],
                 frow[slot % 4u],
             );
+#endif
         }
         sum = sum + wow_light.points[2u * id + 1u].rgb * (locallight::falloff(d, pos_range.w) * nl * vis);
     }
@@ -573,7 +596,12 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
         // The shadow debug views keep the reads, so they still show what the cascades hold.
         world_shadow = 0.0;
         if (mndotl > 0.0 || modern_block.cascades.params.w > 0.5) {
+#ifdef RT_SHADOWS
+            // fork: F — the static world and the terrain by ray, the entities from the cascades.
+            world_shadow = rtshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, mn, -mview_z, lite, ml);
+#else
             world_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, mn, -mview_z, lite);
+#endif
             // fork: modern lighting (FORK.md, P4) — cloud shadows sweep over the ground.
             let cloud_ct = sunshadow::cloud_taps(modern_block.fog.cloud, in.world_position.xyz);
             world_shadow = world_shadow * sunshadow::cloud_mix(cloud_ct, modern_block.cloud[cloud_ct.idx.x], modern_block.cloud[cloud_ct.idx.y], modern_block.cloud[cloud_ct.idx.z], modern_block.cloud[cloud_ct.idx.w]);

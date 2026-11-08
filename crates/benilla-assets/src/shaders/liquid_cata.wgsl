@@ -77,6 +77,10 @@
 #import benilla_modern::sunshadow
 #import benilla_modern::froxelfog
 #import benilla_modern::skydome
+// fork: F — the ray-traced shadows (`benilla_modern::rtshadow`, native only), where the lane runs.
+#ifdef RT_SHADOWS
+#import benilla_modern::rtshadow
+#endif
 #import bevy_pbr::{
     mesh_functions,
     forward_io::Vertex,
@@ -1489,14 +1493,27 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         // The sun's highlights (glare, specular, glint) are the sun mirrored off the surface itself, so
         // they take the surface point's visibility whatever the depth, and none of it in full shade.
         let lifted = in.world_position.xyz + vec3<f32>(0.0, 0.05, 0.0);
+#ifdef RT_SHADOWS
+        // fork: F — the cascades hold the entities alone; one ray each takes the static world and
+        // the terrain, at the surface and at the bed probe.
+        let to_key = -normalize(wow_light.light_sun.xyz);
+        let sun_surface = sunshadow::sun_visibility_load(modern_shadow_map, modern_block.cascades, lifted, frag_view_z)
+            * rtshadow::sun_visibility_ray(modern_block.cascades, lifted, to_key);
+#else
         let sun_surface = sunshadow::sun_visibility_load(modern_shadow_map, modern_block.cascades, lifted, frag_view_z);
+#endif
         let deep = select(smoothstep(WATER_SHADOW_PROBE, 2.0 * WATER_SHADOW_PROBE, column_v), 1.0, below);
         var body_sun = sun_surface;
         if (deep < 1.0) {
             let probe_d = max(ray_len - WATER_SHADOW_BED_LIFT, 0.0);
             // The probe sits on this pixel's ray, so its planar depth scales with the distance along it.
             let probe_z = frag_view_z * (1.0 + probe_d / max(view_len, 0.001));
+#ifdef RT_SHADOWS
+            let sun_bed = sunshadow::sun_visibility_load(modern_shadow_map, modern_block.cascades, lifted + v * probe_d, probe_z)
+                * rtshadow::sun_visibility_ray(modern_block.cascades, lifted + v * probe_d, to_key);
+#else
             let sun_bed = sunshadow::sun_visibility_load(modern_shadow_map, modern_block.cascades, lifted + v * probe_d, probe_z);
+#endif
             body_sun = mix(sun_bed, sun_surface, deep);
         }
         let wct = sunshadow::cloud_taps(modern_block.fog.cloud, lifted);
