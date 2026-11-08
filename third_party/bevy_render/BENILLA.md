@@ -313,6 +313,24 @@ buffer writes would be a fork nobody could diff against upstream on the next bev
 Off `wasm32 + atomics`, `compute_scope` **is** `ComputeTaskPool::get().scope` — so native is
 upstream, and the serial path costs nothing anywhere else.
 
+## The fifteenth delta: `raw_vulkan_init` leaves every other backend alone
+
+Upstream's `raw_vulkan_init` builds a Vulkan-only instance (`Instance::from_hal::<Vulkan>`) whatever
+`WgpuSettings::backends` asks for, so enabling the feature (DLSS on Vulkan needs it to add NGX's
+instance and device extensions) would take DX12, benilla's default `gxApi`, away. In
+`src/renderer/raw_vulkan_init.rs` the raw instance is built only when the backends are exactly
+`VULKAN` and a callback is registered, and the raw device only when a device callback is registered;
+otherwise both are the plain `Instance::new` / `request_device`. The raw device also opens with the
+descriptor's `required_limits` rather than `adapter.limits()` (upstream dlss_wgpu 4.0.0 made the same
+fix in its own `request_device`).
+
+## The sixteenth delta: a frame-latency marker hook in `render_system`
+
+`renderer::present_hook::set(fn(Phase))` installs one callback that `render_system` runs before the
+render graph (`SubmitStart`), after the last submit (`SubmitEnd`) and around the window presents
+(`PresentStart`, `PresentEnd`). Streamline's PC Latency markers, which DLSS Frame Generation
+requires, are set there (`benilla-world/src/dlss/streamline.rs`). Unset, a `OnceLock` read per point.
+
 ## What this does NOT do
 
 It does not make the render app single-threaded, and it is not a general fix for "wgpu on a worker".

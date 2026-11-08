@@ -73,6 +73,14 @@ pub(crate) fn create_raw_vulkan_instance(
     settings: &RawVulkanInitSettings,
     additional_features: &mut AdditionalVulkanFeatures,
 ) -> Instance {
+    // benilla fork (BENILLA.md, "The fifteenth delta"): the raw instance is Vulkan-only, so it is
+    // built only for a Vulkan-only boot with callbacks to run; any other backend set (DX12, the
+    // default) gets the plain instance it would have had without the feature.
+    if instance_descriptor.backends != wgpu::Backends::VULKAN
+        || settings.create_instance_callbacks.is_empty()
+    {
+        return Instance::new(instance_descriptor);
+    }
     // SAFETY: Registering callbacks is unsafe. Callback authors promise not to remove features
     // or change the instance to something it does not support
     unsafe {
@@ -106,12 +114,18 @@ pub(crate) async fn create_raw_device(
     // SAFETY: Registering callbacks is unsafe. Callback authors promise not to remove features
     // or change the adapter to something it does not support
     unsafe {
+        // benilla fork (BENILLA.md, "The fifteenth delta"): no callbacks, the plain path.
+        if settings.create_device_callbacks.is_empty() {
+            return Ok(adapter.request_device(device_descriptor).await?);
+        }
         let Some(raw_adapter) = adapter.as_hal::<Vulkan>() else {
             return Ok(adapter.request_device(device_descriptor).await?);
         };
         let open_device = raw_adapter.open_with_callback(
             device_descriptor.required_features,
-            &adapter.limits(),
+            // benilla fork: the limits the descriptor asks for, as `request_device` honours them,
+            // not the adapter's maxima.
+            &device_descriptor.required_limits,
             &device_descriptor.memory_hints,
             Some(Box::new(|mut args| {
                 for callback in &settings.create_device_callbacks {
