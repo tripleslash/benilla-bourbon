@@ -543,7 +543,9 @@ impl GxBindless {
             .triangles
             .reserve(arena.triangle_alloc.end(), device, queue, copies);
         let rebased: Vec<[u32; 4]> = rows
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .flat_map(|pair| {
                 let [v, t, counts, cone] = pair[0];
                 [

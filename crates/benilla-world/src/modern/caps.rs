@@ -250,8 +250,10 @@ mod tests {
     /// Multiview counts views only with the feature; a selective mask needs both features.
     #[test]
     fn multiview_needs_its_feature() {
-        let mut limits = WgpuLimits::default();
-        limits.max_multiview_view_count = 4;
+        let limits = WgpuLimits {
+            max_multiview_view_count: 4,
+            ..WgpuLimits::default()
+        };
         let none = HwCaps::from_parts(WgpuFeatures::empty(), &limits);
         assert_eq!(none.multiview_views, 0);
         assert!(!none.multiview_selective);

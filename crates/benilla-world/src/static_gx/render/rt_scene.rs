@@ -507,7 +507,7 @@ impl RtScene {
         );
         queue.submit([encoder.finish()]);
         let white = pool.white(device, queue);
-        let white_view: &WgpuTextureView = &**pool.view(white);
+        let white_view: &WgpuTextureView = pool.view(white);
         let views: Vec<&WgpuTextureView> = (0..GX_CLASS_SLOTS).map(|_| white_view).collect();
         let layout = pipeline_cache.get_bind_group_layout(&self.layout);
         self.stub = Some(device.create_bind_group(
@@ -1516,7 +1516,7 @@ pub(crate) fn rt_scene_pass(
                         .iter()
                         .map(|(size, first)| BlasTriangleGeometry {
                             size,
-                            vertex_buffer: &**scratch,
+                            vertex_buffer: scratch,
                             first_vertex: b.scratch_vertex,
                             vertex_stride: b.stride,
                             index_buffer: Some(&*b.index),

@@ -136,8 +136,8 @@ pub(crate) fn build(positions: &[[f32; 3]], indices: &[u32], items: &[ItemSpan])
         let Some(tris) = indices.get(range) else {
             continue;
         };
-        for tri in tris.chunks_exact(3) {
-            let [a, b, c] = [tri[0], tri[1], tri[2]];
+        for tri in tris.as_chunks::<3>().0 {
+            let [a, b, c] = *tri;
             if [a, b, c].iter().any(|&v| v as usize >= positions.len()) {
                 continue;
             }

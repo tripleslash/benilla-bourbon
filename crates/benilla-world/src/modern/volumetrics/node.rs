@@ -330,7 +330,7 @@ fn prepare_froxels(
             let rt_bind = pipes
                 .scatter_rt
                 .filter(|_| super::rt_froxel())
-                .and_then(|_| rt_scene.as_deref())
+                .and(rt_scene.as_deref())
                 .and_then(|s| s.bind_group().cloned());
             #[cfg(target_arch = "wasm32")]
             let rt_bind: Option<BindGroup> = None;
