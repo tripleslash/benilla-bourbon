@@ -44,6 +44,9 @@ struct GiPipelines {
     trace: CachedComputePipelineId,
     sum: CachedComputePipelineId,
     blend: CachedComputePipelineId,
+    /// fork: the ray stage as a ray query against the ray-traced scene (`gi_trace_rt.wgsl`), in
+    /// place of `trace` where [`super::rt_gi`] holds; `None` otherwise.
+    rt_trace: Option<CachedComputePipelineId>,
 }
 
 /// The trace's dispatch is rows of this many workgroups (`gi_classify.wgsl`'s `GROUP_ROW`): one
@@ -68,6 +71,12 @@ struct GiFrame {
     classify_bind: Option<BindGroup>,
     trace_bind: Option<BindGroup>,
     blend_bind: Option<BindGroup>,
+    /// fork: the ray-traced scene's bind group (group 1 of the ray-query stage) where this frame's
+    /// rays are ray queries ([`super::rt_gi`]); `None` on the voxel path.
+    rt_bind: Option<BindGroup>,
+    /// fork: a 1x1x1 stand-in for the voxel clipmap's two textures, which the ray-traced tier never
+    /// builds: the trace's group 0 still has their slots, and only the voxel stage reads them.
+    vox_stub: Option<TextureView>,
     /// Workgroups of the classify pass: one thread per probe of the tier.
     groups: u32,
 }
@@ -169,6 +178,24 @@ fn init_pipelines(
         "embedded://benilla_world/shaders/modern/gi_blend.wgsl",
         "blend_probes",
     );
+    // fork: the ray-query stage, over the same group 0 plus the scene at group 1 (native only).
+    #[cfg(not(target_arch = "wasm32"))]
+    let rt_trace = super::rt_gi().then(|| {
+        pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("modern_gi_trace_rt".into()),
+            layout: vec![trace_layout.clone(), crate::static_gx::rt_scene::layout()],
+            immediate_size: 0,
+            shader: asset_server.load("embedded://benilla_world/shaders/modern/gi_trace_rt.wgsl"),
+            shader_defs: crate::static_gx::rt_scene::shader_defs(1),
+            entry_point: Some("trace_rays".into()),
+            zero_initialize_workgroup_memory: false,
+        })
+    });
+    #[cfg(target_arch = "wasm32")]
+    let rt_trace: Option<CachedComputePipelineId> = None;
+    if rt_trace.is_some() {
+        info!("modern GI: probe rays are ray queries against the TLAS (WOW_RT_GI=0 turns it off)");
+    }
     commands.insert_resource(GiPipelines {
         classify_layout,
         trace_layout,
@@ -178,6 +205,7 @@ fn init_pipelines(
         trace,
         sum,
         blend,
+        rt_trace,
     });
 }
 
@@ -197,16 +225,29 @@ fn prepare_gi(
     pipes: Option<Res<GiPipelines>>,
     pipeline_cache: Res<PipelineCache>,
     mut frame: ResMut<GiFrame>,
+    #[cfg(not(target_arch = "wasm32"))] rt_scene: Option<Res<crate::static_gx::rt_scene::RtScene>>,
 ) {
     frame.classify_bind = None;
     frame.trace_bind = None;
     frame.blend_bind = None;
+    frame.rt_bind = None;
     frame.groups = 0;
     let (Some(gi), Some(block)) = (gi, buffers.get(MODERN_SHADOW_CASCADES.id())) else {
         return;
     };
     let modern = active.is_some_and(|a| a.is_modern());
-    let on = modern && gi.on && scene.ready;
+    // fork: the ray-traced trace ([`super::rt_gi`]) casts against the scene's TLAS, whose bind
+    // group exists once the TLAS holds an instance (`RtScene::bind_group`).
+    let rt = super::rt_gi();
+    #[cfg(not(target_arch = "wasm32"))]
+    let rt_bind = rt
+        .then(|| rt_scene.as_deref().and_then(|s| s.bind_group().cloned()))
+        .flatten();
+    #[cfg(target_arch = "wasm32")]
+    let rt_bind: Option<BindGroup> = None;
+    // Until then there is nothing to trace against (this tier builds no clipmap): the field is
+    // off and the lanes keep the sky map, as on a frame with no voxel model.
+    let on = modern && gi.on && scene.ready && (!rt || rt_bind.is_some());
 
     // The probes' own sky is the shared light's ambient row; the CPU copy here only has to agree
     // with it closely enough for the froxels' reference (the trace reads the row itself).
@@ -235,22 +276,43 @@ fn prepare_gi(
         warn_once!("modern GI: the storage block is too small for {probes} probes");
         return;
     }
+    // fork: the voxel clipmap's two textures, or at the ray-traced tier, which builds none, the
+    // stand-in that fills their slots.
+    let voxels = if rt {
+        let stub = frame
+            .vox_stub
+            .get_or_insert_with(|| vox_stub(&device))
+            .clone();
+        Some((stub.clone(), stub))
+    } else {
+        scene
+            .albedo
+            .as_ref()
+            .zip(scene.normal.as_ref())
+            .map(|(a, n)| (a.1.clone(), n.1.clone()))
+    };
     let inputs = (
         pipes.as_deref(),
         light.as_deref(),
         images.get(MODERN_SHADOW_MAP.id()),
-        scene.albedo.as_ref(),
-        scene.normal.as_ref(),
+        voxels,
         scene.height.as_ref(),
     );
-    let (Some(pipes), Some(light), Some(shadow), Some(albedo), Some(normal), Some(height)) = inputs
+    let (Some(pipes), Some(light), Some(shadow), Some((albedo, normal)), Some(height)) = inputs
     else {
         return;
+    };
+    let ray_stage = if rt {
+        pipes.rt_trace
+    } else {
+        Some(pipes.trace)
     };
     if pipeline_cache
         .get_compute_pipeline(pipes.classify)
         .is_none()
-        || pipeline_cache.get_compute_pipeline(pipes.trace).is_none()
+        || ray_stage
+            .and_then(|id| pipeline_cache.get_compute_pipeline(id))
+            .is_none()
         || pipeline_cache.get_compute_pipeline(pipes.blend).is_none()
     {
         return;
@@ -364,8 +426,8 @@ fn prepare_gi(
             &shadow.texture_view,
             &shadow.sampler,
             light.0.as_entire_binding(),
-            &albedo.1,
-            &normal.1,
+            &albedo,
+            &normal,
             &height.1,
             uniform.as_entire_binding(),
             scratch.as_entire_binding(),
@@ -386,6 +448,7 @@ fn prepare_gi(
             work.as_entire_binding(),
         )),
     ));
+    frame.rt_bind = rt_bind;
     frame.groups = (probes as u32).div_ceil(64);
     bevy::log::info_once!(
         "modern GI: probes live — {} in {} cascade(s), {} rays, 1/{} traced a frame",
@@ -394,6 +457,27 @@ fn prepare_gi(
         gi.tier.rays,
         gi.tier.period,
     );
+}
+
+/// fork: the stand-in view for the voxel clipmap's slots in the trace's group 0 at the ray-traced
+/// tier: a 1x1x1 `Rgba8Unorm` 3D texture, the clipmap's own format and dimension, never read.
+fn vox_stub(device: &RenderDevice) -> TextureView {
+    device
+        .create_texture(&TextureDescriptor {
+            label: Some("modern_gi_voxel_stub"),
+            size: Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D3,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+        .create_view(&TextureViewDescriptor::default())
 }
 
 /// The probe trace, on the world camera's view alone: the field is world-space, and the water
@@ -431,6 +515,17 @@ pub(crate) fn gi_trace_pass(
     ) else {
         return;
     };
+    // fork: at the ray-traced tier the ray stage is the ray query, with the scene at group 1.
+    let rt_stage = match &frame.rt_bind {
+        Some(bind) => match pipes
+            .rt_trace
+            .and_then(|id| pipeline_cache.get_compute_pipeline(id))
+        {
+            Some(pipeline) => Some((bind, pipeline)),
+            None => return,
+        },
+        None => None,
+    };
     // The journal's `gpu_modern` column, where the device times passes.
     let diagnostics = render_context.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
@@ -449,17 +544,31 @@ pub(crate) fn gi_trace_pass(
         span.end(&mut pass);
     }
     {
+        // fork: a span of its own at the ray-traced tier, so the two paths compare by name.
+        let label = if rt_stage.is_some() {
+            "modern_gi_trace_rt"
+        } else {
+            "modern_gi_trace"
+        };
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("modern_gi_trace"),
+            label: Some(label),
             timestamp_writes: None,
         });
-        let span = diagnostics.pass_span(&mut pass, "modern_gi_trace");
+        let span = diagnostics.pass_span(&mut pass, label);
         pass.set_bind_group(0, trace_bind, &[]);
         // Setup, rays, sums — one dispatch each over the same rows (`gi_trace.wgsl`).
-        for stage in [setup, trace, sum] {
-            pass.set_pipeline(stage);
-            pass.dispatch_workgroups_indirect(dispatch, 0);
+        pass.set_pipeline(setup);
+        pass.dispatch_workgroups_indirect(dispatch, 0);
+        match rt_stage {
+            Some((rt_bind, rt_trace)) => {
+                pass.set_pipeline(rt_trace);
+                pass.set_bind_group(1, rt_bind, &[]);
+            }
+            None => pass.set_pipeline(trace),
         }
+        pass.dispatch_workgroups_indirect(dispatch, 0);
+        pass.set_pipeline(sum);
+        pass.dispatch_workgroups_indirect(dispatch, 0);
         span.end(&mut pass);
     }
     {
@@ -476,19 +585,26 @@ pub(crate) fn gi_trace_pass(
 }
 
 pub(super) fn build(render_app: &mut SubApp) {
+    // The trace samples this frame's cascades and this frame's voxels, and the froxels' ambient
+    // reads the probes.
+    let trace = gi_trace_pass
+        .after(crate::static_gx::gx_shadow_pass)
+        .after(crate::static_gx::gi_voxel_pass)
+        .before(crate::modern::volumetrics::froxel_pass)
+        .before(Core3dSystems::MainPass);
+    // fork: native only — the pipelines read the ray-traced tier's decision, and the ray-query
+    // stage casts against the TLAS `rt_scene_pass` (re)builds this frame.
+    #[cfg(not(target_arch = "wasm32"))]
+    let (init, trace) = (
+        init_pipelines.after(crate::static_gx::rt_scene::init_rt_scene),
+        trace.after(crate::static_gx::rt_scene::rt_scene_pass),
+    );
+    #[cfg(target_arch = "wasm32")]
+    let init = init_pipelines;
     render_app
         .init_resource::<GiFrame>()
-        .add_systems(RenderStartup, init_pipelines)
+        .add_systems(RenderStartup, init)
         // After the voxel pass, which owns the scene the trace marches through.
         .add_systems(Render, prepare_gi.in_set(RenderSystems::PrepareBindGroups))
-        // The trace samples this frame's cascades and this frame's voxels, and the froxels'
-        // ambient reads the probes.
-        .add_systems(
-            Core3d,
-            gi_trace_pass
-                .after(crate::static_gx::gx_shadow_pass)
-                .after(crate::static_gx::gi_voxel_pass)
-                .before(crate::modern::volumetrics::froxel_pass)
-                .before(Core3dSystems::MainPass),
-        );
+        .add_systems(Core3d, trace);
 }

@@ -261,6 +261,25 @@ pub fn gi_enabled() -> bool {
     *CELL.get_or_init(|| crate::launch_env::var("WOW_MODERN_GI").as_deref() != Some("0"))
 }
 
+/// fork: **does the probe trace cast its rays against the ray-traced scene?** Native only: the
+/// ray-traced tier runs (`static_gx::rt_scene::tier_active`, so `WOW_RT=0` turns this off too) and
+/// `$WOW_RT_GI=0` did not turn it off. Then each probe ray is a ray query against the TLAS
+/// (`gi_trace_rt.wgsl`) and the voxel clipmap is never built (`static_gx::render::modern_gi`); the
+/// terrain heightfield still is, for the probes' under-ground test and the froxels' ground banks.
+/// Otherwise the voxel DDA runs as it always has. False until render startup has decided the tier.
+pub fn rt_gi() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        crate::static_gx::rt_scene::tier_active()
+            && *CELL.get_or_init(|| crate::launch_env::var("WOW_RT_GI").as_deref() != Some("0"))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
+}
+
 /// The GI's gain over the classic ambient (`$WOW_MODERN_GI_GAIN`, browser `?modern_gi_gain=`), the
 /// look-dev lever for how far the probes are allowed to move the frame from P3's balance.
 pub fn gi_gain() -> f32 {

@@ -18,6 +18,10 @@
 //!    plan's `gi/heightfield.rs`), which is what terrain hits and every ray past the clipmap use.
 //!    Terrain is not voxelized: it is a height per column by construction, and a 2 yd map holds it
 //!    more finely than a 12 yd voxel could.
+//!
+//! fork: at the ray-traced tier (`gi::rt_gi`) the probes cast their rays against
+//! `rt_scene`'s TLAS, so only the heightfield is kept: the clipmap is never allocated and no voxel
+//! is drawn.
 
 use bevy::app::SubApp;
 use bevy::platform::collections::HashMap as GiMap;
@@ -428,12 +432,24 @@ fn prepare_gi_voxels(
     }
     let tier = gi.tier;
     let n = tier.voxels as i32;
+    // fork: at the ray-traced tier (`gi::rt_gi`, fixed for the session) the probe rays are ray
+    // queries against the TLAS and nothing reads the clipmap: it is never allocated, no caster is
+    // diffed, no box is queued and no voxel raster pipeline is built, so `gi_voxel_pass` draws no
+    // voxels. The heightfield still is: the trace's under-ground test and the froxels' ground banks
+    // read it.
+    let rt = gi::rt_gi();
 
     // A new clipmap shape (or the first modern frame) re-creates the clipmap, and everything in it is
     // new. The probe cascades are not part of it: the interior sub-grid a room adds
     // (`GiTier::with_interior`) leaves the voxels as they are, so a camera passing in and out of
     // rooms keeps its textures instead of reallocating three 3D textures at every crossing.
-    let fresh = state.tier.map(|t| clipmap_shape(&t)) != Some(clipmap_shape(&tier));
+    let fresh = !rt && state.tier.map(|t| clipmap_shape(&t)) != Some(clipmap_shape(&tier));
+    if rt && state.tier.is_none() {
+        info!(
+            "modern GI: ray-traced probes, no voxel clipmap (WOW_RT_GI=0 restores it), heightfield {HEIGHT_SIZE}^2 over {} yd",
+            2.0 * HEIGHT_HALF,
+        );
+    }
     if fresh {
         state.albedo = Some(voxel_texture(
             &device,
@@ -495,14 +511,15 @@ fn prepare_gi_voxels(
         state.height = Some((texture, view));
         state.height_key = 0;
     }
-    let (Some(albedo), Some(normal), Some(height)) = (
-        state.albedo.clone(),
-        state.normal.clone(),
-        state.height.clone(),
-    ) else {
+    let Some(height) = state.height.clone() else {
         return;
     };
-    if state.store_bind.is_none() {
+    // fork: `None` at the ray-traced tier, which builds no clipmap.
+    let clipmap = state.albedo.clone().zip(state.normal.clone());
+    if clipmap.is_none() && !rt {
+        return;
+    }
+    if let (Some((albedo, normal)), None) = (&clipmap, &state.store_bind) {
         state.store_bind = Some(device.create_bind_group(
             "modern_gi_voxel_store",
             &pipeline_cache.get_bind_group_layout(&pipes.store_layout),
@@ -512,7 +529,9 @@ fn prepare_gi_voxels(
 
     // --- the clipmap's windows -----------------------------------------------------------------
     let mut boxes: Vec<(usize, IVec3, IVec3)> = Vec::new();
-    for level in 0..tier.levels {
+    // fork: none at the ray-traced tier.
+    let clip_levels = if rt { 0 } else { tier.levels };
+    for level in 0..clip_levels {
         let voxel = tier.voxel[level];
         let want = (gi.camera / voxel).floor().as_ivec3() - IVec3::splat(n / 2);
         let current = state.base[level];
@@ -536,8 +555,9 @@ fn prepare_gi_voxels(
     // Only when the cache moved, a backlog is draining, or the clipmap is new: on a standing
     // camera the diff below finds nothing, and walking every cached region to learn that was the
     // largest single cost of the browser's frame.
+    // fork: never at the ray-traced tier, whose clipmap holds no caster.
     let mut current_len = state.casters.len();
-    if fresh || state.backlog || state.diffed_rev != Some(cache.rev) {
+    if !rt && (fresh || state.backlog || state.diffed_rev != Some(cache.rev)) {
         let mut current: GiMap<CasterKey, VoxelCaster> = GiMap::default();
         let drawable = |gpu: &GxCellGpu, draw: &GxCellDraw| -> Option<VoxelCaster> {
             if gpu.runs.is_empty() {
@@ -693,7 +713,9 @@ fn prepare_gi_voxels(
     }
 
     // --- the raster pipelines --------------------------------------------------------------------
-    for cutout in [false, true] {
+    // fork: none at the ray-traced tier, which draws no voxel.
+    let cutouts: &[bool] = if rt { &[] } else { &[false, true] };
+    for &cutout in cutouts {
         for two_sided in [false, true] {
             if pipes.raster.contains_key(&(cutout, two_sided)) {
                 continue;
@@ -861,8 +883,10 @@ fn prepare_gi_voxels(
         }
     }
 
-    scene.albedo = Some(albedo);
-    scene.normal = Some(normal);
+    // fork: no clipmap at the ray-traced tier; `clip.info.w` (the reach) is what its rays read.
+    let (albedo, normal) = clipmap.unzip();
+    scene.albedo = albedo;
+    scene.normal = normal;
     scene.height = Some(height);
     // fork: the highest voxel the clipmap can hold — the top of every caster it holds, plus two of
     // the coarsest voxels for a box's rounding out to whole voxels. A ray rising above it and the
@@ -870,7 +894,8 @@ fn prepare_gi_voxels(
     clip.bounds.y = state.caster_top + 2.0 * tier.voxel[tier.levels - 1];
     scene.clip = clip;
     // The probes trace as soon as there is a clipmap to trace against — an empty one only means an
-    // open sky, which is what the sky-occlusion map says there too.
+    // open sky, which is what the sky-occlusion map says there too. fork: at the ray-traced tier
+    // the trace waits for the TLAS instead (`gi::node::prepare_gi`).
     scene.ready = true;
 }
 
