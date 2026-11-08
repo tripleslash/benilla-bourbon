@@ -136,6 +136,9 @@ does the same (`ln -s /path/to/WoW WoW`, or on Windows a junction, which needs n
 `play.example.com:5000` for a remapped port), or set the `realmList` CVar in `config.toml`; this
 fork has no Realmlist button, and the browser build takes the address from the hosting's
 `/config.json`. Credentials go in at the login screen, or set `WOW_USER` and `WOW_PASS` to skip it.
+A PIN-protected account answers the keypad from `WOW_PIN` (the digits) or `WOW_PIN_TOTP` (the
+authenticator's base32 secret), as [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md), "Running it
+unattended", describes.
 
 Settings, screenshots and addons live in `benilla-config/` at the repo root: a 1.12 addon goes in
 `benilla-config/AddOns/`. [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) has the rest, from the
