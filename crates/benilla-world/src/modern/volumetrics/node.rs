@@ -16,8 +16,8 @@ use bevy::render::render_resource::binding_types::{
 };
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{
-    AsyncComputeContext, FlushCommands, RenderAsyncComputeQueue, RenderContext, RenderDevice,
-    RenderQueue, ViewQuery,
+    AsyncComputeContext, RenderAsyncComputeQueue, RenderContext, RenderDevice, RenderQueue,
+    ViewQuery,
 };
 use bevy::render::storage::GpuShaderBuffer;
 use bevy::render::texture::GpuImage;
@@ -592,7 +592,8 @@ fn flush_before_fog_composite(
     targets: Res<FroxelTargets>,
     async_queue: Option<Res<RenderAsyncComputeQueue>>,
     images: Res<RenderAssets<GpuImage>>,
-    mut flush: FlushCommands,
+    // Before `render_context`: its buffer (the copy) is applied after the flush.
+    mut flush: crate::modern::async_compute::FlushMainQueue,
     mut render_context: RenderContext,
 ) {
     let _fog_view = view.into_inner();

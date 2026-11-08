@@ -489,8 +489,8 @@ fn conflict(a: &EncoderInFlight, m: &EncoderInFlight) -> Option<alloc::string::S
                 (Some(x), Some(y)) if x == y => {}
                 (x, y) => {
                     return Some(format!(
-                        "{} (async {x:?}, main {y:?})",
-                        buffer.error_ident()
+                        "{} size {} usage {:?} (async {x:?}, main {y:?})",
+                        buffer.error_ident(), buffer.size, buffer.usage
                     ))
                 }
             }

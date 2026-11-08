@@ -19,12 +19,50 @@
 //! - **The meter** reads the scene before the combine exposes it, and runs beside the
 //!   post-process. Its grid is read back a frame or more later in any case.
 //!
+//! None of them overlaps yet: the light grid and the GI probes live in the one storage block
+//! (`MODERN_SHADOW_CASCADES`) that the binning writes here, the GI passes write on the main queue
+//! and every world material reads, and wgpu orders the two queues per buffer, not per range.
+//!
 //! `WOW_ASYNC_COMPUTE=0` keeps everything on the main queue; so does the browser, which has no
 //! second queue.
 
+use bevy::ecs::system::{Deferred, SystemBuffer, SystemMeta, SystemParam};
+use bevy::ecs::world::DeferredWorld;
 use bevy::prelude::*;
-use bevy::render::renderer::{RenderAsyncComputeQueue, RenderDevice, RenderQueue};
+use bevy::render::renderer::{
+    PendingCommandBuffers, RenderAsyncComputeQueue, RenderDevice, RenderQueue,
+};
 use bevy::render::{RenderApp, RenderStartup};
+
+/// Submits the main-queue command buffers queued before this system, at its place in graph
+/// order. bevy's `FlushCommands` submits when the system runs, before the graph's buffers are
+/// applied, so in the middle of a view's schedule it finds nothing to submit; this is applied with
+/// them, after the ones in front of it and before its own system's `RenderContext` buffers.
+#[derive(SystemParam)]
+pub(crate) struct FlushMainQueue<'s> {
+    state: Deferred<'s, FlushMainQueueState>,
+}
+
+impl FlushMainQueue<'_> {
+    pub(crate) fn flush(&mut self) {
+        self.state.0 = true;
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct FlushMainQueueState(bool);
+
+impl SystemBuffer for FlushMainQueueState {
+    fn queue(&mut self, _system_meta: &SystemMeta, mut world: DeferredWorld) {
+        if !std::mem::take(&mut self.0) {
+            return;
+        }
+        let buffers = world.resource_mut::<PendingCommandBuffers>().take();
+        if !buffers.is_empty() {
+            world.resource::<RenderQueue>().submit(buffers);
+        }
+    }
+}
 
 /// `RenderStartup`: the device's async compute queue, unless the lever is off or there is none.
 fn init(mut commands: Commands, device: Res<RenderDevice>, queue: Res<RenderQueue>) {

@@ -15,7 +15,7 @@ use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 
 use crate::view::WorldCamera;
 
-mod async_compute;
+pub(crate) mod async_compute;
 mod cloud_bake;
 pub mod gi;
 pub mod lights;

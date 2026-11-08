@@ -126,7 +126,8 @@ impl Global {
   are.
 
 **Why a wait happened.** `RUST_LOG=wgpu_core::device::async_queue=debug` logs each conflict wait
-with the first resource that caused it and the two uses.
+with the first resource that caused it and the two uses; a buffer also gives its size and usage,
+which names an unlabelled one.
 
 **Limits.** Async command buffers come only from `async_queue_create_command_encoder`
 (`CommandBufferMutable::async_compute`), go only to the async queue (`QueueSubmitError::WrongQueue`),
