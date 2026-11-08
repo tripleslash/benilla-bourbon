@@ -124,6 +124,8 @@ pub mod final_pass;
 pub mod frame_pace;
 // fork: fsr (FORK.md) — FidelityFX Super Resolution 3.1.5, `fsr/HOOKS.md`.
 pub mod fsr;
+// fork: dlss (FORK.md)
+pub mod dlss;
 pub mod ground_fx;
 pub mod horizon;
 pub mod instance_tint;

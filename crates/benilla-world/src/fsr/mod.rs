@@ -11,6 +11,10 @@
 //!
 //! The upstream files this module touches are listed in `HOOKS.md`, each marked
 //! `// fork: fsr (FORK.md)`.
+//!
+//! fork: dlss (FORK.md) — the chain is also DLSS's slot: an [`FsrView`] whose
+//! [`FsrView::upscaler`] is [`UpscalerKind::Dlss`] keeps the jitter, velocity and motion adapter and
+//! hands the upscale to `crate::dlss::sr` (`upscaler::fsr_upscale_pass`).
 
 use bevy::core_pipeline::core_3d::main_transparent_pass_3d;
 use bevy::core_pipeline::{Core3d, Core3dSystems};
@@ -32,6 +36,15 @@ pub mod velocity;
 pub use cadence::{FgBlocked, FrameGeneration, PresentsHeldFrames};
 pub use framegen::{FgPresent, FgState};
 pub use upscaler::{FsrOutput, FsrState, FsrVelocityTarget};
+
+/// fork: dlss (FORK.md) — which temporal upscaler fills the slot on this view. The app
+/// resolves it from the `upscaler` CVar and what this machine supports.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum UpscalerKind {
+    #[default]
+    Fsr,
+    Dlss,
+}
 
 /// Base jitter sequence length at 1:1, before the upscale ratio lengthens it.
 const JITTER_BASE_PERIOD: u32 = 8;
@@ -79,7 +92,8 @@ pub fn bevy_offset(fsr_jitter: Vec2) -> Vec2 {
     FsrOutput,
     FsrVelocityTarget,
     FgState,
-    FgPresent
+    FgPresent,
+    crate::dlss::HudlessCompose
 ))]
 pub struct FsrView {
     /// The display resolution the chain reconstructs, in physical px.
@@ -88,6 +102,8 @@ pub struct FsrView {
     pub epoch: u32,
     /// Frame generation runs on this view (`frameGeneration`), given a backdrop camera to present.
     pub frame_generation: bool,
+    /// fork: dlss (FORK.md) — the upscaler in the slot.
+    pub upscaler: UpscalerKind,
     pub(crate) phase: u32,
     pub(crate) period: u32,
     pub(crate) jitter: Vec2,
@@ -95,11 +111,18 @@ pub struct FsrView {
 }
 
 impl FsrView {
+    /// fork: dlss (FORK.md) — the view with `upscaler` in the slot.
+    pub fn with_upscaler(mut self, upscaler: UpscalerKind) -> Self {
+        self.upscaler = upscaler;
+        self
+    }
+
     pub fn new(display: UVec2, epoch: u32, frame_generation: bool) -> Self {
         Self {
             display,
             epoch,
             frame_generation,
+            upscaler: UpscalerKind::Fsr,
             phase: 0,
             period: 1,
             jitter: Vec2::ZERO,
@@ -147,6 +170,8 @@ pub struct FsrShaders {
     /// `motion`, `prepare_inputs`, `shading_change_pyramid`, `shading_change`,
     /// `prepare_reactivity`, `luma_instability`, `accumulate`, `rcas`.
     pub upscaler: [Handle<Shader>; 8],
+    /// fork: dlss (FORK.md) — `motion` without the reactive mask ([`motion_only_source`]).
+    pub motion_only: Handle<Shader>,
     /// `reconstruct_depth`, `game_vector_field`, `mv_pyramid_seed`, the vector pyramid's reduce,
     /// `disocclusion`, `interpolate`, `color_pyramid_seed`, the colour pyramid's reduce, `inpaint`,
     /// and the present copy.
@@ -234,6 +259,15 @@ const RESIDUAL: &str = include_str!("../shaders/fsr/residual.wgsl");
 /// resolved.
 pub fn pass_source(pass: &str, formats: caps::Formats) -> String {
     format!("{COMMON}\n{}", formats.preprocess(pass))
+}
+
+/// fork: dlss (FORK.md) — the motion adapter for a DLSS view: the same vectors, no reactive
+/// mask, so it reads neither the colour nor the opaque copy. DLSS takes no reactive input here.
+pub fn motion_only_source(formats: caps::Formats) -> String {
+    const STORE: &str = "textureStore(mv_out, p, vec4<f32>(mv, reactive(p), 0.0));";
+    let source = pass_source(PASSES[0].1, formats);
+    assert!(source.contains(STORE), "motion.wgsl's store moved");
+    source.replace(STORE, "textureStore(mv_out, p, vec4<f32>(mv, 0.0, 0.0));")
 }
 
 /// One frame-generation pass's full source, by its [`FG_PASSES`] name: the frame-generation
@@ -495,6 +529,10 @@ impl Plugin for FsrPlugin {
                 format!("benilla_fsr/{name}.wgsl"),
             ))
         });
+        let motion_only = shaders.add(Shader::from_wgsl(
+            motion_only_source(formats),
+            "benilla_fsr/motion_only.wgsl",
+        ));
         let velocity = shaders.add(Shader::from_wgsl(VELOCITY, "benilla_fsr/velocity.wgsl"));
         let effect_velocity = shaders.add(Shader::from_wgsl(
             EFFECT_VELOCITY,
@@ -507,6 +545,7 @@ impl Plugin for FsrPlugin {
         let built = FsrShaders {
             formats,
             upscaler,
+            motion_only,
             framegen,
             velocity,
             effect_velocity,
@@ -624,6 +663,7 @@ mod tests {
                 validate(name, &fg_pass_source(name, formats));
             }
             validate("residual", &pass_source(RESIDUAL, formats));
+            validate("motion_only", &motion_only_source(formats));
         }
     }
 }

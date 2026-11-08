@@ -33,7 +33,7 @@ use bevy::render::view::{ExtractedView, Msaa, ViewDepthTexture, ViewTarget};
 use bytemuck::{Pod, Zeroable};
 
 use super::caps::Formats;
-use super::{FsrHeld, FsrShaders, FsrView, RcasSharpness};
+use super::{FsrHeld, FsrShaders, FsrView, RcasSharpness, UpscalerKind};
 
 /// Whether shading-change detection is compiled in (passes 2 and 3's detector half): the one
 /// optional part of FSR 3.1, and its most expensive. On, as the SDK ships it.
@@ -120,34 +120,48 @@ pub struct FsrVelocityTarget {
 
 /// Everything the chain allocates for one view. The `[_; 2]` pairs carry state between frames and
 /// ping-pong on one parity: a frame writing slot `p` reads slot `1 - p`.
+///
+/// fork: dlss (FORK.md) — the inputs every upscaler shares sit here; FSR's own working set is
+/// [`UpscaleTargets`], allocated only for an FSR view, so a DLSS view holds none of it.
 struct Targets {
     render: UVec2,
     display: UVec2,
-    /// The colour before the transparent pass (`fsr_opaque_copy`), for the reactive mask.
-    opaque: Texture,
-    opaque_view: TextureView,
+    kind: UpscalerKind,
+    /// The colour before the transparent pass (`fsr_opaque_copy`), for FSR's reactive mask.
+    opaque: Option<(Texture, TextureView)>,
     velocity: TextureView,
     mv: TextureView,
     dilated_mv: TextureView,
     /// `x` = dilated (nearest) device depth, `y` = farthest depth in yards·0.9144.
     depths: TextureView,
     luma: [TextureView; 2],
+    /// Reconstructed previous-frame depth: a storage buffer, since the scatter needs an atomic.
+    prev_depth: Buffer,
+    output: TextureView,
+    upscale: Option<UpscaleTargets>,
+}
+
+/// FSR 3.1.5's own passes' targets (2–7).
+struct UpscaleTargets {
     luma_history: [TextureView; 2],
     luma_instability: TextureView,
     masks: TextureView,
     accumulation: [TextureView; 2],
-    /// Reconstructed previous-frame depth: a storage buffer, since the scatter needs an atomic.
-    prev_depth: Buffer,
     shading_change_mips: [TextureView; 3],
     farthest_mip1: TextureView,
     shading_change: TextureView,
     history: [TextureView; 2],
     new_locks: TextureView,
-    output: TextureView,
 }
 
 impl Targets {
-    fn new(device: &RenderDevice, formats: Formats, render: UVec2, display: UVec2) -> Self {
+    fn new(
+        device: &RenderDevice,
+        formats: Formats,
+        render: UVec2,
+        display: UVec2,
+        kind: UpscalerKind,
+    ) -> Self {
         let half = half_size(render);
         // Each pyramid level is the one above halved, rounded up.
         let m1 = (half + UVec2::ONE) / 2;
@@ -179,17 +193,46 @@ impl Targets {
         let internal = |label, format, size| view(make(label, format, INTERNAL, size));
         let clearable = |label, format, size| view(make(label, format, CLEARABLE, size));
         let (f16, masks) = (TextureFormat::Rgba16Float, TextureFormat::Rgba8Unorm);
+        let fsr = kind == UpscalerKind::Fsr;
 
-        let opaque = make(
-            "fsr_opaque_only",
-            TextureFormat::Rgba16Float,
-            TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING,
-            render,
-        );
+        let opaque = fsr.then(|| {
+            let t = make(
+                "fsr_opaque_only",
+                TextureFormat::Rgba16Float,
+                TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING,
+                render,
+            );
+            let v = t.create_view(&TextureViewDescriptor::default());
+            (t, v)
+        });
+        let upscale = fsr.then(|| UpscaleTargets {
+            luma_history: [
+                clearable("fsr_luma_history_0", f16, render),
+                clearable("fsr_luma_history_1", f16, render),
+            ],
+            luma_instability: internal("fsr_luma_instability", formats.r16, render),
+            masks: internal("fsr_dilated_reactive_masks", masks, render),
+            accumulation: [
+                clearable("fsr_accumulation_0", formats.r8, render),
+                clearable("fsr_accumulation_1", formats.r8, render),
+            ],
+            shading_change_mips: [
+                internal("fsr_shading_change_mip_0", formats.rg16, half),
+                internal("fsr_shading_change_mip_1", formats.rg16, m1),
+                internal("fsr_shading_change_mip_2", formats.rg16, m2),
+            ],
+            farthest_mip1: internal("fsr_farthest_depth_mip_1", formats.r16, half),
+            shading_change: internal("fsr_shading_change", formats.r8, half),
+            history: [
+                internal("fsr_history_0", f16, display),
+                internal("fsr_history_1", f16, display),
+            ],
+            new_locks: clearable("fsr_new_locks", formats.r8, display),
+        });
         Self {
             render,
             display,
-            opaque_view: opaque.create_view(&TextureViewDescriptor::default()),
+            kind,
             opaque,
             velocity: view(make(
                 "fsr_velocity",
@@ -204,35 +247,14 @@ impl Targets {
                 clearable("fsr_luma_0", formats.r16, render),
                 clearable("fsr_luma_1", formats.r16, render),
             ],
-            luma_history: [
-                clearable("fsr_luma_history_0", f16, render),
-                clearable("fsr_luma_history_1", f16, render),
-            ],
-            luma_instability: internal("fsr_luma_instability", formats.r16, render),
-            masks: internal("fsr_dilated_reactive_masks", masks, render),
-            accumulation: [
-                clearable("fsr_accumulation_0", formats.r8, render),
-                clearable("fsr_accumulation_1", formats.r8, render),
-            ],
             prev_depth: device.create_buffer(&BufferDescriptor {
                 label: Some("fsr_reconstructed_depth"),
                 size: u64::from(render.x.max(1)) * u64::from(render.y.max(1)) * 4,
                 usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
-            shading_change_mips: [
-                internal("fsr_shading_change_mip_0", formats.rg16, half),
-                internal("fsr_shading_change_mip_1", formats.rg16, m1),
-                internal("fsr_shading_change_mip_2", formats.rg16, m2),
-            ],
-            farthest_mip1: internal("fsr_farthest_depth_mip_1", formats.r16, half),
-            shading_change: internal("fsr_shading_change", formats.r8, half),
-            history: [
-                internal("fsr_history_0", f16, display),
-                internal("fsr_history_1", f16, display),
-            ],
-            new_locks: clearable("fsr_new_locks", formats.r8, display),
             output: internal("fsr_output", f16, display),
+            upscale,
         }
     }
 }
@@ -262,6 +284,11 @@ pub struct FsrState {
     /// This frame's clip-from-world matrices: jittered (the raster), unjittered, and last frame's
     /// unjittered, for the model parts' motion.
     clip: [Mat4; 3],
+    /// fork: dlss (FORK.md) — this view's DLSS feature, while it upscales with DLSS
+    /// (`dlss::sr::prepare_dlss`).
+    pub(crate) dlss: Option<crate::dlss::DlssViewState>,
+    /// This frame's jitter, for DLSS's evaluate.
+    jitter: Vec2,
 }
 
 impl FsrState {
@@ -313,6 +340,22 @@ impl FsrState {
     pub fn params(&self) -> &Buffer {
         &self.params
     }
+
+    /// fork: dlss (FORK.md) — whether this rendered frame is the modern (HDR) model's.
+    pub fn is_modern(&self) -> bool {
+        self.modern
+    }
+
+    /// fork: dlss (FORK.md) — the motion adapter's vectors (uv, previous − current,
+    /// jitter-free, render size), which DLSS-G is tagged with.
+    pub fn motion_vectors(&self) -> &TextureView {
+        &self.targets.mv
+    }
+
+    /// fork: dlss (FORK.md) — the upscaler this view's targets were allocated for.
+    pub fn kind(&self) -> UpscalerKind {
+        self.targets.kind
+    }
 }
 
 /// The pipelines and layouts, built at startup from [`FsrShaders`].
@@ -321,6 +364,8 @@ pub struct FsrPipelines {
     pub formats: Formats,
     layouts: Layouts,
     motion: CachedComputePipelineId,
+    /// fork: dlss (FORK.md) — the adapter without the reactive mask, for a DLSS view.
+    motion_only: CachedComputePipelineId,
     prepare_inputs: CachedComputePipelineId,
     shading_change_pyramid: CachedComputePipelineId,
     shading_change: CachedComputePipelineId,
@@ -333,9 +378,11 @@ pub struct FsrPipelines {
 
 impl FsrPipelines {
     /// Every pipeline, for the warm-up to wait on.
-    pub fn ids(&self) -> [CachedComputePipelineId; 8] {
+    pub fn ids(&self) -> [CachedComputePipelineId; 9] {
         [
             self.motion,
+            // fork: dlss (FORK.md)
+            self.motion_only,
             self.prepare_inputs,
             self.shading_change_pyramid,
             self.shading_change,
@@ -525,6 +572,7 @@ pub(super) fn init_pipelines(
     let pipelines = FsrPipelines {
         formats: shaders.formats,
         motion: queue("fsr_motion", &layouts.motion, &s[0]),
+        motion_only: queue("fsr_motion_only", &layouts.motion, &shaders.motion_only),
         prepare_inputs: queue("fsr_prepare_inputs", &layouts.prepare_inputs, &s[1]),
         shading_change_pyramid: queue(
             "fsr_shading_change_pyramid",
@@ -572,7 +620,7 @@ pub(crate) fn frame_matrices(
 /// `PrepareResources`: allocate or resize each FSR view's targets and advance its history by one
 /// rendered frame — parity, reset, matrices, the parameter block — and publish [`FsrOutput`].
 #[allow(clippy::type_complexity)]
-pub(super) fn prepare_fsr(
+pub(crate) fn prepare_fsr(
     mut commands: Commands,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
@@ -620,14 +668,16 @@ pub(super) fn prepare_fsr(
         );
         let proj = view.clip_from_view;
 
-        let keep = state
-            .as_ref()
-            .is_some_and(|s| s.targets.render == render && s.targets.display == display);
+        // fork: dlss (FORK.md) — the upscaler picks the targets; a switch reallocates.
+        let kind = fsr.upscaler;
+        let keep = state.as_ref().is_some_and(|s| {
+            s.targets.render == render && s.targets.display == display && s.targets.kind == kind
+        });
         let mut created = None;
         let state: &mut FsrState = match state {
             Some(s) if keep => s.into_inner(),
             _ => created.insert(FsrState {
-                targets: Targets::new(&device, pipelines.formats, render, display),
+                targets: Targets::new(&device, pipelines.formats, render, display, kind),
                 params: device.create_buffer(&BufferDescriptor {
                     label: Some("fsr_params"),
                     size: PARAMS_SIZE,
@@ -644,6 +694,8 @@ pub(super) fn prepare_fsr(
                 output_ready: false,
                 rel: [Mat4::IDENTITY; 2],
                 clip: [Mat4::IDENTITY; 3],
+                dlss: None,
+                jitter: Vec2::ZERO,
             }),
         };
 
@@ -671,6 +723,7 @@ pub(super) fn prepare_fsr(
         let [cur_rel_from_clip, clip_from_cur_rel, prev_clip_from_cur_rel] =
             frame_matrices(eye, rot, proj, jittered, prev);
         state.output_ready = false;
+        state.jitter = fsr.jitter;
         state.rel = [clip_from_cur_rel, prev_clip_from_cur_rel];
         let view_from_world = view.world_from_view.to_matrix().inverse();
         let prev_view_from_world = Mat4::from_rotation_translation(prev.1, prev.0).inverse();
@@ -743,10 +796,14 @@ pub(super) fn fsr_opaque_copy(
         return;
     }
     let (target, state) = view.into_inner();
+    // fork: dlss (FORK.md) — only FSR's reactive mask reads the copy.
+    let Some((opaque, _)) = &state.targets.opaque else {
+        return;
+    };
     let size = state.targets.render;
     render_context.command_encoder().copy_texture_to_texture(
         target.main_texture().as_image_copy(),
-        state.targets.opaque.as_image_copy(),
+        opaque.as_image_copy(),
         Extent3d {
             width: size.x,
             height: size.y,
@@ -756,12 +813,17 @@ pub(super) fn fsr_opaque_copy(
 }
 
 /// `EarlyPostProcess`: the whole chain, main texture and depth in, [`FsrOutput`] out.
+///
+/// fork: dlss (FORK.md) — a DLSS view dispatches the motion adapter alone (without the
+/// reactive mask), FSR's input preparation only while FSR frame generation reads it, then DLSS's
+/// evaluate into the same output; none of FSR's passes 2–7 run.
 pub(super) fn fsr_upscale_pass(
-    view: ViewQuery<(&ViewTarget, &ViewDepthTexture, &mut FsrState)>,
+    view: ViewQuery<(&ViewTarget, &ViewDepthTexture, &FsrView, &mut FsrState)>,
     pipelines: Option<Res<FsrPipelines>>,
     pipeline_cache: Res<PipelineCache>,
     held: Res<FsrHeld>,
     residual: Option<Res<super::residual::Residual>>,
+    #[cfg(not(target_arch = "wasm32"))] adapter: Res<bevy::render::renderer::RenderAdapter>,
     mut render_context: RenderContext,
 ) {
     if held.0 {
@@ -770,31 +832,7 @@ pub(super) fn fsr_upscale_pass(
     let Some(pipelines) = pipelines else {
         return;
     };
-    let (target, depth, mut state) = view.into_inner();
-    let get = |id| pipeline_cache.get_compute_pipeline(id);
-    let (
-        Some(motion),
-        Some(prepare_inputs),
-        Some(pyramid),
-        Some(shading_change),
-        Some(reactivity),
-        Some(instability),
-        Some(accumulate),
-        Some(rcas),
-    ) = (
-        get(pipelines.motion),
-        get(pipelines.prepare_inputs),
-        get(pipelines.shading_change_pyramid),
-        get(pipelines.shading_change),
-        get(pipelines.prepare_reactivity),
-        get(pipelines.luma_instability),
-        get(pipelines.accumulate),
-        get(pipelines.rcas),
-    )
-    else {
-        count(1);
-        return; // still compiling: the backdrop falls back to the bilinear read this frame
-    };
+    let (target, depth, fsr_view, mut state) = view.into_inner();
     // The depth is read by two passes, so it must be sampleable.
     if !depth
         .texture
@@ -802,6 +840,28 @@ pub(super) fn fsr_upscale_pass(
         .contains(TextureUsages::TEXTURE_BINDING)
     {
         count(2);
+        return;
+    }
+    let dlss = state.targets.kind == UpscalerKind::Dlss;
+    if dlss && state.dlss.is_none() {
+        return; // the feature is created in `prepare_dlss`; the backdrop reads bilinear meanwhile
+    }
+    // FSR frame generation reads the prepared inputs (`FsrState::shared`).
+    let prepare = !dlss || fsr_view.frame_generation;
+    let get = |id| pipeline_cache.get_compute_pipeline(id);
+    let (Some(motion), prepare_inputs) = (
+        get(if dlss {
+            pipelines.motion_only
+        } else {
+            pipelines.motion
+        }),
+        get(pipelines.prepare_inputs),
+    ) else {
+        count(1);
+        return; // still compiling: the backdrop falls back to the bilinear read this frame
+    };
+    if prepare && prepare_inputs.is_none() {
+        count(1);
         return;
     }
 
@@ -815,6 +875,9 @@ pub(super) fn fsr_upscale_pass(
     let l = &pipelines.layouts;
     let smp = &pipelines.sampler;
     let color = target.main_texture_view();
+    // A DLSS view has no opaque copy; the motion-only adapter reads neither slot, so the velocity
+    // target stands in.
+    let opaque = t.opaque.as_ref().map_or(&t.velocity, |(_, v)| v);
 
     let g_motion = device.create_bind_group(
         "fsr_motion",
@@ -824,7 +887,7 @@ pub(super) fn fsr_upscale_pass(
             depth.view(),
             &t.velocity,
             color,
-            &t.opaque_view,
+            opaque,
             &t.mv,
         )),
     );
@@ -842,6 +905,80 @@ pub(super) fn fsr_upscale_pass(
             t.prev_depth.as_entire_binding(),
         )),
     );
+    let groups = |size: UVec2| (size.x.div_ceil(WORKGROUP), size.y.div_ceil(WORKGROUP));
+
+    if dlss {
+        let (mv, output) = (t.mv.clone(), t.output.clone());
+        {
+            let encoder = render_context.command_encoder();
+            if prepare {
+                encoder.clear_buffer(&t.prev_depth, 0, None);
+            }
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("dlss_inputs"),
+                timestamp_writes: None,
+            });
+            let (x, y) = groups(render);
+            pass.set_pipeline(motion);
+            pass.set_bind_group(0, &g_motion, &[]);
+            pass.dispatch_workgroups(x, y, 1);
+            if let (true, Some(prepare_inputs)) = (prepare, prepare_inputs) {
+                pass.set_pipeline(prepare_inputs);
+                pass.set_bind_group(0, &g_prepare, &[]);
+                pass.dispatch_workgroups(x, y, 1);
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let ok = {
+            let inputs = crate::dlss::sr::Inputs {
+                color,
+                depth: depth.view(),
+                motion: &mv,
+                output: &output,
+                jitter: state.jitter,
+                reset: state.reset_pending || state.frame_index == 0,
+            };
+            let state = &mut *state;
+            state.dlss.as_mut().is_some_and(|d| {
+                crate::dlss::sr::encode(d, &adapter, &mut render_context, inputs)
+            })
+        };
+        #[cfg(target_arch = "wasm32")]
+        let ok = {
+            let _ = (mv, output);
+            false
+        };
+        count(0);
+        state.reset_pending = false;
+        state.output_ready = ok;
+        state.frame_index = state.frame_index.saturating_add(1);
+        return;
+    }
+
+    let (
+        Some(prepare_inputs),
+        Some(pyramid),
+        Some(shading_change),
+        Some(reactivity),
+        Some(instability),
+        Some(accumulate),
+        Some(rcas),
+        Some(u),
+    ) = (
+        prepare_inputs,
+        get(pipelines.shading_change_pyramid),
+        get(pipelines.shading_change),
+        get(pipelines.prepare_reactivity),
+        get(pipelines.luma_instability),
+        get(pipelines.accumulate),
+        get(pipelines.rcas),
+        t.upscale.as_ref(),
+    )
+    else {
+        count(1);
+        return;
+    };
+
     let g_pyramid = device.create_bind_group(
         "fsr_shading_change_pyramid",
         &layout(&l.shading_change_pyramid),
@@ -851,10 +988,10 @@ pub(super) fn fsr_upscale_pass(
             &t.luma[q],
             &t.dilated_mv,
             &t.depths,
-            &t.shading_change_mips[0],
-            &t.shading_change_mips[1],
-            &t.shading_change_mips[2],
-            &t.farthest_mip1,
+            &u.shading_change_mips[0],
+            &u.shading_change_mips[1],
+            &u.shading_change_mips[2],
+            &u.farthest_mip1,
         )),
     );
     let g_shading = device.create_bind_group(
@@ -862,11 +999,11 @@ pub(super) fn fsr_upscale_pass(
         &layout(&l.shading_change),
         &BindGroupEntries::sequential((
             params.clone(),
-            &t.shading_change_mips[0],
-            &t.shading_change_mips[1],
-            &t.shading_change_mips[2],
+            &u.shading_change_mips[0],
+            &u.shading_change_mips[1],
+            &u.shading_change_mips[2],
             smp,
-            &t.shading_change,
+            &u.shading_change,
         )),
     );
     let g_reactivity = device.create_bind_group(
@@ -878,13 +1015,13 @@ pub(super) fn fsr_upscale_pass(
             &t.depths,
             t.prev_depth.as_entire_binding(),
             &t.mv,
-            &t.shading_change,
+            &u.shading_change,
             &t.luma[p],
-            &t.accumulation[q],
+            &u.accumulation[q],
             smp,
-            &t.masks,
-            &t.accumulation[p],
-            &t.new_locks,
+            &u.masks,
+            &u.accumulation[p],
+            &u.new_locks,
         )),
     );
     let g_instability = device.create_bind_group(
@@ -893,12 +1030,12 @@ pub(super) fn fsr_upscale_pass(
         &BindGroupEntries::sequential((
             params.clone(),
             &t.dilated_mv,
-            &t.masks,
+            &u.masks,
             &t.luma[p],
-            &t.luma_history[q],
+            &u.luma_history[q],
             smp,
-            &t.luma_history[p],
-            &t.luma_instability,
+            &u.luma_history[p],
+            &u.luma_instability,
         )),
     );
     let g_accumulate = device.create_bind_group(
@@ -908,19 +1045,19 @@ pub(super) fn fsr_upscale_pass(
             params.clone(),
             color,
             &t.dilated_mv,
-            &t.masks,
-            &t.luma_instability,
-            &t.farthest_mip1,
-            &t.new_locks,
-            &t.history[q],
+            &u.masks,
+            &u.luma_instability,
+            &u.farthest_mip1,
+            &u.new_locks,
+            &u.history[q],
             smp,
-            &t.history[p],
+            &u.history[p],
         )),
     );
     let g_rcas = device.create_bind_group(
         "fsr_rcas",
         &layout(&l.rcas),
-        &BindGroupEntries::sequential((params, &t.history[p], &t.output)),
+        &BindGroupEntries::sequential((params, &u.history[p], &t.output)),
     );
 
     let diagnostics = render_context.diagnostic_recorder();
@@ -949,15 +1086,14 @@ pub(super) fn fsr_upscale_pass(
     // The scatter keeps a maximum, so it starts from 0, the far plane.
     encoder.clear_buffer(&t.prev_depth, 0, None);
     // Locks are per-frame candidates; last frame's must not leak into this one.
-    clear(encoder, "fsr_new_locks_clear", &t.new_locks);
+    clear(encoder, "fsr_new_locks_clear", &u.new_locks);
     // A reset zeroes what this frame reads, the slots the previous frame wrote.
     if state.reset_pending {
-        clear(encoder, "fsr_accumulation_clear", &t.accumulation[q]);
+        clear(encoder, "fsr_accumulation_clear", &u.accumulation[q]);
         clear(encoder, "fsr_luma_clear", &t.luma[q]);
-        clear(encoder, "fsr_luma_history_clear", &t.luma_history[q]);
+        clear(encoder, "fsr_luma_history_clear", &u.luma_history[q]);
     }
 
-    let groups = |size: UVec2| (size.x.div_ceil(WORKGROUP), size.y.div_ceil(WORKGROUP));
     {
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("fsr_upscale"),
