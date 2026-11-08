@@ -433,6 +433,9 @@ fn sync_reflection_camera(
         ),
         (With<LiquidReflectionCamera>, Without<WorldCamera>),
     >,
+    #[cfg(not(target_arch = "wasm32"))] rt_lane: Option<
+        Res<crate::modern::rt_reflect::RtReflectLane>,
+    >,
 ) {
     let Ok((mut pose, mut projection, mut camera, mut target)) = mirror.single_mut() else {
         return;
@@ -569,6 +572,10 @@ fn sync_reflection_camera(
         && !underwater.0.any()
         && eye.y - plane > MIN_EYE_HEIGHT
         && water_recent;
+    // fork: G — while the ray-traced lane reflects the water (`modern::rt_reflect`, decided before
+    // this each frame), the mirror stands down; it renders again the frame the lane does not hold.
+    #[cfg(not(target_arch = "wasm32"))]
+    let wanted = wanted && !rt_lane.is_some_and(|l| l.on);
     if camera.is_active != wanted {
         camera.is_active = wanted;
     }
@@ -700,14 +707,23 @@ fn view_space_clip_plane(pose: &Transform, plane: f32) -> Vec4 {
 fn sync_reflection_flag(
     mut materials: ResMut<Assets<LiquidCataMaterial>>,
     reflection: Res<ReflectionPlane>,
-    mut last: Local<Option<(bool, f32)>>,
+    mut last: Local<Option<(bool, f32, f32)>>,
+    #[cfg(not(target_arch = "wasm32"))] rt_lane: Option<
+        Res<crate::modern::rt_reflect::RtReflectLane>,
+    >,
 ) {
     /// How far the plane may drift before the materials are told. See the doc above.
     const PLANE_DEAD_BAND: f32 = 0.1;
 
-    let want = (reflection.live, reflection.plane);
-    if let Some((live, plane)) = *last {
-        if live == want.0 && (plane - want.1).abs() < PLANE_DEAD_BAND {
+    // fork: G — the ray-traced lane's flag (`LiquidParams.anim.x`), watched and written with the
+    // mirror's, so the frame the mirror stands down is the frame the water reads the lane.
+    #[cfg(not(target_arch = "wasm32"))]
+    let lane = rt_lane.map_or(0.0, |l| l.shader_flag());
+    #[cfg(target_arch = "wasm32")]
+    let lane = 0.0;
+    let want = (reflection.live, reflection.plane, lane);
+    if let Some((live, plane, lane)) = *last {
+        if live == want.0 && (plane - want.1).abs() < PLANE_DEAD_BAND && lane == want.2 {
             return;
         }
     }
@@ -716,6 +732,7 @@ fn sync_reflection_flag(
     for (_, material) in materials.iter_mut() {
         material.extension.path.z = flag;
         material.extension.path.w = want.1;
+        material.extension.anim.x = want.2;
     }
 }
 
@@ -864,6 +881,17 @@ pub(super) fn register(app: &mut App) {
                 // surface on every dive.
                 .after(super::SubmersionVerdict),
         );
+    // fork: G — the ray-traced lane, decided before the mirror's sync stands the mirror down for it,
+    // and after the frame's script calls, so a `rayTracing` or `waterDetail` change this frame
+    // reaches the mirror and the water together.
+    #[cfg(not(target_arch = "wasm32"))]
+    app.add_systems(
+        Update,
+        crate::modern::rt_reflect::decide_water_lane
+            .after(super::SubmersionVerdict)
+            .after(crate::schedule::WorldStage::Present)
+            .before(sync_reflection_camera),
+    );
 }
 
 #[cfg(test)]

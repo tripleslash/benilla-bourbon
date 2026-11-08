@@ -50,6 +50,85 @@ pub(crate) struct RtReflectLane {
     pub(crate) on: bool,
 }
 
+impl RtReflectLane {
+    /// The water's `LiquidParams.anim.x`: 0 the mirror's path, 1 the march then a ray, 2 a ray
+    /// alone (`WOW_SSR=0`).
+    pub(crate) fn shader_flag(self) -> f32 {
+        match (self.on, ssr_enabled()) {
+            (false, _) => 0.0,
+            (true, true) => 1.0,
+            (true, false) => 2.0,
+        }
+    }
+}
+
+/// Main world, `Update`, after the frame's script calls (the `rayTracing` and `waterDetail`
+/// callbacks) and the submersion verdict, before `liquid::reflect`'s mirror sync, which stands the
+/// mirror down while [`RtReflectLane::on`] holds and writes it to the water with the mirror's own
+/// flag. On: the lane is live ([`rt_reflections`]), the option is on and the frame modern (both
+/// read here, this frame), the tier has a mirror to replace and the eye is above the water.
+///
+/// **The one-frame lag, and the case taken.** `rt_reflections()` here is the render world's latest
+/// decision, a frame behind the frame this one extracts into. Going live, the mirror stays on for
+/// that frame (the lane is not yet decided here), so the switch never shows a frame without a
+/// reflection. Falling back, the option (`RayTracingSetting`) and the lighting model are read here,
+/// this frame, so turning ray tracing off at run time takes the lane down in the frame the render
+/// world frees the scene, whenever the option's callback ran before this system (the scripts of
+/// `WorldStage::Present`). Two cases reach the render world first: the callback ran later in the
+/// frame (a click the UI handles after this), or the render world found the scene not ready (a
+/// teleport, a map change). For that one frame the water keeps the lane over the stand-in: the
+/// march still runs (its pyramid follows this decision) and the rays it would have handed on read
+/// the sky, since the stand-in's lane row is clear. The mirror is back the next frame; neither path
+/// keeps history, so nothing is cut.
+pub(crate) fn decide_water_lane(
+    detail: Res<crate::liquid::WaterDetail>,
+    underwater: Res<crate::liquid::Underwater>,
+    setting: Option<Res<super::RayTracingSetting>>,
+    active: Option<Res<super::ActiveLighting>>,
+    frames: Option<Res<bevy::diagnostic::FrameCount>>,
+    mut lane: ResMut<RtReflectLane>,
+    mut logged: Local<Option<bool>>,
+) {
+    let option = setting.is_none_or(|s| s.0);
+    let modern = active.is_some_and(|a| a.is_modern());
+    let traced = rt_reflections() && option && modern;
+    let wanted = traced && detail.has_planar_reflection();
+    let on = wanted && !underwater.0.any();
+    if lane.on != on {
+        lane.on = on;
+    }
+    // One line a switch of the lane itself; a dive's mirror stands down on its own.
+    if *logged != Some(wanted) && (logged.is_some() || wanted) {
+        let frame = frames.map_or(0, |f| f.0);
+        if wanted {
+            info!(
+                "rt reflect: switch at frame {frame}: on; the water reflects by {}, the mirror \
+                 camera is off",
+                if ssr_enabled() {
+                    "the Hi-Z march, then a ray"
+                } else {
+                    "a ray alone (WOW_SSR=0)"
+                }
+            );
+        } else {
+            let why = if !rt_reflections() {
+                "ray tracing is not live"
+            } else if !option {
+                "the rayTracing option is off"
+            } else if !modern {
+                "classic lighting"
+            } else {
+                "the water tier has no mirror"
+            };
+            info!(
+                "rt reflect: switch at frame {frame}: off ({why}); the water reflects by the mirror \
+                 camera where its tier has one"
+            );
+        }
+    }
+    *logged = Some(wanted);
+}
+
 /// **The ray-traced reflections' lane, this frame**: the ray tracing is live (`rt_scene::live()`:
 /// capable, the `rayTracing` option on and the scene ready) and the session may trace reflections
 /// ([`rt_reflections_capable`]). Per frame, any world (outside the render world, its latest
