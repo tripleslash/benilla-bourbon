@@ -469,6 +469,13 @@
             "The graphics interface the game draws through. DirectX 12 is the default; Vulkan and "
             .. "OpenGL can help with a driver that misbehaves. One your system does not offer falls "
             .. "back to the best it does. Takes effect the next time the game starts."
+        -- fork: native GPU — `rayTracing`; 1.12 has no such box.
+        BENILLA_TOOLTIP_RAY_TRACING =
+            "Lets the Modern lighting model use your graphics card's ray-tracing hardware for "
+            .. "the lighting it can trace, such as the light bounced around the world. Turn it "
+            .. "off if it costs too much frame rate or misbehaves: the game then lights the world "
+            .. "the way it does on cards without ray tracing. Cards without it ignore this box. "
+            .. "Takes effect the next time the game starts."
         BENILLA_TOOLTIP_RENDER_SCALE =
             "Draws the 3D world at a fraction of the window's resolution, or larger than it. "
             .. "The interface is unaffected at any setting.\n\n"
@@ -774,6 +781,13 @@
                     table.insert(graphics, i + 2, "RowResolution")
                     table.insert(graphics, i + 3, "RowMultisample")
                     table.insert(graphics, i + 4, "RowGraphicsApi")
+                    break
+                end
+            end
+            -- fork: native GPU — the Ray Tracing box closes the Lighting section.
+            for i, rkey in ipairs(graphics) do
+                if ( rkey == "RowAutoExposure" ) then
+                    table.insert(graphics, i + 1, "RowRayTracing")
                     break
                 end
             end
@@ -2924,6 +2938,22 @@
                                                     "BENILLA_TOOLTIP_AUTO_EXPOSURE")
                                             </OnLoad></Scripts>
                                         </Frame>
+                                        <Frame name="$parentRowRayTracing" inherits="BenillaOptionsCheckboxRowTemplate" hidden="true">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowAutoExposure" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowAutoExposure" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- fork: native GPU — `rayTracing`, a native
+                                                -- client's own row: off creates the device
+                                                -- without hardware ray tracing at the next start
+                                                -- (`video::with_render_api`), which turns every
+                                                -- ray-traced lane off.
+                                                BenillaOptionsRow_OnLoad(this, "rayTracing", "Ray Tracing",
+                                                    "BENILLA_TOOLTIP_RAY_TRACING")
+                                                if ( BENILLA_NATIVE ) then this:Show() end
+                                            </OnLoad></Scripts>
+                                        </Frame>
                                         <!-- On the CVar, as 1.12's lands: there is no
                                              SetweatherDensity global. -->
                                         <Frame name="$parentRowWeatherDensity" inherits="BenillaOptionsSliderRowTemplate">
@@ -2932,6 +2962,14 @@
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowAutoExposure" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-33"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
+                                                -- fork: native GPU — under the Ray Tracing box
+                                                -- where it shows, the section gap kept.
+                                                if ( BENILLA_NATIVE ) then
+                                                    local above = this:GetParent():GetName() .. "RowRayTracing"
+                                                    this:ClearAllPoints()
+                                                    this:SetPoint("TOPLEFT", above, "BOTTOMLEFT", 0, -33)
+                                                    this:SetPoint("TOPRIGHT", above, "BOTTOMRIGHT", 0, -33)
+                                                end
                                                 BenillaOptionsRow_OnLoad(this, "weatherDensity", "Weather Intensity",
                                                     "OPTION_TOOLTIP_WEATHER_DETAIL")
                                                 -- Our names for `0x67b870`'s spawn-rate gains
@@ -4152,6 +4190,8 @@
             -- fork: desktop
             BENILLA_MULTISAMPLE = "Multisampling"
             BENILLA_GRAPHICS_API = "Graphics API"
+            -- fork: native GPU
+            BENILLA_RAY_TRACING = "Ray Tracing"
             BENILLA_RENDER_SCALE = "Render Scale"
             -- fork: dlss (FORK.md)
             BENILLA_UPSCALER = "Upscaler"
@@ -4449,6 +4489,11 @@
                     name = "BENILLA_GRAPHICS_API", desc = BENILLA_TOOLTIP_GRAPHICS_API,
                     type = "dropdown", identifier = "BenillaGraphicsApi", cvar = "gxApi",
                     restartGx = 1 } })
+                -- fork: native GPU — `rayTracing`, read as the device is created at the next
+                -- start (`video::with_render_api`), so a staged write is all it takes.
+                tinsert(rows, { category = PIXEL_SHADERS, row = {
+                    name = "BENILLA_RAY_TRACING", desc = BENILLA_TOOLTIP_RAY_TRACING,
+                    type = "checkbutton", cvar = "rayTracing" } })
             end
             -- A row placed by its neighbour: the category holding the Turtle row of that name.
             local function placeBeside(entry)
@@ -4510,7 +4555,8 @@
                     "SPELL_DETAIL", "BENILLA_WATER_DETAIL" } },
                 { name = "Lighting", from = PIXEL_SHADERS, rows = {
                     "BENILLA_LIGHTING_MODEL", "BENILLA_LIGHTING_QUALITY", "BENILLA_WORLD_SHADOWS",
-                    "BENILLA_AMBIENT_OCCLUSION", "BENILLA_INDIRECT_LIGHT", "BENILLA_AUTO_EXPOSURE" } },
+                    "BENILLA_AMBIENT_OCCLUSION", "BENILLA_INDIRECT_LIGHT", "BENILLA_AUTO_EXPOSURE",
+                    "BENILLA_RAY_TRACING" } },
                 { name = "Weather & Time", rows = {
                     "WEATHER_DETAIL", "BENILLA_RAIN_SURFACES", "BENILLA_FOLIAGE_WIND",
                     "BENILLA_FOLIAGE_WIND_STRENGTH", "BENILLA_SERVER_TIME_OFFSET" } },

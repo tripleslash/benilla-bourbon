@@ -1074,6 +1074,17 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "benilla's own — 1.12 has no upscaler to choose",
     ),
     // ── end fork-owned block ──
+    // ── fork-owned block: native GPU (hardware ray tracing) ──
+    // `rayTracing` — 1 (the default) lets a native client use the GPU's ray-tracing hardware
+    // where it has it; 0 removes those features from the device the renderer creates
+    // (`video::with_render_api`), so every ray-traced lane keeps its raster fallback. Read as the
+    // device is created: applies at the next start. The web build has no ray tracing to turn off.
+    ours(
+        "rayTracing",
+        "1",
+        "benilla's own — 1.12 has no hardware ray tracing",
+    ),
+    // ── end fork-owned block ──
     // ── fork-owned block: the Everwood port (FORK.md) ──
     // `foliageWind` — 0 off (no vertex displacement, the reference's still image), 1 grass, 2
     // grass and classified tree and bush foliage (the default). `foliageWindStrength` — the sway

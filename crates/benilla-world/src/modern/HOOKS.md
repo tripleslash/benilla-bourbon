@@ -209,6 +209,9 @@ Fork systems go in `PreUpdate`, `Update` or `Last`.
 | `benilla-world/src/shaders.rs` | `modern_libraries`: native only, `embedded_asset!` for `shaders/modern/gx_hiz.wgsl` and `shaders/modern/gx_cull.wgsl` | gpu cull |
 | `benilla-world/src/shaders.rs` | `modern_libraries`: native only, `embedded_asset!` for `shaders/modern/gi_trace_rt.wgsl` | rt gi |
 | `benilla-world/src/static_gx/render/modern_gi.rs` (fork-owned, under upstream's `static_gx/render`) | `prepare_gi_voxels`: with `modern::gi::rt_gi()` no clipmap texture, caster diff, box or voxel raster pipeline (so `gi_voxel_pass` records no `modern_gi_voxel_clear` / `modern_gi_voxelize`); the heightfield is drawn as before; `ModernGiScene.albedo` / `.normal` are `None` | rt gi |
+| `benilla-app/src/video.rs` | `with_render_api`'s `disabled_features` is `boot_disabled_features()`: `gpu_stats::disabled_features()` plus, with the stored `rayTracing` "0" (`boot_ray_tracing`), `EXPERIMENTAL_RAY_QUERY`, `EXPERIMENTAL_RAY_HIT_VERTEX_RETURN`, `EXTENDED_ACCELERATION_STRUCTURE_VERTEX_FORMATS` and `ACCELERATION_STRUCTURE_BINDING_ARRAY`, so `HwCaps.ray_query` is false and every ray-traced lane is off for the session | ray tracing setting |
+| `benilla-app/src/cvars/table.rs` | `ours("rayTracing", "1", …)` in its own fork-owned block after dlss's | ray tracing setting |
+| `benilla-app/assets/ui/OptionsFrame.xml` | `BENILLA_TOOLTIP_RAY_TRACING`; `$parentRowRayTracing` (checkbox, hidden, shown under `BENILLA_NATIVE`) after Auto Exposure, inserted into `BENILLA_OPTIONS_PAGE_ROWS.Graphics` after `RowAutoExposure` on native, with `RowWeatherDensity` re-anchored under it; Turtle's window: `BENILLA_RAY_TRACING` label, a native-only `PIXEL_SHADERS` checkbutton row on `rayTracing`, last in the Lighting section | ray tracing setting |
 
 ## Interfaces for Hi-Z / RT (bindless static_gx)
 
