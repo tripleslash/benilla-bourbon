@@ -58,6 +58,8 @@ pub(crate) struct ForkKnobs<'w> {
     brightness: Option<ResMut<'w, crate::ui_gamma::DisplayBrightness>>,
     frame_generation: Option<ResMut<'w, benilla_world::fsr::FrameGeneration>>,
     rcas: Option<ResMut<'w, benilla_world::fsr::RcasSharpness>>,
+    // fork: dlss (FORK.md) — the `upscaler` row's knob.
+    upscaler: Option<ResMut<'w, benilla_world::dlss::UpscalerChoice>>,
     time_offset: Option<ResMut<'w, crate::net::TimeOffset>>,
     hd_models: Option<ResMut<'w, crate::hd_models::HdModelsAsk>>,
 }
@@ -145,7 +147,13 @@ impl CvarCallbacks<'_> {
             fork.frame_generation.as_mut(),
             fork.rcas.as_mut(),
         ) {
-            crate::world_backdrop::on_cvar(ev, scale.reborrow(), fg.reborrow(), rcas.reborrow());
+            crate::world_backdrop::on_cvar(
+                ev,
+                scale.reborrow(),
+                fg.reborrow(),
+                rcas.reborrow(),
+                fork.upscaler.as_mut().map(|u| u.reborrow()),
+            );
         }
         if let Some(k) = fork.time_offset.as_mut() {
             crate::net::time_offset_on_cvar(ev, k.reborrow());

@@ -720,6 +720,11 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     // No `game://` source: the five UI shaders are compiled in by `crate::shaders`
     // (`embedded://benilla_app/shaders/…`), so no build-machine path reaches the binary.
 
+    // fork: dlss (FORK.md) — NGX's runtime path and Vulkan extensions, and Streamline when
+    // DLSS frame generation is chosen, all before `RenderPlugin` creates the device.
+    #[cfg(not(target_arch = "wasm32"))]
+    video::install_dlss(&mut app);
+
     app.add_plugins(quiet_console_on_web(video::with_render_api(
         benilla_world::boot::tuned_default_plugins(Window {
             title: "World of Warcraft".into(),

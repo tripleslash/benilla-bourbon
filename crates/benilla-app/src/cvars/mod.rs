@@ -1345,6 +1345,8 @@ pub(crate) const GRAPHICS_CVARS: &[&str] = &[
     // fork: fsr (FORK.md)
     "frameGeneration",
     "rcasSharpness",
+    // fork: dlss (FORK.md)
+    "upscaler",
     // fork: the Everwood port (FORK.md)
     "foliageWind",
     "foliageWindStrength",
@@ -2078,6 +2080,11 @@ mod tests {
             d["frameGeneration"] != 0.0,
             benilla_world::fsr::FrameGeneration::default().0
         );
+        // fork: dlss (FORK.md) — the upscaler boots at the engine's default, DLSS.
+        assert_eq!(
+            crate::cvars::registered_default("upscaler", 0),
+            Some(benilla_world::dlss::Upscaler::default().as_cvar())
+        );
         // fork: the Everwood port — the foliage wind boots at the engine's registered tier and gain.
         assert_eq!(
             d["foliageWind"],
@@ -2357,6 +2364,17 @@ mod tests {
         assert_eq!(res::<benilla_world::fsr::RcasSharpness>(&app).0, 0.5);
         apply(&mut app, "rcassharpness", "7");
         assert_eq!(res::<benilla_world::fsr::RcasSharpness>(&app).0, 1.0);
+        // fork: dlss (FORK.md)
+        apply(&mut app, "upscaler", "fsr");
+        assert_eq!(
+            res::<benilla_world::dlss::UpscalerChoice>(&app).0,
+            benilla_world::dlss::Upscaler::Fsr
+        );
+        apply(&mut app, "UPSCALER", "dlss");
+        assert_eq!(
+            res::<benilla_world::dlss::UpscalerChoice>(&app).0,
+            benilla_world::dlss::Upscaler::Dlss
+        );
         assert_eq!(res::<crate::blob_shadow::ShadowSettings>(&app).lod, 1);
         apply(&mut app, "shadowLOD", "0");
         assert_eq!(res::<crate::blob_shadow::ShadowSettings>(&app).lod, 0);
@@ -3636,6 +3654,8 @@ mod tests {
             // fork: fsr (FORK.md)
             .init_resource::<benilla_world::fsr::FrameGeneration>()
             .init_resource::<benilla_world::fsr::RcasSharpness>()
+            // fork: dlss (FORK.md)
+            .init_resource::<benilla_world::dlss::UpscalerChoice>()
             .init_resource::<crate::net::TimeOffset>()
             // Literal for the same reason: LightingSettings::default() reads $WOW_LIGHTING /
             // $WOW_LIGHTING_QUALITY, IndirectLighting::default() $WOW_SSAO / $WOW_SSGI, and

@@ -19,6 +19,10 @@
 //! fork: fsr (FORK.md) — below 1.0, or with frame generation on, FSR 3.1.5 reconstructs the
 //! display-size image instead of the bilinear stretch ([`sync_fsr_view`]); frame generation caps
 //! the scale at 1.0 ([`effective_scale`]).
+//!
+//! fork: dlss (FORK.md) — the `upscaler` CVar picks what fills that slot: DLSS 4.5 (the
+//! default, FSR where NGX reports no support), FSR, or neither; frame generation is DLSS's
+//! (Streamline) where it runs and FSR's otherwise ([`resolve_upscaler`]).
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
@@ -29,7 +33,8 @@ use bevy::window::PrimaryWindow;
 
 use crate::ui_pass::PlayerUiCamera;
 use benilla_world::ffx_glow::FfxBackdrop;
-use benilla_world::fsr::{FgBlocked, FrameGeneration, FsrView};
+use benilla_world::dlss::{DlssFrameGeneration, DlssSupport, Upscaler, UpscalerChoice};
+use benilla_world::fsr::{FgBlocked, FrameGeneration, FsrView, UpscalerKind};
 use benilla_world::view::WorldCamera;
 
 /// The render scale, the `renderScale` CVar, not a 1.12 CVar: it scales the 3D and keeps the
@@ -117,6 +122,60 @@ fn fsr_active(effective: f32, frame_generation: bool, msaa: Msaa) -> bool {
     (effective < 1.0 || frame_generation) && msaa == Msaa::Off
 }
 
+/// fork: dlss (FORK.md) — what the slot runs this frame, from the `upscaler` choice, the
+/// `frameGeneration` wish and what this machine supports: the upscaler (`None`: the bilinear
+/// stretch), DLSS frame generation, and FSR frame generation. DLSS falls back to FSR where NGX
+/// reports no support or refused a feature; DLSS frame generation where Streamline does not run,
+/// to FSR's on whichever upscaler is in the slot.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Slot {
+    pub(crate) upscaler: Option<UpscalerKind>,
+    pub(crate) dlss_frame_generation: bool,
+    pub(crate) fsr_frame_generation: bool,
+}
+
+pub(crate) fn resolve_upscaler(
+    choice: Upscaler,
+    support: DlssSupport,
+    refused: bool,
+    frame_generation: bool,
+) -> Slot {
+    match choice {
+        Upscaler::Off => Slot {
+            upscaler: None,
+            dlss_frame_generation: false,
+            fsr_frame_generation: false,
+        },
+        Upscaler::Fsr => Slot {
+            upscaler: Some(UpscalerKind::Fsr),
+            dlss_frame_generation: false,
+            fsr_frame_generation: frame_generation,
+        },
+        Upscaler::Dlss => {
+            let sr = support.super_resolution && !refused;
+            let dlss_fg = frame_generation && support.frame_generation;
+            Slot {
+                upscaler: Some(if sr {
+                    UpscalerKind::Dlss
+                } else {
+                    UpscalerKind::Fsr
+                }),
+                dlss_frame_generation: dlss_fg,
+                fsr_frame_generation: frame_generation && !dlss_fg,
+            }
+        }
+    }
+}
+
+/// fork: dlss (FORK.md) — frame generation of either kind is wanted, with an upscaler in the
+/// slot (`upscaler = off` runs neither).
+fn frame_generation_wanted(
+    choice: Option<&UpscalerChoice>,
+    fg: Option<&FrameGeneration>,
+) -> bool {
+    fg.is_some_and(|f| f.0) && choice.is_none_or(|c| c.0 != Upscaler::Off)
+}
+
 /// The world camera's target, the size-carrier, in physical px × [`RenderScale`]; at 1.0 the
 /// combine's read of the world is an identity resample.
 #[derive(Resource)]
@@ -195,11 +254,14 @@ fn track_render_size(
     windows: Query<&Window, With<PrimaryWindow>>,
     scale: Res<RenderScale>,
     fg: Option<Res<FrameGeneration>>,
+    // fork: dlss (FORK.md)
+    choice: Option<Res<UpscalerChoice>>,
 ) {
     let Ok(window) = windows.single() else {
         return;
     };
-    let scale = RenderScale(effective_scale(scale.0, fg.is_some_and(|f| f.0)));
+    let fg = frame_generation_wanted(choice.as_deref(), fg.as_deref());
+    let scale = RenderScale(effective_scale(scale.0, fg));
     let (size, _) = render_target_for(
         window_physical_size(window),
         window.resolution.scale_factor(),
@@ -236,6 +298,8 @@ fn retarget_world_camera(
     windows: Query<&Window, With<PrimaryWindow>>,
     added: Query<(), Added<WorldCamera>>,
     fg: Option<Res<FrameGeneration>>,
+    // fork: dlss (FORK.md) — `upscaler = off` keeps the bilinear stretch's bias.
+    choice: Option<Res<UpscalerChoice>>,
     mut cameras: Query<(Entity, &mut RenderTarget, Option<&Msaa>), With<WorldCamera>>,
 ) {
     let (px, window_factor) = windows.single().map_or((UVec2::ONE, 1.0), |w| {
@@ -250,7 +314,13 @@ fn retarget_world_camera(
         .next()
         .and_then(|(_, _, m)| m.copied())
         .unwrap_or_default();
-    let fsr = fsr_active(effective, fg.is_some_and(|f| f.0), msaa);
+    let slot_on = choice.as_deref().is_none_or(|c| c.0 != Upscaler::Off);
+    let fsr = slot_on
+        && fsr_active(
+            effective,
+            frame_generation_wanted(choice.as_deref(), fg.as_deref()),
+            msaa,
+        );
     // The image as well as the factor: a pure window resize rebuilds without moving the factor.
     let want = (backdrop.image.id(), scale_factor, fsr);
     let moved = backdrop.stamped != Some(want);
@@ -300,11 +370,22 @@ fn sync_fsr_view(
     fg: Option<Res<FrameGeneration>>,
     blocked: Option<ResMut<FgBlocked>>,
     capture: Option<Res<crate::run_mode::CaptureMode>>,
+    // fork: dlss (FORK.md) — the slot's choice, what runs here, and DLSS-G's switch.
+    choice: Option<Res<UpscalerChoice>>,
+    support: Option<Res<DlssSupport>>,
+    dlss_fg: Option<ResMut<DlssFrameGeneration>>,
     mut cameras: Query<(Entity, &Camera, Option<&Msaa>, Option<&mut FsrView>), With<WorldCamera>>,
     mut was_active: Local<bevy::ecs::entity::EntityHashMap<bool>>,
 ) {
+    let slot = resolve_upscaler(
+        choice.as_deref().map_or_else(Upscaler::default, |c| c.0),
+        support.as_deref().copied().unwrap_or_default(),
+        benilla_world::dlss::refused(),
+        fg.is_some_and(|f| f.0),
+    );
+    // FSR's held-frame cadence stands down while DLSS frame generation paces the present.
     if let Some(mut blocked) = blocked {
-        let want = capture.is_some();
+        let want = capture.is_some() || slot.dlss_frame_generation;
         if blocked.0 != want {
             blocked.0 = want;
         }
@@ -313,22 +394,33 @@ fn sync_fsr_view(
         return;
     };
     let display = window_physical_size(window);
-    let frame_generation = fg.is_some_and(|f| f.0);
+    let frame_generation = slot.fsr_frame_generation;
+    let any_frame_generation = slot.fsr_frame_generation || slot.dlss_frame_generation;
     let effective = backdrop.size.x as f32 / display.x as f32;
+    let mut dlss_fg_on = false;
     for (entity, camera, msaa, view) in &mut cameras {
         let returned =
             camera.is_active && !was_active.insert(entity, camera.is_active).unwrap_or(false);
-        let on = fsr_active(
-            effective,
-            frame_generation,
-            msaa.copied().unwrap_or_default(),
-        );
+        let kind = slot.upscaler;
+        let on = kind.is_some()
+            && fsr_active(
+                effective,
+                any_frame_generation,
+                msaa.copied().unwrap_or_default(),
+            );
+        let kind = kind.unwrap_or_default();
+        // A capture reads every frame's pixels: no generated frame among them.
+        dlss_fg_on |= on && camera.is_active && slot.dlss_frame_generation && capture.is_none();
         match (on, view) {
             (true, Some(mut view)) => {
-                if view.display != display || view.frame_generation != frame_generation || returned
+                if view.display != display
+                    || view.frame_generation != frame_generation
+                    || view.upscaler != kind
+                    || returned
                 {
                     view.display = display;
                     view.frame_generation = frame_generation;
+                    view.upscaler = kind;
                     if returned {
                         view.epoch = view.epoch.wrapping_add(1);
                     }
@@ -337,12 +429,17 @@ fn sync_fsr_view(
             (true, None) => {
                 commands
                     .entity(entity)
-                    .insert(FsrView::new(display, 0, frame_generation));
+                    .insert(FsrView::new(display, 0, frame_generation).with_upscaler(kind));
             }
             (false, Some(_)) => {
                 commands.entity(entity).remove::<FsrView>();
             }
             (false, None) => {}
+        }
+    }
+    if let Some(mut dlss_fg) = dlss_fg {
+        if dlss_fg.0 != dlss_fg_on {
+            dlss_fg.0 = dlss_fg_on;
         }
     }
 }
@@ -352,13 +449,20 @@ pub(crate) struct WorldBackdropPlugin;
 
 /// Render scale's change callback, clamped to [`RENDER_SCALE_RANGE`]; the backdrop and the
 /// camera's factor follow together on the next frame. fork: fsr (FORK.md) — and `frameGeneration`'s,
-/// a flag, and `rcasSharpness`'s, clamped to the SDK's `[0, 1]`.
+/// a flag, and `rcasSharpness`'s, clamped to the SDK's `[0, 1]`. fork: dlss (FORK.md) — and
+/// `upscaler`'s, `dlss`, `fsr` or `off`, applied to the next frame.
 pub(crate) fn on_cvar(
     ev: &crate::cvars::CvarChanged,
     mut scale: bevy::prelude::Mut<'_, RenderScale>,
     mut fg: bevy::prelude::Mut<'_, FrameGeneration>,
     mut rcas: bevy::prelude::Mut<'_, benilla_world::fsr::RcasSharpness>,
+    upscaler: Option<bevy::prelude::Mut<'_, UpscalerChoice>>,
 ) {
+    if ev.is("upscaler") {
+        if let Some(mut upscaler) = upscaler {
+            upscaler.0 = Upscaler::from_cvar(&ev.new);
+        }
+    }
     if ev.is("rcasSharpness") {
         let v = ev.num();
         rcas.0 = if v.is_finite() {
@@ -383,6 +487,9 @@ impl Plugin for WorldBackdropPlugin {
             // fork: fsr (FORK.md) — the settings' knobs; `FsrPlugin` installs them too.
             .init_resource::<FrameGeneration>()
             .init_resource::<benilla_world::fsr::RcasSharpness>()
+            // fork: dlss (FORK.md) — the slot's knobs; `DlssPlugin` installs them too.
+            .init_resource::<UpscalerChoice>()
+            .init_resource::<DlssFrameGeneration>()
             .add_systems(Startup, setup_backdrop)
             .add_systems(
                 Update,
@@ -595,6 +702,38 @@ mod tests {
         assert_eq!(effective_scale(1.5, false), 1.5);
         assert!((fsr_mip_bias(0.5) - -2.0).abs() < 1e-6);
         assert!((fsr_mip_bias(1.0) - -1.0).abs() < 1e-6);
+    }
+
+    /// fork: dlss (FORK.md) — DLSS where supported, FSR where not or when refused; DLSS
+    /// frame generation where Streamline runs, FSR's otherwise; `off` runs neither.
+    #[test]
+    fn the_slot_resolves_dlss_with_fsr_as_its_fallback() {
+        let none = DlssSupport::default();
+        let sr = DlssSupport {
+            super_resolution: true,
+            ..default()
+        };
+        let all = DlssSupport {
+            super_resolution: true,
+            frame_generation: true,
+            ray_reconstruction: false,
+        };
+        let s = resolve_upscaler(Upscaler::Dlss, all, false, true);
+        assert_eq!(s.upscaler, Some(UpscalerKind::Dlss));
+        assert!(s.dlss_frame_generation && !s.fsr_frame_generation);
+        let s = resolve_upscaler(Upscaler::Dlss, sr, false, true);
+        assert_eq!(s.upscaler, Some(UpscalerKind::Dlss));
+        assert!(!s.dlss_frame_generation && s.fsr_frame_generation, "RTX 20/30: FSR FG on DLSS");
+        let s = resolve_upscaler(Upscaler::Dlss, none, false, true);
+        assert_eq!(s.upscaler, Some(UpscalerKind::Fsr), "no NGX: FSR");
+        let s = resolve_upscaler(Upscaler::Dlss, all, true, false);
+        assert_eq!(s.upscaler, Some(UpscalerKind::Fsr), "refused: FSR");
+        let s = resolve_upscaler(Upscaler::Fsr, all, false, true);
+        assert_eq!(s.upscaler, Some(UpscalerKind::Fsr));
+        assert!(!s.dlss_frame_generation && s.fsr_frame_generation);
+        let s = resolve_upscaler(Upscaler::Off, all, false, true);
+        assert_eq!(s.upscaler, None);
+        assert!(!s.dlss_frame_generation && !s.fsr_frame_generation);
     }
 
     #[test]

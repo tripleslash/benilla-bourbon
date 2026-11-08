@@ -478,9 +478,19 @@
 
         -- fork: fsr (FORK.md) — 1.12 has no such checkbox.
         BENILLA_TOOLTIP_FRAME_GENERATION =
-            "Uses AMD FSR 3.1 frame generation to show a generated frame between every two the "
-            .. "game draws, nearly doubling the frames you see for one frame of added latency.\n\n"
+            "Shows a generated frame between every two the game draws, nearly doubling the "
+            .. "frames you see for one frame of added latency: NVIDIA DLSS Frame Generation with "
+            .. "the DLSS upscaler where it runs, AMD FSR 3.1 frame generation otherwise.\n\n"
             .. "Render Scale is held at 100% or below while it is on. Applies when you click Apply."
+
+        -- fork: dlss (FORK.md) — 1.12 has no upscaler to choose.
+        BENILLA_TOOLTIP_UPSCALER =
+            "Which upscaler rebuilds the picture when Render Scale is below 100% or frame "
+            .. "generation is on. NVIDIA DLSS 4.5 (RTX cards) also uses DLSS Frame Generation "
+            .. "where your card and the DLSS runtime support it; elsewhere it falls back to AMD "
+            .. "FSR 3.1. Off stretches the picture with no upscaler and no frame generation.\n\n"
+            .. "Switching between DLSS and FSR applies at once; DLSS Frame Generation starts with "
+            .. "the next session."
 
         -- fork: fsr (FORK.md) — 1.12 has no such slider.
         BENILLA_TOOLTIP_RCAS_SHARPNESS =
@@ -675,7 +685,8 @@
             -- moves in it.
             Graphics = {
                 "RowGraphicsPreset",
-                "RowUiScale", "RowRenderScale", "RowRcasSharpness", "RowFrameGeneration",
+                "RowUiScale", "RowRenderScale", "RowUpscaler", "RowRcasSharpness",
+                "RowFrameGeneration",
                 "RowVerticalSync", "RowBrightness", "RowGamma",
                 "RowFarclip", "RowGroundClutterDistance", "RowGroundClutterDensity",
                 "RowGroundClutterScale",
@@ -2477,10 +2488,27 @@
                                                 this.deferred = 1
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowRcasSharpness" inherits="BenillaOptionsSliderRowTemplate">
+                                        <Frame name="$parentRowUpscaler" inherits="BenillaOptionsDropdownRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowRenderScale" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowRenderScale" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- fork: dlss (FORK.md) -- `upscaler`, our
+                                                -- own row. Live: the slot switches next frame.
+                                                BenillaOptionsRow_OnLoad(this, "upscaler", "Upscaler",
+                                                    "BENILLA_TOOLTIP_UPSCALER")
+                                                BenillaOptionsDropdownRow_Setup(this, {
+                                                    { text = "NVIDIA DLSS 4.5", value = "dlss" },
+                                                    { text = "AMD FSR 3.1", value = "fsr" },
+                                                    { text = "Off", value = "off" },
+                                                })
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowRcasSharpness" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowUpscaler" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowUpscaler" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- fork: fsr (FORK.md) -- `rcasSharpness`,
@@ -4097,6 +4125,8 @@
             BENILLA_MULTISAMPLE = "Multisampling"
             BENILLA_GRAPHICS_API = "Graphics API"
             BENILLA_RENDER_SCALE = "Render Scale"
+            -- fork: dlss (FORK.md)
+            BENILLA_UPSCALER = "Upscaler"
             -- fork: fsr (FORK.md)
             BENILLA_FRAME_GENERATION = "Use Frame Generation"
             BENILLA_RCAS_SHARPNESS = "RCAS Sharpening"
@@ -4150,6 +4180,12 @@
                 end
             end
             -- The entries our own rows offer, in their order.
+            -- fork: dlss (FORK.md)
+            BenillaUpscalerDropdown_Init = dropdown("upscaler", {
+                { text = "NVIDIA DLSS 4.5", value = "dlss" },
+                { text = "AMD FSR 3.1", value = "fsr" },
+                { text = "Off", value = "off" },
+            })
             BenillaLightingModelDropdown_Init = dropdown("lightingModel", {
                 { text = "Classic", value = "0" },
                 { text = "Modern", value = "1" },
@@ -4343,8 +4379,12 @@
                     type = "slider", cvar = "renderScale", minval = 0.5, maxval = 2.0, step = 0.01,
                     -- fork: fsr (FORK.md) -- FSR's 0.67 and 1x, marked on the groove.
                     benillaMarks = BENILLA_RENDER_SCALE_MARKS, numberLabels = true } },
-                -- fork: fsr (FORK.md) -- FSR's sharpening, right under Render Scale.
+                -- fork: dlss (FORK.md) -- the upscaler, right under Render Scale.
                 { after = "BENILLA_RENDER_SCALE", row = {
+                    name = "BENILLA_UPSCALER", desc = BENILLA_TOOLTIP_UPSCALER,
+                    type = "dropdown", identifier = "BenillaUpscaler", cvar = "upscaler" } },
+                -- fork: fsr (FORK.md) -- FSR's sharpening, right under the upscaler.
+                { after = "BENILLA_UPSCALER", row = {
                     name = "BENILLA_RCAS_SHARPNESS", desc = BENILLA_TOOLTIP_RCAS_SHARPNESS,
                     type = "slider", cvar = "rcasSharpness", minval = 0, maxval = 1.0, step = 0.025 } },
                 -- fork: fsr (FORK.md)
@@ -4437,7 +4477,8 @@
             local sections = {
                 { name = "Display", from = DISPLAY, rows = {
                     "BENILLA_GRAPHICS_PRESET", "UI_SCALE", "BENILLA_RENDER_SCALE",
-                    "BENILLA_RCAS_SHARPNESS", "BENILLA_FRAME_GENERATION", "BENILLA_BRIGHTNESS",
+                    "BENILLA_UPSCALER", "BENILLA_RCAS_SHARPNESS", "BENILLA_FRAME_GENERATION",
+                    "BENILLA_BRIGHTNESS",
                     "GAMMA", "BENILLA_MULTISAMPLE", "BENILLA_GRAPHICS_API" } },
                 { name = "World Detail", from = WORLD_APPEARANCE, rows = {
                     "FARCLIP", "BENILLA_GROUND_CLUTTER_DISTANCE", "BENILLA_GROUND_CLUTTER_DENSITY",

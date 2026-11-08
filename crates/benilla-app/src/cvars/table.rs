@@ -1056,6 +1056,19 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "benilla's own — 1.12 has no upscaler to sharpen",
     ),
     // ── end fork-owned block ──
+    // ── fork-owned block: dlss (FORK.md) ──
+    // fork: dlss (FORK.md)
+    // `upscaler` — what fills the temporal upscaler's slot below 1:1 or under frame generation:
+    // `dlss` (NVIDIA DLSS 4.5 Super Resolution, and DLSS Frame Generation through Streamline where
+    // it runs; FSR wherever NGX or Streamline reports no support), `fsr` (FSR 3.1.5) or `off` (the
+    // bilinear stretch, no frame generation). The knob is `benilla_world::dlss::UpscalerChoice`,
+    // its default `Upscaler::default()` (welded below). Applies to the next frame.
+    ours(
+        "upscaler",
+        "dlss",
+        "benilla's own — 1.12 has no upscaler to choose",
+    ),
+    // ── end fork-owned block ──
     // ── fork-owned block: the Everwood port (FORK.md) ──
     // `foliageWind` — 0 off (no vertex displacement, the reference's still image), 1 grass, 2
     // grass and classified tree and bush foliage (the default). `foliageWindStrength` — the sway

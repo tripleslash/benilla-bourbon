@@ -165,12 +165,43 @@ pub(crate) fn with_render_api(
     plugins
 }
 
+/// fork: dlss (FORK.md) — DLSS's boot half ([`benilla_world::dlss::install_boot`]): the
+/// runtime folder (`$WOW_DLSS_PATH`, else `benilla-config/dlss/`), NGX's Vulkan extensions on a
+/// Vulkan boot, and Streamline when `upscaler` is `dlss` and `frameGeneration` is on as stored.
+/// Streamline sits on the swap chain from device creation, so it is chosen here or not at all this
+/// session: switching to DLSS frame generation later runs FSR's until a restart.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn install_dlss(app: &mut App) {
+    let stored = |name: &str| {
+        crate::cvars::boot_cvar(name)
+            .or_else(|| crate::cvars::registered_default(name, 0).map(str::to_string))
+            .unwrap_or_default()
+    };
+    let choice = benilla_world::dlss::Upscaler::from_cvar(&stored("upscaler"));
+    let frame_generation = choice == benilla_world::dlss::Upscaler::Dlss
+        && benilla_ui::script::s_str_to_int(&stored("frameGeneration")) != 0;
+    let home = crate::local_state::home();
+    benilla_world::dlss::install_boot(
+        app,
+        benilla_world::dlss::DlssRuntime::resolve(home.as_deref()),
+        boot_render_backends(),
+        frame_generation,
+    );
+}
+
 /// The backends [`with_render_api`] creates the renderer on: the stored `gxApi`, or its registered
 /// default, when an adapter on this machine answers for it; else every backend, wgpu's own pick,
 /// so a choice the machine cannot honour never leaves the client without a renderer. The log
-/// plugin does not exist yet, so the line goes to stdout.
+/// plugin does not exist yet, so the line goes to stdout. fork: dlss (FORK.md) — resolved
+/// once, since the DLSS boot asks too.
 #[cfg(not(target_arch = "wasm32"))]
 fn boot_render_backends() -> wgpu::Backends {
+    static RESOLVED: std::sync::OnceLock<wgpu::Backends> = std::sync::OnceLock::new();
+    *RESOLVED.get_or_init(resolve_render_backends)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_render_backends() -> wgpu::Backends {
     if let Some(env) = wgpu::Backends::from_env() {
         println!("render: backends {env:?} from $WGPU_BACKEND");
         return env;
