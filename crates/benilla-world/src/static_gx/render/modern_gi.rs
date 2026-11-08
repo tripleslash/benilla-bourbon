@@ -644,7 +644,8 @@ fn prepare_gi_voxels(
             if pipes.raster.contains_key(&(cutout, two_sided)) {
                 continue;
             }
-            let mut defs: Vec<ShaderDefVal> = Vec::new();
+            // fork: group 1's layout defs first (`GX_BINDLESS` when bindless).
+            let mut defs: Vec<ShaderDefVal> = gx_pipes.layout_defs();
             if cutout {
                 defs.push("CUTOUT".into());
             }

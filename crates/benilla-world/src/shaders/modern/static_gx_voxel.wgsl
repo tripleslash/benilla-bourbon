@@ -7,8 +7,12 @@
 // by another; the raster is supersampled against the voxel grid, so a wall thinner than a voxel
 // still fills one.
 //
-// Group 1 is static_gx's own cell layout, bound unchanged (see `static_gx.wgsl`).
+// Group 1 is static_gx's own cell layout, bound unchanged (see `static_gx.wgsl`); under
+// `GX_BINDLESS` the shared region table (`benilla_modern::gx_bindless`).
 #import benilla_modern::colorspace
+#ifdef GX_BINDLESS
+#import benilla_modern::gx_bindless
+#endif
 
 struct VoxelView {
     clip_from_world: mat4x4<f32>,
@@ -21,6 +25,14 @@ struct VoxelView {
 }
 @group(0) @binding(0) var<uniform> vox: VoxelView;
 
+#ifdef GX_BINDLESS
+fn gx_rec(word: u32) -> vec4<u32> {
+    return gx_bindless::rec(word);
+}
+fn gx_origin() -> vec3<f32> {
+    return gx_bindless::origin();
+}
+#else
 struct GxCell {
     origin: vec4<f32>,
 }
@@ -29,6 +41,13 @@ struct GxCell {
 @group(1) @binding(2) var tex_array: texture_2d_array<f32>;
 @group(1) @binding(3) var samp_repeat: sampler;
 @group(1) @binding(4) var samp_clamp: sampler;
+fn gx_rec(word: u32) -> vec4<u32> {
+    return recs[word & 0xffffu];
+}
+fn gx_origin() -> vec3<f32> {
+    return cell.origin.xyz;
+}
+#endif
 
 @group(2) @binding(0) var vox_albedo: texture_storage_3d<rgba8unorm, write>;
 @group(2) @binding(1) var vox_normal: texture_storage_3d<rgba8unorm, write>;
@@ -40,6 +59,10 @@ struct GxVertex {
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) word: u32,
+#ifdef GX_BINDLESS
+    // The draw's `first_instance`: its region's table row.
+    @builtin(instance_index) instance: u32,
+#endif
 }
 
 struct VoxelVsOut {
@@ -48,17 +71,24 @@ struct VoxelVsOut {
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) @interpolate(flat) word: u32,
+#ifdef GX_BINDLESS
+    @location(4) @interpolate(flat) region: u32,
+#endif
 }
 
 @vertex
 fn vertex(v: GxVertex) -> VoxelVsOut {
     var out: VoxelVsOut;
+#ifdef GX_BINDLESS
+    gx_bindless::enter(v.instance);
+    out.region = v.instance;
+#endif
     // A killed item (record bit 0) collapses outside the clip volume, as in every other lane.
-    if ((recs[v.word & 0xffffu].w & 1u) != 0u) {
+    if ((gx_rec(v.word).w & 1u) != 0u) {
         out.position = vec4<f32>(0.0, 0.0, 2.0, 1.0);
         return out;
     }
-    let world = v.position + cell.origin.xyz;
+    let world = v.position + gx_origin();
     out.world = world;
     out.normal = v.normal;
     out.uv = v.uv;
@@ -73,10 +103,17 @@ fn wrap_texel(v: i32, n: i32) -> i32 {
 
 @fragment
 fn fragment(in: VoxelVsOut) {
+#ifdef GX_BINDLESS
+    gx_bindless::enter(in.region);
+#endif
     var albedo = vec3<f32>(0.5);
     if ((in.word & WORD_TEXTURED) != 0u) {
-        let layer = i32(recs[in.word & 0xffffu].x);
+#ifdef GX_BINDLESS
+        let texel = gx_bindless::sample_level(in.uv, in.word, vox.info.z);
+#else
+        let layer = i32(gx_rec(in.word).x);
         let texel = textureSampleLevel(tex_array, samp_repeat, in.uv, layer, vox.info.z);
+#endif
 #ifdef CUTOUT
         // A leaf card only occupies the voxels its opaque part covers — but at a lower key than the
         // draw lane's, so a canopy voxelizes as the canopy rather than as a handful of stems.

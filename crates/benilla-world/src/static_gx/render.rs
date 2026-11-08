@@ -156,6 +156,7 @@ pub(crate) struct GxWorld {
 }
 
 use super::pool::GxTexturePool;
+use crate::modern::caps::HwCaps;
 
 /// Record column w, bit 14: the item's interior fog lane, read by `static_gx.wgsl`. Bit 0 is the
 /// kill bit and bits 1..=13 the probe slot.
@@ -174,23 +175,38 @@ struct GxRun {
     group: Option<u16>,
 }
 
+/// fork: where a region's origin, records and indices live, and what its draws bind.
+enum GxRegionBinds {
+    /// Its own buffers and one bind group per pool class its items touch: the per-region layout
+    /// (the web, `WOW_GX_BINDLESS=0`).
+    Own {
+        /// (pool class, bind group), indexed by a run's `slot`.
+        bind_groups: Vec<(u16, BindGroup)>,
+        record_table: Buffer,
+        /// Held alive for the bind groups that reference it.
+        _cell_uniform: Buffer,
+        /// The region's indices, copied from its mesh at assembly in draw order (see
+        /// [`GxCellGpu::ranges`]). Every draw a region's runs issue — every pass — reads this
+        /// buffer, not the mesh's.
+        indices: Buffer,
+    },
+    /// Its blocks of the shared region table and index arena (`bindless`): one bind group for
+    /// every region, and the region's runs offset by `index_base` into the arena.
+    Shared(bindless::GxSlots),
+}
+
 /// A region's assembled GPU state, cached until its bake (mesh handle) changes.
 struct GxCellGpu {
     mesh: AssetId<Mesh>,
-    /// One bind group per pool class the region's items touch: (pool class, bind group).
-    bind_groups: Vec<(u16, BindGroup)>,
-    record_table: Buffer,
-    #[allow(dead_code)] // held alive for the bind groups that reference it
-    cell_uniform: Buffer,
-    /// Per item, its index into `bind_groups`, kept for kill-driven run rebuilds.
+    binds: GxRegionBinds,
+    /// Per item, its run slot: its index into the `Own` bind groups, kept for kill-driven run
+    /// rebuilds; 0 for every item when bindless, where the class rides in the record.
     item_slot: Vec<u16>,
-    /// The region's indices, copied from its mesh at assembly in draw order: items sorted by
+    /// Per item, its index range in the region's indices (relative to `index_base` when bindless).
+    /// The indices are copied from the mesh at assembly in draw order: items sorted by
     /// `(cutout, two_sided, slot, group)`, so what binds alike is contiguous and draws as one.
-    /// Every draw a region's runs issue — every pass — reads this buffer, not the mesh's.
-    indices: Buffer,
-    /// Per item, its index range in [`Self::indices`].
     ranges: Vec<Range<u32>>,
-    /// The items in [`Self::indices`] order.
+    /// The items in index order.
     order: Vec<u32>,
     /// The draw runs, split at every selection key: what the colour pass draws of a region.
     runs: Vec<GxRun>,
@@ -238,12 +254,29 @@ struct GxPipelines {
     /// features it has (fog, SSAO, prepass textures…), and ours must be the same layout to bind the
     /// view's group.
     specialized_for: Option<(u32, TextureFormat, bool, MeshPipelineViewLayoutKey)>,
+    /// fork: this session draws bindless (`bindless::enabled`, fixed at startup): `cell_layout` is
+    /// the shared layout and every static_gx pipeline takes [`Self::layout_defs`].
+    bindless: bool,
+}
+
+impl GxPipelines {
+    /// fork: the shader defs of group 1's layout: `GX_BINDLESS` when bindless, else none. Every
+    /// pipeline that binds `cell_layout` — this pass's, the shadow casters', the voxelizer's —
+    /// starts its defs here.
+    fn layout_defs(&self) -> Vec<ShaderDefVal> {
+        if self.bindless {
+            vec![ShaderDefVal::from("GX_BINDLESS")]
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 fn init_pipelines(
     mut commands: Commands,
     mesh_pipeline: Res<MeshPipeline>,
     render_device: Res<RenderDevice>,
+    caps: Option<Res<HwCaps>>,
 ) {
     // Use Bevy's real mesh-view layout for the retained pass. Besides the view and light records,
     // this carries the directional shadow textures and comparison samplers produced for the
@@ -271,7 +304,16 @@ fn init_pipelines(
             ),
         ),
     );
-    let cell_layout = BindGroupLayoutDescriptor::new(
+    // fork: bindless — one layout for every region where the device has binding arrays and a
+    // counted multi-draw (`bindless`), else the per-region one.
+    let bindless = bindless::enabled(caps.as_deref());
+    if bindless {
+        commands.insert_resource(bindless::GxBindless::new(caps.is_some_and(|c| c.ray_query)));
+        info!("static_gx: bindless layout (WOW_GX_BINDLESS=0 draws per region)");
+    } else {
+        info!("static_gx: per-region layout");
+    }
+    let per_region = BindGroupLayoutDescriptor::new(
         "static_gx_cell_layout",
         &BindGroupLayoutEntries::sequential(
             ShaderStages::VERTEX_FRAGMENT,
@@ -286,6 +328,11 @@ fn init_pipelines(
             ),
         ),
     );
+    let cell_layout = if bindless {
+        bindless::layout()
+    } else {
+        per_region
+    };
     // Repeat and clamp samplers, picked by the vertex word's wrap bits since a shared array has no
     // per-layer address mode. Mip filter and anisotropy come from `benilla_assets::tex_filter`,
     // the policy the reference applies to every texture from `[0x835250]`/`[0x835254]`. A
@@ -313,6 +360,7 @@ fn init_pipelines(
         pipelines: HashMap::default(),
         prepass: HashMap::default(),
         specialized_for: None,
+        bindless,
     });
 }
 
@@ -390,6 +438,7 @@ fn prepare_static_gx(
     images: Res<RenderAssets<GpuImage>>,
     allocator: Res<MeshAllocator>,
     views: Query<GxViewKey>,
+    mut shared: Option<ResMut<bindless::GxBindless>>,
 ) {
     let _t = super::gx_perf_guard(3);
     // The world view's pipeline key (the marker keeps booth views out of it) — and the PRIMARY
@@ -425,7 +474,7 @@ fn prepare_static_gx(
         let prepassed = modern && prepass_enabled();
         for cutout in [false, true] {
             for two_sided in [false, true] {
-                let mut defs = vec![];
+                let mut defs = pipes.layout_defs();
                 // The world camera uses Bevy's default Gaussian shadow filtering. The retained
                 // pipeline is custom, so it must opt into the same shader branch explicitly;
                 // otherwise `shadows::fetch_directional_shadow` falls back to a constant 1.0.
@@ -564,20 +613,35 @@ fn prepare_static_gx(
         cache.cells.clear();
         cache.wmos.clear();
         cache.props.clear();
+        if let Some(shared) = shared.as_deref_mut() {
+            shared.reset();
+        }
         return;
     }
 
     // Drop cache entries whose region vanished or re-baked.
     let held = cache.cells.len() + cache.wmos.len() + cache.props.len();
-    cache
-        .cells
-        .retain(|c, gpu| gx.cells.get(c).is_some_and(|d| d.mesh.id() == gpu.mesh));
-    cache
-        .wmos
-        .retain(|e, gpu| gx.wmos.get(e).is_some_and(|d| d.mesh.id() == gpu.mesh));
-    cache
-        .props
-        .retain(|e, gpu| gx.props.get(e).is_some_and(|d| d.mesh.id() == gpu.mesh));
+    cache.cells.retain(|c, gpu| {
+        let keep = gx.cells.get(c).is_some_and(|d| d.mesh.id() == gpu.mesh);
+        if !keep {
+            evict(shared.as_deref_mut(), gpu);
+        }
+        keep
+    });
+    cache.wmos.retain(|e, gpu| {
+        let keep = gx.wmos.get(e).is_some_and(|d| d.mesh.id() == gpu.mesh);
+        if !keep {
+            evict(shared.as_deref_mut(), gpu);
+        }
+        keep
+    });
+    cache.props.retain(|e, gpu| {
+        let keep = gx.props.get(e).is_some_and(|d| d.mesh.id() == gpu.mesh);
+        if !keep {
+            evict(shared.as_deref_mut(), gpu);
+        }
+        keep
+    });
     if cache.cells.len() + cache.wmos.len() + cache.props.len() != held {
         cache.rev += 1;
     }
@@ -602,6 +666,7 @@ fn prepare_static_gx(
                 if let Some(gpu) = assemble_region(
                     draw,
                     &mut pool,
+                    shared.as_deref_mut(),
                     &pipes,
                     &pipeline_cache,
                     &render_device,
@@ -610,7 +675,9 @@ fn prepare_static_gx(
                     &allocator,
                     &mut copies,
                 ) {
-                    cache.cells.insert(*cell, gpu);
+                    if let Some(old) = cache.cells.insert(*cell, gpu) {
+                        evict(shared.as_deref_mut(), &old);
+                    }
                     cache.rev += 1;
                 }
             }
@@ -628,6 +695,7 @@ fn prepare_static_gx(
                 if let Some(gpu) = assemble_region(
                     draw,
                     &mut pool,
+                    shared.as_deref_mut(),
                     &pipes,
                     &pipeline_cache,
                     &render_device,
@@ -636,7 +704,9 @@ fn prepare_static_gx(
                     &allocator,
                     &mut copies,
                 ) {
-                    cache.props.insert(*entity, gpu);
+                    if let Some(old) = cache.props.insert(*entity, gpu) {
+                        evict(shared.as_deref_mut(), &old);
+                    }
                     cache.rev += 1;
                 }
             }
@@ -656,6 +726,7 @@ fn prepare_static_gx(
         if let Some(gpu) = assemble_region(
             draw,
             &mut pool,
+            shared.as_deref_mut(),
             &pipes,
             &pipeline_cache,
             &render_device,
@@ -664,12 +735,26 @@ fn prepare_static_gx(
             &allocator,
             &mut copies,
         ) {
-            cache.wmos.insert(*entity, gpu);
+            if let Some(old) = cache.wmos.insert(*entity, gpu) {
+                evict(shared.as_deref_mut(), &old);
+            }
             cache.rev += 1;
         }
     }
     pool.drain_pending(&render_device, &render_queue);
+    // fork: bindless — the one bind group, rebuilt when the table grew or the pool opened a class.
+    if let Some(shared) = shared.as_deref_mut() {
+        shared.refresh_bind(
+            &mut pool,
+            &pipeline_cache.get_bind_group_layout(&pipes.cell_layout),
+            &pipes.sampler,
+            &pipes.sampler_clamp,
+            &render_device,
+            &render_queue,
+        );
+    }
     render_queue.submit([copies.finish()]);
+    let shared = shared.as_deref();
 
     // The kill-bit sync: on a new bitmap revision, rewrite the kill column, re-upload and rebuild
     // the runs. A cell that changed out of view syncs on re-entry.
@@ -690,7 +775,7 @@ fn prepare_static_gx(
             // Column w also carries the probe slot and fog bit: rewrite bit 0 alone.
             rec[3] = (rec[3] & !1) | kill_bit(&hidden, i);
         }
-        render_queue.write_buffer(&gpu.record_table, 0, bytemuck::cast_slice(&gpu.records));
+        gpu.write_records(&render_queue, shared);
         gpu.runs = build_runs(
             &draw.draws,
             &gpu.order,
@@ -717,7 +802,7 @@ fn prepare_static_gx(
                 .is_some_and(|g| sel.fog.get(usize::from(g)).copied().unwrap_or(false));
             rec[3] = (rec[3] & !RECORD_FOG_BIT) | (u32::from(on) * RECORD_FOG_BIT);
         }
-        render_queue.write_buffer(&gpu.record_table, 0, bytemuck::cast_slice(&gpu.records));
+        gpu.write_records(&render_queue, shared);
         gpu.fog_applied.clone_from(&sel.fog);
     };
     for (entity, sel) in &gx.visible_wmos {
@@ -741,10 +826,14 @@ fn prepare_static_gx(
 /// building while its colliders and picks stand.
 /// A region's GPU state, or `None` while its mesh has no index slice yet. The index copy is
 /// recorded into `copies`, which the caller submits before any pass draws.
+///
+/// fork: with `shared` (bindless) the region takes a block of the shared table and of the index
+/// arena instead of buffers and bind groups of its own.
 #[allow(clippy::too_many_arguments)]
 fn assemble_region(
     draw: &GxCellDraw,
     pool: &mut GxTexturePool,
+    mut shared: Option<&mut bindless::GxBindless>,
     pipes: &GxPipelines,
     pipeline_cache: &PipelineCache,
     render_device: &RenderDevice,
@@ -762,35 +851,52 @@ fn assemble_region(
     let mut waiting: Vec<AssetId<Image>> = Vec::new();
     for (i, item) in draw.draws.iter().enumerate() {
         let resident = item.texture.map(|tex| (tex, images.get(tex)));
-        item_class_layer.push(match resident {
-            Some((tex, Some(gpu))) => pool.assign(tex, gpu, render_device),
+        let assigned = match resident {
+            Some((tex, Some(gpu))) => {
+                let slot = pool.assign(tex, gpu, render_device);
+                // fork: bindless — a class past the binding array is held back for good.
+                if shared.as_deref_mut().is_some_and(|s| !s.class_fits(slot.0)) {
+                    unready[i / 64] |= 1u64 << (i % 64);
+                    None
+                } else {
+                    Some(slot)
+                }
+            }
             Some((tex, None)) => {
                 unready[i / 64] |= 1u64 << (i % 64);
                 if !waiting.contains(&tex) {
                     waiting.push(tex);
                 }
-                (
-                    *white.get_or_insert_with(|| pool.white(render_device, render_queue)),
-                    0,
-                )
+                None
             }
-            None => (
+            None => None,
+        };
+        item_class_layer.push(assigned.unwrap_or_else(|| {
+            (
                 *white.get_or_insert_with(|| pool.white(render_device, render_queue)),
                 0,
-            ),
-        });
+            )
+        }));
     }
     let hidden = hidden_bits(&draw.killed, &unready);
     // The per-item record table, indexed by the word's low bits: [layer, batch-order nudge, SIDN,
     // flags]. Flags: bit 0 the kill bit, re-synced by revision (hence COPY_DST); bits 1..=13 the
-    // probe slot, 13 bits being `MAX_PROP_PROBES` exactly.
+    // probe slot, 13 bits being `MAX_PROP_PROBES` exactly. fork: bindless — the pool class rides
+    // in the layer word's high half (`bindless`).
+    let pack_class = shared.is_some();
     let records: Vec<[u32; 4]> = draw
         .draws
         .iter()
         .enumerate()
         .map(|(i, item)| {
+            let (class, layer) = item_class_layer[i];
             [
-                u32::from(item_class_layer[i].1),
+                u32::from(layer)
+                    | if pack_class {
+                        u32::from(class) << 16
+                    } else {
+                        0
+                    },
                 u32::from(item.order),
                 u32::from(item.sidn[0])
                     | (u32::from(item.sidn[1]) << 8)
@@ -799,41 +905,22 @@ fn assemble_region(
             ]
         })
         .collect();
-    let record_table = render_device.create_buffer_with_data(&BufferInitDescriptor {
-        label: Some("static_gx_records"),
-        contents: bytemuck::cast_slice(&records),
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-    });
-    let cell_uniform = render_device.create_buffer_with_data(&BufferInitDescriptor {
-        label: Some("static_gx_cell"),
-        contents: bytemuck::cast_slice(&[draw.origin.x, draw.origin.y, draw.origin.z, 0.0f32]),
-        usage: BufferUsages::UNIFORM,
-    });
-    // One bind group per distinct pool class the region touches.
-    let cell_layout = pipeline_cache.get_bind_group_layout(&pipes.cell_layout);
-    let mut bind_groups: Vec<(u16, BindGroup)> = Vec::new();
-    let mut item_slot: Vec<u16> = Vec::with_capacity(draw.draws.len());
-    for &(class, _) in &item_class_layer {
-        let slot = match bind_groups.iter().position(|(c, _)| *c == class) {
-            Some(s) => s,
-            None => {
-                let bg = render_device.create_bind_group(
-                    "static_gx_cell",
-                    &cell_layout,
-                    &BindGroupEntries::sequential((
-                        cell_uniform.as_entire_binding(),
-                        record_table.as_entire_binding(),
-                        pool.view(class),
-                        &pipes.sampler,
-                        &pipes.sampler_clamp,
-                    )),
-                );
-                bind_groups.push((class, bg));
-                bind_groups.len() - 1
-            }
-        };
-        item_slot.push(u16::try_from(slot).expect("gx region under u16 slots"));
-    }
+    // The per-region layout's buffers and bind groups; bindless, every item is slot 0 (one bind
+    // group for every region).
+    let (item_slot, own) = if shared.is_some() {
+        (vec![0u16; draw.draws.len()], None)
+    } else {
+        let (item_slot, own) = own_binds(
+            draw,
+            &records,
+            &item_class_layer,
+            pool,
+            pipes,
+            pipeline_cache,
+            render_device,
+        );
+        (item_slot, Some(own))
+    };
     // Draw order: what binds alike together, then by selection key, then bake order. Opaque and
     // cutout items only, depth-tested, so the order inside a region is free.
     let mut order: Vec<u32> = (0..draw.draws.len() as u32).collect();
@@ -854,12 +941,42 @@ fn assemble_region(
         ranges[i as usize] = at..at + len;
         at += len;
     }
-    let indices = render_device.create_buffer(&BufferDescriptor {
-        label: Some("static_gx_indices"),
-        size: u64::from(at.max(1)) * 4,
-        usage: BufferUsages::INDEX | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
+    // Where the indices go: the region's own buffer, or its block of the arena.
+    let (binds, indices, index_base) = match (shared, own) {
+        (Some(shared), _) => {
+            let slots = shared.place(
+                draw.origin,
+                &draw.aabb,
+                &records,
+                at,
+                render_device,
+                render_queue,
+                copies,
+            );
+            let arena = shared.index_buffer().expect("`place` reserves the arena");
+            (
+                GxRegionBinds::Shared(slots),
+                arena.clone(),
+                slots.index_base,
+            )
+        }
+        (None, Some((bind_groups, record_table, cell_uniform))) => {
+            let indices = render_device.create_buffer(&BufferDescriptor {
+                label: Some("static_gx_indices"),
+                size: u64::from(at.max(1)) * 4,
+                usage: BufferUsages::INDEX | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let binds = GxRegionBinds::Own {
+                bind_groups,
+                record_table,
+                _cell_uniform: cell_uniform,
+                indices: indices.clone(),
+            };
+            (binds, indices, 0)
+        }
+        (None, None) => unreachable!("the per-region layout builds its own binds"),
+    };
     // One copy per stretch of items that stays contiguous in both buffers (`u32` indices, so
     // every range is copy-aligned).
     let mut stretch: Option<(u32, u32, u32)> = None; // (source start, destination start, length)
@@ -869,7 +986,7 @@ fn assemble_region(
                 islice.buffer,
                 u64::from(islice.range.start + src) * 4,
                 &indices,
-                u64::from(dst) * 4,
+                u64::from(index_base + dst) * 4,
                 u64::from(len) * 4,
             );
         }
@@ -892,11 +1009,8 @@ fn assemble_region(
     let whole = whole_runs(&runs);
     Some(GxCellGpu {
         mesh: draw.mesh.id(),
-        bind_groups,
-        record_table,
-        cell_uniform,
+        binds,
         item_slot,
-        indices,
         ranges,
         order,
         runs,
@@ -910,7 +1024,78 @@ fn assemble_region(
     })
 }
 
+/// The per-region layout's record table, origin uniform and one bind group per distinct pool
+/// class the region touches, with each item's index into those bind groups.
+#[allow(clippy::type_complexity)]
+fn own_binds(
+    draw: &GxCellDraw,
+    records: &[[u32; 4]],
+    item_class_layer: &[(u16, u16)],
+    pool: &GxTexturePool,
+    pipes: &GxPipelines,
+    pipeline_cache: &PipelineCache,
+    render_device: &RenderDevice,
+) -> (Vec<u16>, (Vec<(u16, BindGroup)>, Buffer, Buffer)) {
+    let record_table = render_device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("static_gx_records"),
+        contents: bytemuck::cast_slice(records),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+    });
+    let cell_uniform = render_device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("static_gx_cell"),
+        contents: bytemuck::cast_slice(&[draw.origin.x, draw.origin.y, draw.origin.z, 0.0f32]),
+        usage: BufferUsages::UNIFORM,
+    });
+    // One bind group per distinct pool class the region touches.
+    let cell_layout = pipeline_cache.get_bind_group_layout(&pipes.cell_layout);
+    let mut bind_groups: Vec<(u16, BindGroup)> = Vec::new();
+    let mut item_slot: Vec<u16> = Vec::with_capacity(item_class_layer.len());
+    for &(class, _) in item_class_layer {
+        let slot = match bind_groups.iter().position(|(c, _)| *c == class) {
+            Some(s) => s,
+            None => {
+                let bg = render_device.create_bind_group(
+                    "static_gx_cell",
+                    &cell_layout,
+                    &BindGroupEntries::sequential((
+                        cell_uniform.as_entire_binding(),
+                        record_table.as_entire_binding(),
+                        pool.view(class),
+                        &pipes.sampler,
+                        &pipes.sampler_clamp,
+                    )),
+                );
+                bind_groups.push((class, bg));
+                bind_groups.len() - 1
+            }
+        };
+        item_slot.push(u16::try_from(slot).expect("gx region under u16 slots"));
+    }
+    (item_slot, (bind_groups, record_table, cell_uniform))
+}
+
+/// fork: bindless — free a region's blocks as it leaves the cache.
+fn evict(shared: Option<&mut bindless::GxBindless>, gpu: &GxCellGpu) {
+    if let (Some(shared), GxRegionBinds::Shared(slots)) = (shared, &gpu.binds) {
+        shared.release(*slots);
+    }
+}
+
 impl GxCellGpu {
+    /// Upload [`Self::records`] where this region's record table lives.
+    fn write_records(&self, queue: &RenderQueue, shared: Option<&bindless::GxBindless>) {
+        match &self.binds {
+            GxRegionBinds::Own { record_table, .. } => {
+                queue.write_buffer(record_table, 0, bytemuck::cast_slice(&self.records));
+            }
+            GxRegionBinds::Shared(slots) => {
+                if let Some(shared) = shared {
+                    shared.write_records(queue, *slots, &self.records);
+                }
+            }
+        }
+    }
+
     /// Whether every texture this region held items back for is resident now, so a re-assembly
     /// can draw them; a complete region never re-assembles.
     fn wants_reassembly(&self, images: &RenderAssets<GpuImage>) -> bool {
@@ -1343,6 +1528,8 @@ mod tests {
     }
 }
 
+// fork: the shared region table, index arena and bind group of the bindless layout.
+mod bindless;
 // fork: the state-sorted draw list every retained pass issues through, multi-drawn on native.
 mod batch;
 use batch::{pipe_class, GxBatch};

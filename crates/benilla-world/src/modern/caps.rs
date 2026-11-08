@@ -59,7 +59,8 @@ impl HwCaps {
             mdi_count: features.contains(
                 WgpuFeatures::MULTI_DRAW_INDIRECT_COUNT | WgpuFeatures::INDIRECT_FIRST_INSTANCE,
             ),
-            immediates: features.contains(WgpuFeatures::IMMEDIATES) && limits.max_immediate_size > 0,
+            immediates: features.contains(WgpuFeatures::IMMEDIATES)
+                && limits.max_immediate_size > 0,
             ray_query: features.contains(WgpuFeatures::EXPERIMENTAL_RAY_QUERY),
             conservative_raster: features.contains(WgpuFeatures::CONSERVATIVE_RASTERIZATION),
             async_compute: false,

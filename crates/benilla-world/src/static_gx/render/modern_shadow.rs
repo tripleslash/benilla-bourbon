@@ -497,7 +497,8 @@ fn init_shadow_pipelines(
         &BindGroupLayoutEntries::single(ShaderStages::VERTEX, uniform_buffer::<CasterView>(true)),
     );
     let make = |label: &'static str, cutout: bool, clip: bool| {
-        let mut defs: Vec<ShaderDefVal> = Vec::new();
+        // fork: group 1's layout defs first (`GX_BINDLESS` when bindless).
+        let mut defs: Vec<ShaderDefVal> = pipes.layout_defs();
         if cutout {
             defs.push("CUTOUT".into());
         }

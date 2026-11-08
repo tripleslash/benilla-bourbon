@@ -49,6 +49,8 @@ pub(crate) fn modern_libraries(app: &mut App) {
     bevy::shader::load_shader_library!(app, "shaders/modern/froxelfog.wgsl");
     bevy::shader::load_shader_library!(app, "shaders/modern/probegi.wgsl", block_defs);
     bevy::shader::load_shader_library!(app, "shaders/modern/locallight.wgsl");
+    // fork: the bindless static_gx group 1, imported under `GX_BINDLESS` only.
+    bevy::shader::load_shader_library!(app, "shaders/modern/gx_bindless.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/modern/froxel_scatter.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/modern/froxel_integrate.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/modern/fog_composite.wgsl");

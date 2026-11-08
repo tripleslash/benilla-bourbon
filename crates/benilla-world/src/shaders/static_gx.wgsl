@@ -15,6 +15,10 @@
 #import benilla::wind_hook
 // fork: rain on surfaces (the Everwood port).
 #import benilla::wet_hook
+// fork: bindless static_gx (`static_gx/render/bindless.rs`): group 1 is the shared region table.
+#ifdef GX_BINDLESS
+#import benilla_modern::gx_bindless
+#endif
 #import bevy_pbr::{
     mesh_view_bindings::{lights, view},
     shadows,
@@ -262,6 +266,21 @@ fn modern_cell_lights(
     return sum;
 }
 
+#ifdef GX_BINDLESS
+// fork: bindless static_gx — group 1 is `benilla_modern::gx_bindless`: the draw's region is its
+// `first_instance`, and `cell` is that region's origin, filled by `gx_enter` at each entry point.
+struct GxCell {
+    origin: vec4<f32>,
+}
+var<private> cell: GxCell;
+fn gx_enter(row: u32) {
+    gx_bindless::enter(row);
+    cell.origin = vec4<f32>(gx_bindless::origin(), 0.0);
+}
+fn gx_rec(word: u32) -> vec4<u32> {
+    return gx_bindless::rec(word);
+}
+#else
 // Per-cell state (static_gx/render.rs `cell_layout`).
 struct GxCell {
     origin: vec4<f32>, // xyz = the bake's recentring origin
@@ -275,6 +294,11 @@ struct GxCell {
 // Repeat and clamp model-albedo samplers: trilinear, aniso 8, the same as the entity path's.
 @group(1) @binding(3) var samp_repeat: sampler;
 @group(1) @binding(4) var samp_clamp: sampler;
+// fork: bindless static_gx — the record read both layouts share.
+fn gx_rec(word: u32) -> vec4<u32> {
+    return recs[word & 0xffffu];
+}
+#endif
 
 // Vertex word bits; keep in sync with static_gx/mod.rs WORD_*.
 const WORD_WRAP_X: u32 = 65536u;    // 1 << 16
@@ -525,7 +549,7 @@ fn modern_gx_rgb(
         // SIDN night glow (MOMT 0x10): the authored emissive × the live night fraction, an
         // EMISSION term — inside the clamped sum, never MOCV-multiplied; dead on the unlit
         // INT lane, TRANS-weighted by the lit-pass alpha.
-        let rec = recs[in.word & 0xffffu];
+        let rec = gx_rec(in.word);
         let sidn_rgb = vec3<f32>(
             f32(rec.z & 0xffu),
             f32((rec.z >> 8u) & 0xffu),
@@ -593,7 +617,7 @@ fn modern_gx_rgb(
         // ---- interior M2 props: wow_model.wgsl's interior-prop branch ----
         // The spawn-folded SH probe (MODD ambient, fixed-axis diffuse, the group's MOLR lobes)
         // over the fragment normal; its soft wrap is the reference's, not a hard max(N·L, 0).
-        let probe = 7u * ((recs[in.word & 0xffffu].w >> 1u) & 0x1fffu);
+        let probe = 7u * ((gx_rec(in.word).w >> 1u) & 0x1fffu);
         let n1 = vec4<f32>(n_lit, 1.0);
         let lit_prop = clamp(
             vec3<f32>(
@@ -676,7 +700,7 @@ fn vertex_light(normal: vec3<f32>, point_lit: vec4<f32>, vc: vec4<f32>, word: u3
     let ndotl = max(dot(n_lit, L), 0.0);
     // The FFP light sum, unclamped: GL clamps the lit colour once, after the material colour.
     let sum_nl = wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * ndotl;
-    let rec = recs[word & 0xffffu];
+    let rec = gx_rec(word);
     if ((word & WORD_WMO) != 0u) {
         // ---- WMO surfaces: wow_model.wgsl's is_wmo lane ----
         // Interior batch classes: INT is unlit (the bake is the room's light), TRANS's lit pass
@@ -772,6 +796,10 @@ struct GxVertex {
     @location(4) anchor: vec3<f32>,
     // MOCV or the baked constant tint; white where the batch authors none (WORD_HAS_VC).
     @location(5) color: vec4<f32>,
+#ifdef GX_BINDLESS
+    // fork: bindless static_gx — the draw's `first_instance`: its region's table row.
+    @builtin(instance_index) instance: u32,
+#endif
 }
 
 struct GxVsOut {
@@ -793,14 +821,22 @@ struct GxVsOut {
     // themselves (see `vertex`).
     @location(7) @interpolate(flat) anchor: vec3<f32>,
 #endif
+#ifdef GX_BINDLESS
+    // fork: bindless static_gx — the region row, for the fragment's `gx_enter`.
+    @location(8) @interpolate(flat) region: u32,
+#endif
 }
 
 @vertex
 fn vertex(v: GxVertex) -> GxVsOut {
     var out: GxVsOut;
+#ifdef GX_BINDLESS
+    gx_enter(v.instance);
+    out.region = v.instance;
+#endif
     // Exile kill bit (record w bit 0): every vertex of the item collapses to one point, so its
     // triangles are zero-area and rasterize nothing; triangles never span items.
-    if ((recs[v.word & 0xffffu].w & 1u) != 0u) {
+    if ((gx_rec(v.word).w & 1u) != 0u) {
         out.position = vec4<f32>(0.0, 0.0, 2.0, 1.0);
         out.world_position = vec4<f32>(0.0);
         out.uv = vec2<f32>(0.0);
@@ -875,7 +911,7 @@ fn gx_clip_position(position: vec3<f32>, word: u32, anchor: vec3<f32>) -> vec4<f
         view.view_from_world[2].xyz,
     );
     var clip = view.clip_from_view * vec4<f32>(view_rot * p_cam, 1.0);
-    clip.z *= 1.0 + f32(recs[word & 0xffffu].y) * 1.1920929e-7;
+    clip.z *= 1.0 + f32(gx_rec(word).y) * 1.1920929e-7;
     return clip;
 }
 
@@ -894,6 +930,29 @@ fn gx_wind_offset(position: vec3<f32>, word: u32, anchor: vec3<f32>) -> vec3<f32
 // real samplers (exact parity); the rare MIXED batch keeps the repeat sampler plus the half-texel
 // inset clamp on its clamped axis (0763's silhouette clamp, per axis). Explicit gradients, so the
 // one sample the flags pick may sit in a per-fragment branch and the other two are never fetched.
+#ifdef GX_BINDLESS
+// fork: bindless static_gx — the same selection, the class's array out of the binding array.
+fn gx_sample(uv: vec2<f32>, word: u32, uv_dx: vec2<f32>, uv_dy: vec2<f32>) -> vec4<f32> {
+    let wrap_x = (word & WORD_WRAP_X) != 0u;
+    let wrap_y = (word & WORD_WRAP_Y) != 0u;
+    if (wrap_x && wrap_y) {
+        return gx_bindless::sample_grad(false, uv, word, uv_dx, uv_dy);
+    }
+    if (!wrap_x && !wrap_y) {
+        return gx_bindless::sample_grad(true, uv, word, uv_dx, uv_dy);
+    }
+    let dims = gx_bindless::dims(word);
+    let inset = 0.5 / dims;
+    var uv_mixed = uv;
+    if (!wrap_x) {
+        uv_mixed.x = clamp(uv_mixed.x, inset.x, 1.0 - inset.x);
+    }
+    if (!wrap_y) {
+        uv_mixed.y = clamp(uv_mixed.y, inset.y, 1.0 - inset.y);
+    }
+    return gx_bindless::sample_grad(false, uv_mixed, word, uv_dx, uv_dy);
+}
+#else
 fn gx_sample(uv: vec2<f32>, word: u32, uv_dx: vec2<f32>, uv_dy: vec2<f32>) -> vec4<f32> {
     let layer = i32(recs[word & 0xffffu].x);
     let wrap_x = (word & WORD_WRAP_X) != 0u;
@@ -915,6 +974,7 @@ fn gx_sample(uv: vec2<f32>, word: u32, uv_dx: vec2<f32>, uv_dy: vec2<f32>) -> ve
     }
     return textureSampleGrad(tex_array, samp_repeat, uv_mixed, layer, uv_dx, uv_dy);
 }
+#endif
 
 // ---- the depth prepass (modern frames) ----
 //
@@ -931,6 +991,9 @@ struct GxPrepassVertex {
     @location(3) word: u32,
     // fork: the placement anchor, for the foliage sway the colour pass applies.
     @location(4) anchor: vec3<f32>,
+#ifdef GX_BINDLESS
+    @builtin(instance_index) instance: u32,
+#endif
 }
 
 struct GxPrepassOut {
@@ -940,14 +1003,21 @@ struct GxPrepassOut {
     // Planar eye-Z, for the farclip wall: linear in the position, so interpolating it is the
     // colour pass's per-pixel value.
     @location(2) eye_z: f32,
+#ifdef GX_BINDLESS
+    @location(3) @interpolate(flat) region: u32,
+#endif
 }
 
 @vertex
 fn prepass_vertex(v: GxPrepassVertex) -> GxPrepassOut {
     var out: GxPrepassOut;
+#ifdef GX_BINDLESS
+    gx_enter(v.instance);
+    out.region = v.instance;
+#endif
     out.uv = v.uv;
     out.word = v.word;
-    if ((recs[v.word & 0xffffu].w & 1u) != 0u) {
+    if ((gx_rec(v.word).w & 1u) != 0u) {
         out.position = vec4<f32>(0.0, 0.0, 2.0, 1.0);
         out.eye_z = 0.0;
         return out;
@@ -960,6 +1030,9 @@ fn prepass_vertex(v: GxPrepassVertex) -> GxPrepassOut {
 
 @fragment
 fn prepass_fragment(in: GxPrepassOut) {
+#ifdef GX_BINDLESS
+    gx_enter(in.region);
+#endif
     if (wow_light.fog_params.w > 0.0 && in.eye_z > wow_light.fog_params.w) {
         discard;
     }
@@ -978,6 +1051,9 @@ fn prepass_fragment(in: GxPrepassOut) {
 
 @fragment
 fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
+#ifdef GX_BINDLESS
+    gx_enter(in.region);
+#endif
     // The hard farclip wall: per-pixel planar eye-Z, the same plane as the entity path.
     let eye_z = -(view.view_from_world * vec4<f32>(in.world_position.xyz, 1.0)).z;
     // Behind the prepass the depth test already holds the wall and the alpha key (`Equal` passes
@@ -1122,7 +1198,7 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // `[0xca7f00]` (`0x6b5190` for surfaces, `0x6b62e0` for the group's doodads).
     var fog_color = wow_light.fog_color;
     var fog_span = wow_light.fog_params.xy;
-    if ((recs[in.word & 0xffffu].w & 16384u) != 0u) {
+    if ((gx_rec(in.word).w & 16384u) != 0u) {
         fog_color = wow_light.wmo_fog_color;
         fog_span = wow_light.wmo_fog_params.xy;
     }

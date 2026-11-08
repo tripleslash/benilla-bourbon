@@ -107,6 +107,11 @@ impl GxTexturePool {
         &self.classes[usize::from(class)].view
     }
 
+    /// fork: classes opened so far; class ids run `0..class_count()` (the bindless array's order).
+    pub(super) fn class_count(&self) -> usize {
+        self.classes.len()
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.classes.is_empty()
     }
