@@ -33,6 +33,10 @@ pub(crate) use render::static_gx_pass;
 pub(crate) use render::gx_shadow_pass;
 // fork: modern lighting (FORK.md, P5) — the probe trace marches the voxels this node writes.
 pub(crate) use render::gi_voxel_pass;
+// fork: the ray-traced scene the ray-traced lanes bind and order after (`modern/HOOKS.md`).
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(unused_imports)] // the ray-traced lanes' interface
+pub(crate) use render::rt_scene;
 
 /// The view marker, re-exported for ONE writer: `crate::liquid::reflect`, whose mirrored camera
 /// spawns with [`StaticGxView::MIRROR`] so the buildings and props this pass owns appear in the

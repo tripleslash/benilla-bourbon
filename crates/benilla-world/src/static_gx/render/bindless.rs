@@ -176,8 +176,9 @@ impl RangeAlloc {
     }
 }
 
-/// A buffer that grows by copy, so the blocks in it keep their offsets.
-struct GrowBuffer {
+/// A buffer that grows by copy, so the blocks in it keep their offsets. Also the ray-traced
+/// scene's arenas (`rt_scene`).
+pub(super) struct GrowBuffer {
     label: &'static str,
     usage: BufferUsages,
     /// Bytes per unit the allocator counts in.
@@ -189,7 +190,7 @@ struct GrowBuffer {
 }
 
 impl GrowBuffer {
-    fn new(label: &'static str, usage: BufferUsages, unit: u64, min: u32) -> Self {
+    pub(super) fn new(label: &'static str, usage: BufferUsages, unit: u64, min: u32) -> Self {
         Self {
             label,
             usage: usage | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
@@ -204,7 +205,7 @@ impl GrowBuffer {
     /// to `copies`, which is then submitted at once and replaced by a fresh encoder: every copy
     /// recorded into `copies` and every queue write aimed at the old buffer lands before the
     /// growth copy, and everything after aims at the new one.
-    fn reserve(
+    pub(super) fn reserve(
         &mut self,
         end: u32,
         device: &RenderDevice,
@@ -237,6 +238,18 @@ impl GrowBuffer {
         }
         self.buffer = Some(buffer);
         self.capacity = capacity;
+    }
+
+    /// The buffer, once anything was reserved.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // read by `rt_scene`, native only
+    pub(super) fn buffer(&self) -> Option<&Buffer> {
+        self.buffer.as_ref()
+    }
+
+    /// Bytes held.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // read by `rt_scene`, native only
+    pub(super) fn bytes(&self) -> u64 {
+        u64::from(self.capacity) * self.unit
     }
 }
 
@@ -354,6 +367,12 @@ impl GxBindless {
     /// The arena the assembly copies a region's indices into; present once a region is placed.
     pub(super) fn index_buffer(&self) -> Option<&Buffer> {
         self.indices.buffer.as_ref()
+    }
+
+    /// The region table; present once a region is placed. The ray-traced scene binds it.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // read by `rt_scene`, native only
+    pub(super) fn table_buffer(&self) -> Option<&Buffer> {
+        self.table.buffer.as_ref()
     }
 
     /// Whether pool class `class` has an element in the binding array; warns the first time one

@@ -741,6 +741,24 @@ fn prepare_static_gx(
             cache.rev += 1;
         }
     }
+    // fork: rt_scene — with the ray-traced tier on, the regions the camera has not drawn are
+    // assembled too, a few a frame, so its BLASes hold every streamed region.
+    #[cfg(not(target_arch = "wasm32"))]
+    if modern && rt_scene::tier_active() {
+        rt_scene::assemble_unseen(
+            &gx,
+            &mut cache,
+            &mut pool,
+            shared.as_deref_mut(),
+            &pipes,
+            &pipeline_cache,
+            &render_device,
+            &render_queue,
+            &images,
+            &allocator,
+            &mut copies,
+        );
+    }
     pool.drain_pending(&render_device, &render_queue);
     // fork: bindless — the one bind group, rebuilt when the table grew or the pool opened a class.
     if let Some(shared) = shared.as_deref_mut() {
@@ -1396,6 +1414,9 @@ pub(super) fn build(app: &mut App) {
     modern_shadow::build(render_app);
     // fork: modern lighting (FORK.md, P5) — the same casters voxelized for the probe GI.
     modern_gi::build(render_app);
+    // fork: the ray-traced scene over the same regions and the terrain, native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    rt_scene::build(render_app);
 }
 
 /// Copy the collector's published half into the extractable resource.
@@ -1538,3 +1559,7 @@ mod modern_shadow;
 pub(crate) use modern_shadow::gx_shadow_pass;
 mod modern_gi;
 pub(crate) use modern_gi::gi_voxel_pass;
+// fork: the ray-traced scene: BLASes, the TLAS and the hit data the ray-traced lanes bind
+// (`modern/HOOKS.md`, "Interfaces for the ray-traced lanes"). Native only.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod rt_scene;
