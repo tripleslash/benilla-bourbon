@@ -80,6 +80,9 @@ const PREV_VALID: u32 = 1;
 /// `CullUniform::flags`: count candidates and survivors into the stats buffer.
 const STATS: u32 = 2;
 
+/// `CullUniform::flags`: the view mirrors handedness, so the meshlet cone test is skipped.
+const MIRRORED: u32 = 4;
+
 /// Bytes of the stats buffer: candidates, early survivors, late survivors, unused.
 const STATS_SIZE: u64 = 16;
 
@@ -89,7 +92,7 @@ const READBACKS: usize = 3;
 /// Frames a view's pyramid outlives its last frame (a mirror that stands down and comes back).
 const KEEP_FRAMES: u32 = 300;
 
-/// The cull's uniform. Keep in sync with `CullView` in `gx_cull.wgsl`.
+/// The cull's uniform. Keep in sync with `CullView` in `gx_occlusion.wgsl`.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct CullUniform {
@@ -101,6 +104,8 @@ struct CullUniform {
     args_start: u32,
     count: u32,
     pad: [u32; 2],
+    /// The unjittered eye in world space (`w` 1), for the meshlet cone test.
+    eye: [f32; 4],
 }
 
 /// Bytes of [`CullUniform`].
@@ -603,6 +608,9 @@ pub(super) struct GxCullPass<'w> {
     reduce_bind: &'w BindGroup,
     cull_bind: &'w BindGroup,
     clip_from_world: Mat4,
+    eye: Vec3,
+    /// The view's `world_from_view` mirrors handedness (a reflected camera).
+    mirrored: bool,
     /// Workgroups of one phase, set by [`Self::bind`].
     groups: u32,
     stats: bool,
@@ -643,6 +651,8 @@ impl<'w> GxCullPass<'w> {
             reduce_bind,
             cull_bind,
             clip_from_world: clip_from_world(view),
+            eye: view.world_from_view.translation(),
+            mirrored: view.world_from_view.to_matrix().determinant() < 0.0,
             groups: 0,
             stats: crate::static_gx::gx_perf_enabled(),
         })
@@ -665,6 +675,9 @@ impl<'w> GxCullPass<'w> {
         if self.stats {
             flags |= STATS;
         }
+        if self.mirrored {
+            flags |= MIRRORED;
+        }
         let uniform = CullUniform {
             clip_from_world: self.clip_from_world.to_cols_array(),
             prev_clip_from_world: prev.unwrap_or(Mat4::IDENTITY).to_cols_array(),
@@ -674,6 +687,7 @@ impl<'w> GxCullPass<'w> {
             args_start,
             count,
             pad: [0; 2],
+            eye: self.eye.extend(1.0).to_array(),
         };
         world.resource::<RenderQueue>().write_buffer(
             &self.state.uniform,
@@ -809,10 +823,16 @@ mod tests {
     /// depth it reads.
     #[test]
     fn the_uniform_and_the_pyramid_agree_with_the_shaders() {
-        assert_eq!(CULL_UNIFORM_SIZE, 160, "CullView in gx_cull.wgsl is 160 bytes");
+        assert_eq!(CULL_UNIFORM_SIZE, 176, "CullView in gx_occlusion.wgsl is 176 bytes");
+        let lib = include_str!("../../shaders/modern/gx_occlusion.wgsl");
+        assert!(lib.contains(&format!("const PREV_VALID: u32 = {PREV_VALID}u;")));
+        assert!(lib.contains(&format!("const STATS: u32 = {STATS}u;")));
+        assert!(lib.contains(&format!("const MIRRORED: u32 = {MIRRORED}u;")));
+        assert!(lib.contains(&format!(
+            "const NO_CONE: i32 = {};",
+            crate::static_gx::meshlet::NO_CONE
+        )));
         let src = include_str!("../../shaders/modern/gx_cull.wgsl");
-        assert!(src.contains(&format!("const PREV_VALID: u32 = {PREV_VALID}u;")));
-        assert!(src.contains(&format!("const STATS: u32 = {STATS}u;")));
         assert!(src.contains(&format!("@workgroup_size({CULL_WORKGROUP}, 1, 1)")));
         let hiz = include_str!("../../shaders/modern/gx_hiz.wgsl");
         assert!(hiz.contains(&format!("@workgroup_size({HIZ_TILE}, {HIZ_TILE}, 1)")));

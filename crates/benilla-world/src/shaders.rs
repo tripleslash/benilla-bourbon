@@ -57,9 +57,11 @@ pub(crate) fn modern_libraries(app: &mut App) {
     {
         bevy::shader::load_shader_library!(app, "shaders/modern/rt_scene.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/modern/rt_repack.wgsl");
-        // fork: static_gx's Hi-Z pyramid and two-phase GPU cull (`gpu_cull.rs`), native only.
+        // fork: static_gx's Hi-Z pyramid and two-phase GPU cull (`gpu_cull.rs`), native only; the
+        // Hi-Z tests the draw cull and the meshlet task stage share.
         bevy::asset::embedded_asset!(app, "shaders/modern/gx_hiz.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/modern/gx_cull.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/modern/gx_occlusion.wgsl");
         // fork: the probe trace's ray-query stage (`modern::gi::rt_gi`), native only.
         bevy::asset::embedded_asset!(app, "shaders/modern/gi_trace_rt.wgsl");
         // fork: the ray-traced shadows' library (`modern::rt_shadow`), native only: imported under
