@@ -1,0 +1,38 @@
+var<workgroup> atomX_naga_oil_mod_XORSXG5C7NVXWI5LMMUX: atomic<u32>;
+
+fn entry_pointX_naga_oil_mod_XORSXG5C7NVXWI5LMMUX() -> f32 {
+    var y: u32;
+
+    atomicStore((&atomX_naga_oil_mod_XORSXG5C7NVXWI5LMMUX), 1u);
+    let _e3: u32 = atomicLoad((&atomX_naga_oil_mod_XORSXG5C7NVXWI5LMMUX));
+    y = _e3;
+    let _e5: u32 = y;
+    let _e8: u32 = atomicAdd((&atomX_naga_oil_mod_XORSXG5C7NVXWI5LMMUX), 2u);
+    y = (_e5 + _e8);
+    let _e10: u32 = y;
+    let _e13: u32 = atomicSub((&atomX_naga_oil_mod_XORSXG5C7NVXWI5LMMUX), 1u);
+    y = (_e10 + _e13);
+    let _e15: u32 = y;
+    let _e18: u32 = atomicMax((&atomX_naga_oil_mod_XORSXG5C7NVXWI5LMMUX), 5u);
+    y = (_e15 + _e18);
+    let _e20: u32 = y;
+    let _e23: u32 = atomicMin((&atomX_naga_oil_mod_XORSXG5C7NVXWI5LMMUX), 4u);
+    y = (_e20 + _e23);
+    let _e25: u32 = y;
+    let _e26: u32 = y;
+    let _e28: u32 = atomicExchange((&atomX_naga_oil_mod_XORSXG5C7NVXWI5LMMUX), _e26);
+    y = (_e25 + _e28);
+    let _e33: _atomic_compare_exchange_result_Uint_4_ = atomicCompareExchangeWeak((&atomX_naga_oil_mod_XORSXG5C7NVXWI5LMMUX), 12u, 0u);
+    if _e33.exchanged {
+        let _e35: u32 = y;
+        y = (_e35 + _e33.old_value);
+    }
+    let _e38: u32 = y;
+    return f32(_e38);
+}
+
+fn main() -> f32 {
+    let _e0: f32 = entry_pointX_naga_oil_mod_XORSXG5C7NVXWI5LMMUX();
+    return _e0;
+}
+
