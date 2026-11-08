@@ -313,8 +313,9 @@ pub(crate) struct RtScene {
     /// Entries were waiting at the last frame's end: the settled line is due when none are.
     was_pending: bool,
     /// fork: F — the stand-in bind group ([`Self::bind_group_or_stub`]) over an empty TLAS, built
-    /// once, and what it holds.
+    /// once, and what it holds (kept beside it, never read).
     stub: Option<BindGroup>,
+    #[allow(dead_code)]
     stub_parts: Option<(Tlas, Buffer)>,
 }
 
