@@ -65,6 +65,9 @@ pub(crate) fn modern_libraries(app: &mut App) {
         // fork: the ray-traced shadows' library (`modern::rt_shadow`), native only: imported under
         // `RT_SHADOWS` / `RT_FROXEL`, which only the ray-traced tier's pipelines carry.
         bevy::shader::load_shader_library!(app, "shaders/modern/rt_shadow.wgsl");
+        // fork: G — the water's ray-traced reflection (`modern::rt_reflect`), native only: imported
+        // under `RT_REFLECT`, which only the water's pipelines carry where the lane may run.
+        bevy::shader::load_shader_library!(app, "shaders/modern/rt_reflect.wgsl");
     }
     bevy::asset::embedded_asset!(app, "shaders/modern/froxel_scatter.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/modern/froxel_integrate.wgsl");

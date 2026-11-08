@@ -821,6 +821,9 @@ pub struct LiquidCataExt {
     #[uniform(102)]
     pub path: Vec4,
     /// As [`LiquidExt::anim`]: `x` reserved, `y` frame count, `z` scroll flag, `w` clock enable.
+    /// fork: G — `x` here is the ray-traced reflection lane this frame (0 the mirror's path, 1 the
+    /// Hi-Z march then a ray, 2 a ray alone), written with the mirror's flag by `benilla_world`'s
+    /// `liquid::reflect`; native only, 0 elsewhere.
     #[uniform(102)]
     pub anim: Vec4,
     /// The bump lane, from the reference's `LiquidType.dbc` `Float[18]` block:
