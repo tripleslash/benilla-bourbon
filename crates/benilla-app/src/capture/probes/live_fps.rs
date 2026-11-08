@@ -51,6 +51,7 @@ impl Plugin for LiveFpsPlugin {
             sys_at_start: None,
             occluded_now: false,
             occluded_frames: 0,
+            stats: Default::default(),
         })
         .add_systems(Update, drive_live_fps);
         WorldCensus::churn_counters(app);
@@ -105,6 +106,8 @@ struct LiveFps {
     occluded_now: bool,
     /// Sampled frames taken while occluded (`occluded_frames=`).
     occluded_frames: usize,
+    /// The window's pipeline-statistics counters (`WOW_GPU_STATS`), the line's last columns.
+    stats: benilla_world::perf_probe::gpu_stats::GpuStats,
 }
 
 /// The rest of [`drive_live_fps`]'s params, bundled under the 16-SystemParam ceiling.
@@ -138,6 +141,8 @@ type ScreenParams<'w, 's> = (
     // `blend_mismatch=` (`perf::blend_check`): draws whose bound blend state contradicts their
     // material.
     Option<Res<'w, crate::perf::BlendMismatchShared>>,
+    // The render diagnostics, for the window's pipeline-statistics totals (`WOW_GPU_STATS`).
+    Option<Res<'w, bevy::diagnostic::DiagnosticsStore>>,
 );
 
 #[derive(SystemParam)]
@@ -191,6 +196,7 @@ fn drive_live_fps(
         .11
         .as_ref()
         .map_or(0, |m| m.0.load(std::sync::atomic::Ordering::Relaxed));
+    let store = screen.12.as_deref();
     // Read every frame, or the first sampled frame would report the whole backlog.
     let mesh_added = mesh_events
         .read()
@@ -266,6 +272,13 @@ fn drive_live_fps(
                 // Restart churn with the window so warmup does not read as a ratchet.
                 census.restart_churn();
                 probe.occluded_frames = 0;
+                // Only counters that land inside the window count.
+                if let Some(store) = store {
+                    probe.stats.mark(store);
+                }
+            }
+            if let Some(store) = store {
+                probe.stats.fold(store);
             }
             if probe.occluded_now {
                 probe.occluded_frames += 1;
@@ -614,8 +627,10 @@ fn drive_live_fps(
                 orphans = seen.orphan_parts,
                 stacked = seen.stacked_parts,
             );
+            // `WOW_GPU_STATS`: the window's counters per frame, last so no column moves.
+            let stats = probe.stats.probe_columns();
             println!(
-                "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={} active={} particles={} submeshes={} drawn={} streamed={} parked={} entities={}{rigs}{residency_line} px={}x{}{cpu}{sys}{present}{display}{gpu_line} occluded_frames={}{at_pin}{cam_pose}{gate}{sky}{ribbons}{culled}",
+                "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={} active={} particles={} submeshes={} drawn={} streamed={} parked={} entities={}{rigs}{residency_line} px={}x{}{cpu}{sys}{present}{display}{gpu_line} occluded_frames={}{at_pin}{cam_pose}{gate}{sky}{ribbons}{culled}{stats}",
                 v.len(),
                 at(0.50),
                 at(0.95),

@@ -8,6 +8,10 @@
 //! has `TIMESTAMP_QUERY_INSIDE_PASSES` (Vulkan and DX12, never an Apple GPU); elsewhere the cells
 //! stay empty, not zero. `gpu_ms` is the sum of every pass, and an unnamed pass lands in
 //! `gpu_other`.
+//!
+//! The last five columns are the frame's pipeline-statistics totals over every pass
+//! (`benilla_world::perf_probe::gpu_stats`), filled only under `WOW_GPU_STATS=1`, the one run in
+//! which the device has the queries.
 
 use std::path::PathBuf;
 
@@ -20,6 +24,8 @@ use bevy::prelude::*;
 use bevy::render::diagnostic::RenderDiagnosticsPlugin;
 use bevy::render::renderer::{RenderAdapterInfo, RenderDevice};
 use bevy::time::Real;
+
+use benilla_world::perf_probe::gpu_stats::GpuStats;
 
 use super::clock::{main_thread_cpu_secs, process_cpu_secs};
 
@@ -35,7 +41,8 @@ pub(crate) struct FpsJournalSetting(pub(crate) bool);
 const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,mats,meshes,images,\
                               m2,uv,tint,pmat,emat,skin,cmat,tex,cgeo,evicted,fx,fy,fz,main_ms,\
                               gpu_ms,gpu_opaque,gpu_static,gpu_transp,gpu_glow,gpu_post,gpu_ui,\
-                              gpu_other,gpu_modern,gpu_fsr,gpu_fg,gpu_velocity,rendered,presented\n";
+                              gpu_other,gpu_modern,gpu_fsr,gpu_fg,gpu_velocity,rendered,presented,\
+                              ia_prims,vs_inv,clip_prims,fs_inv,cs_inv\n";
 
 /// The `fpsJournal` change callback: a flag, int-parsed and `!= 0`.
 pub(crate) fn on_cvar(
@@ -64,6 +71,7 @@ impl Plugin for FpsJournalPlugin {
                 cpu_at_flush: None,
                 main_at_flush: None,
                 gpu: GpuAccum::default(),
+                stats: GpuStats::default(),
             })
             .add_systems(Update, journal_fps);
     }
@@ -85,6 +93,8 @@ struct FpsJournal {
     main_at_flush: Option<f64>,
     /// This second's GPU spans, folded per frame from the diagnostics store.
     gpu: GpuAccum,
+    /// This second's pipeline-statistics counters, folded beside them (`WOW_GPU_STATS`).
+    stats: GpuStats,
 }
 
 /// The GPU columns after `gpu_ms`, in header order.
@@ -311,6 +321,7 @@ fn journal_fps(
             journal.path = None;
             journal.window.clear();
             journal.gpu = GpuAccum::default();
+            journal.stats = GpuStats::default();
             return;
         }
         (true, false) => {
@@ -341,6 +352,7 @@ fn journal_fps(
                 seen: Some(Instant::now()),
                 ..GpuAccum::default()
             };
+            journal.stats = GpuStats::since(Instant::now());
             journal.path = Some(path);
         }
         (true, true) => {}
@@ -348,6 +360,7 @@ fn journal_fps(
     journal.window.push(time.delta_secs() * 1000.0);
     if let Some(store) = gpu.store.as_deref() {
         journal.gpu.fold(store);
+        journal.stats.fold(store);
     }
     if now - journal.last_flush < 1.0 {
         return;
@@ -410,6 +423,8 @@ fn journal_fps(
     let presented =
         benilla_world::fsr::cadence::PRESENTED.swap(0, std::sync::atomic::Ordering::Relaxed);
     line.push_str(&format!(",{},{presented}", v.len()));
+    line.push_str(&journal.stats.csv_cells());
+    journal.stats.clear();
     line.push('\n');
     use std::io::Write;
     let Some(path) = journal.path.as_ref() else {
@@ -529,8 +544,15 @@ mod tests {
     #[test]
     fn the_header_ends_with_the_gpu_cells_in_bucket_order() {
         let cols: Vec<&str> = JOURNAL_HEADER.trim_end().split(',').collect();
-        // The frame counts follow the GPU cells.
-        let gpu: Vec<&str> = cols[cols.len() - (GPU_BUCKETS + 3)..cols.len() - 2].to_vec();
+        // The frame counts follow the GPU cells, and the five counter totals end the row.
+        let stats = benilla_world::perf_probe::gpu_stats::COLUMNS;
+        let n = stats.len();
+        assert_eq!(cols[cols.len() - n..], stats);
+        assert_eq!(
+            cols[cols.len() - n - 2..cols.len() - n],
+            ["rendered", "presented"]
+        );
+        let gpu: Vec<&str> = cols[cols.len() - (GPU_BUCKETS + 3 + n)..cols.len() - 2 - n].to_vec();
         assert_eq!(
             gpu,
             [

@@ -76,6 +76,13 @@
 //! its GPU milliseconds per frame ran under a main-queue pass span: `pass=beside/total`. On one
 //! queue (`WOW_ASYNC_COMPUTE=0`) passes never run under each other, so `beside` is 0 there; that is
 //! the control. Both queues' timestamps are read on one timeline, from the frame's earliest.
+//!
+//! `PERF_OVERDRAW`, `PERF_VIEWS`' fragment shares and `PERF_VERTS` read the passes'
+//! pipeline-statistics queries, which the device has only under `WOW_GPU_STATS=1`
+//! ([`gpu_stats`]); the same lever adds the window's five counter totals to `PERF_PROBE` and
+//! prints `GPU_STATS` on its own cadence.
+
+pub mod gpu_stats;
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -280,6 +287,8 @@ struct PassSums {
     /// fork: perf — per async-queue pass, GPU ms summed over the window and the part of it under a
     /// main-queue span of the same frame (`overlap_line`).
     beside: std::collections::BTreeMap<String, (f64, f64)>,
+    /// The window's pipeline-statistics totals, `PERF_PROBE`'s counter columns.
+    stats: gpu_stats::GpuStats,
     frames: u32,
     seen: Option<bevy::platform::time::Instant>,
 }
@@ -291,6 +300,7 @@ fn on_async_queue(pass: &str) -> bool {
 
 impl PassSums {
     fn fold(&mut self, store: &bevy::diagnostic::DiagnosticsStore) {
+        self.stats.fold(store);
         let mut newest = self.seen;
         let mut times: Vec<bevy::platform::time::Instant> = Vec::new();
         // fork: perf — each span's start and length, keyed by frame, pass and order in the frame.
@@ -421,6 +431,7 @@ impl PassSums {
         self.view_ms.clear();
         self.view_frags.clear();
         self.beside.clear();
+        self.stats.clear();
         self.frames = 0;
     }
 
@@ -504,6 +515,8 @@ pub struct PerfProbePlugin;
 
 impl Plugin for PerfProbePlugin {
     fn build(&self, app: &mut App) {
+        // `WOW_GPU_STATS`'s printer is its own lever, on with or without a probe window.
+        gpu_stats::plugin(app);
         let Some(want) = armed() else {
             return;
         };
@@ -669,6 +682,7 @@ fn sample(
         settled,
         windows.single().ok(),
         adapter.as_deref(),
+        &run.passes.stats.probe_columns(),
     );
     if let Some(line) = run.passes.line() {
         info!("PERF_PASSES cfg={cfg} {line}");
@@ -720,6 +734,8 @@ fn emit(
     settled: bool,
     window: Option<&Window>,
     adapter: Option<&bevy::render::renderer::RenderAdapterInfo>,
+    // `WOW_GPU_STATS`: ` ia_prims=… cs_inv=…`, the window's counters per frame; else empty.
+    stats: &str,
 ) {
     let mut s = samples.to_vec();
     s.sort_by(f32::total_cmp);
@@ -750,7 +766,7 @@ fn emit(
     info!(
         "PERF_PROBE cfg={} frames={} px={}x{} scale={:.2} \
          min_ms={:.2} mean_ms={:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} \
-         fps={:.1} railed={} settled={} gpu={}",
+         fps={:.1} railed={} settled={} gpu={}{}",
         cfg,
         s.len(),
         px.x,
@@ -766,6 +782,7 @@ fn emit(
         if railed { "yes" } else { "no" },
         if settled { "yes" } else { "no" },
         gpu,
+        stats,
     );
     if railed {
         warn!(

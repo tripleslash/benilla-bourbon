@@ -91,6 +91,17 @@ pub fn tuned_default_plugins(mut primary_window: Window) -> PluginGroupBuilder {
         .disable::<bevy::anti_alias::AntiAliasPlugin>()
         // No gamepad input; 1.12's bindings are keyboard/mouse.
         .disable::<bevy::gilrs::GilrsPlugin>()
+        // Pipeline statistics only under `WOW_GPU_STATS` (`perf_probe::gpu_stats`): bevy asks for
+        // every adapter feature, and its render diagnostics then query every pass. The client
+        // sets its own `RenderPlugin` (`video::with_render_api`) with the same gate.
+        .set(bevy::render::RenderPlugin {
+            render_creation: bevy::render::settings::WgpuSettings {
+                disabled_features: crate::perf_probe::gpu_stats::disabled_features(),
+                ..default()
+            }
+            .into(),
+            ..default()
+        })
 }
 
 /// The task-pool sizing, split out because the browser wants a different shape and the native

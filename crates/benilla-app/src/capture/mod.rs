@@ -433,6 +433,8 @@ struct CaptureCtx {
     probe_samples: Vec<f32>,
     /// Process CPU seconds at the first sample, the baseline for the probe line's `cpu_ms`.
     probe_cpu_start: Option<f64>,
+    /// The sample's pipeline-statistics counters (`WOW_GPU_STATS`), the line's last columns.
+    probe_stats: benilla_world::perf_probe::gpu_stats::GpuStats,
     /// Wall-clock start of the run ([`capture_deadline`]). A real [`Instant`]: under the frozen
     /// clock `Time<Real>` is itself manual and would only count frames.
     started: Instant,
@@ -753,6 +755,7 @@ impl Plugin for CapturePlugin {
                 resized: false,
                 probe_samples: Vec::new(),
                 probe_cpu_start: None,
+                probe_stats: Default::default(),
                 started: Instant::now(),
                 deadline: capture_deadline(),
                 frames: 0,
@@ -867,6 +870,8 @@ pub(crate) struct ProbeCensus<'w, 's> {
     particles: Query<'w, 's, &'static benilla_world::particles::ParticleEmitter>,
     parts: Query<'w, 's, &'static ViewVisibility, With<benilla_world::model_render::ModelPart>>,
     entities: Query<'w, 's, ()>,
+    /// The render diagnostics, for the sample's pipeline-statistics totals.
+    store: Option<Res<'w, bevy::diagnostic::DiagnosticsStore>>,
 }
 
 /// Drive the capture lifecycle: settle, age, screenshot or probe, exit.
@@ -1046,6 +1051,10 @@ fn drive_capture(
         Phase::ProbeWarmup(n) => {
             if n + 1 >= PROBE_WARMUP_FRAMES {
                 ctx.probe_cpu_start = crate::perf::process_cpu_secs();
+                // Only counters that land inside the sample count.
+                if let Some(store) = census.store.as_deref() {
+                    ctx.probe_stats.mark(store);
+                }
                 Phase::Probing(0)
             } else {
                 Phase::ProbeWarmup(n + 1)
@@ -1054,6 +1063,9 @@ fn drive_capture(
         Phase::Probing(n) => {
             let ms = time.delta_secs() * 1000.0;
             ctx.probe_samples.push(ms);
+            if let Some(store) = census.store.as_deref() {
+                ctx.probe_stats.fold(store);
+            }
             // `==`, not `>=`: `AppExit` takes a frame or two to drain, and `>=` would print twice.
             if n + 1 == ctx.probe_frames {
                 let mut v = ctx.probe_samples.clone();
@@ -1097,9 +1109,11 @@ fn drive_capture(
                     .single()
                     .map(|w| format!(" present={:?}", w.present_mode))
                     .unwrap_or_default();
+                // `WOW_GPU_STATS`: the sample's counters per frame, last so no column moves.
+                let stats = ctx.probe_stats.probe_columns();
                 // One greppable line on stdout, clear of log filtering.
                 println!(
-                    "FPS_PROBE scenario={} frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={emitters} active={active} particles={live} submeshes={submeshes} drawn={drawn} entities={entity_count} px={}x{}{world_px}{cpu}{present}",
+                    "FPS_PROBE scenario={} frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={emitters} active={active} particles={live} submeshes={submeshes} drawn={drawn} entities={entity_count} px={}x{}{world_px}{cpu}{present}{stats}",
                     ctx.name,
                     v.len(),
                     at(0.50),

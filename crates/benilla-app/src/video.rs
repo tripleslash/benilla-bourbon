@@ -148,6 +148,8 @@ pub(crate) fn with_render_api(
     plugins.set(bevy::render::RenderPlugin {
         render_creation: bevy::render::settings::WgpuSettings {
             backends: Some(boot_render_backends()),
+            // Pipeline statistics only under `WOW_GPU_STATS` (`benilla_world::boot`'s gate).
+            disabled_features: benilla_world::perf_probe::gpu_stats::disabled_features(),
             ..default()
         }
         .into(),

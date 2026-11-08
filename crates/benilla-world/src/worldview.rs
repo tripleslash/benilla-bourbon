@@ -147,7 +147,8 @@ pub fn run_with(build: BuildId, extra: impl FnOnce(&mut App)) -> AppExit {
     // cost beside its wall-time line (`perf_probe`'s `PERF_PASSES`). The client registers the same
     // plugin for its journal; the viewer has no journal, so this is the only way it times a pass.
     // Needs a device that times inside passes (Vulkan, DX12); elsewhere the line never prints.
-    if crate::launch_env::var("WOW_GPU_PASSES").is_some() {
+    // `WOW_GPU_STATS=1` reads the same spans' pipeline-statistics queries (`gpu_stats`).
+    if crate::launch_env::var("WOW_GPU_PASSES").is_some() || crate::perf_probe::gpu_stats::armed() {
         app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
     }
     stubs(&mut app);

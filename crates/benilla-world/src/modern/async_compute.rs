@@ -76,6 +76,12 @@ fn init(mut commands: Commands, device: Res<RenderDevice>, queue: Res<RenderQueu
         info!("modern: async compute off (WOW_ASYNC_COMPUTE=0)");
         return;
     }
+    // The render diagnostics' statistics queries count graphics stages, which a compute-only
+    // Vulkan family may not (`perf_probe::gpu_stats`); the counts are the same on one queue.
+    if crate::perf_probe::gpu_stats::armed() {
+        info!("modern: async compute off under WOW_GPU_STATS; all on the main queue");
+        return;
+    }
     match RenderAsyncComputeQueue::create(&device, &queue) {
         Some(async_queue) => {
             info!("modern: async compute on — light binning, froxels and meter on their own queue");
