@@ -200,6 +200,9 @@ Fork systems go in `PreUpdate`, `Update` or `Last`.
 | `benilla-world/src/static_gx/pool.rs` | `GxTexturePool::class_count()` | bindless |
 | `benilla-world/src/shaders.rs` | `modern_libraries`: `load_shader_library!` for `shaders/modern/gx_bindless.wgsl` | bindless |
 | `static_gx.wgsl` | `#ifdef GX_BINDLESS` `#import benilla_modern::gx_bindless`; group 1 under `#ifdef GX_BINDLESS` / `#else`: bindless, a `var<private> cell` filled by `gx_enter(row)`; both sides define `gx_rec(word)`, and every `recs[word & 0xffffu]` read is `gx_rec(word)`; `GxVertex` / `GxPrepassVertex` gain `@builtin(instance_index)` and `GxVsOut` @8 / `GxPrepassOut` @3 a flat `region`, entered first in `vertex`, `prepass_vertex`, `fragment` and `prepass_fragment`; `gx_sample` has a bindless twin | bindless |
+| `benilla-world/src/static_gx/render.rs` | `pub(crate) mod rt_scene;` after `modern_gi` and `build` calling `rt_scene::build`, both `cfg(not(target_arch = "wasm32"))`; `prepare_static_gx` calls `rt_scene::assemble_unseen` after the visible regions and before `pool.drain_pending`, in a modern frame with `rt_scene::tier_active()` | rt scene |
+| `benilla-world/src/static_gx/mod.rs` | `pub(crate) use render::rt_scene;` (native only) | rt scene |
+| `benilla-world/src/shaders.rs` | `modern_libraries`: native only, `load_shader_library!` for `shaders/modern/rt_scene.wgsl` and `embedded_asset!` for `shaders/modern/rt_repack.wgsl` | rt scene |
 
 ## Interfaces for Hi-Z / RT (bindless static_gx)
 
@@ -223,6 +226,36 @@ World = mesh-local + origin; a region's world bound is `origin + centre ± half`
 **The buckets** (`GxIndirect`, rebuilt each frame by `GxBatch::finish`). Two buffers, both `INDIRECT | STORAGE | COPY_DST`: args, 20-byte `DrawIndexedIndirectArgs`, and counts, one `u32` per bucket. A bucket is one `(phase, pipeline, vertex slab)` state of one pass, drawn as one `multi_draw_indexed_indirect_count(args, args_at * 20, counts, count_at * 4, capacity)`; its `capacity` args sit contiguously from `args_at` in `(row, first index)` order, each `index_count`, `instance_count = 1`, `first_index` (`index_base` added), `base_vertex` (slab offset), `first_instance = row`. The CPU writes the count as `capacity`.
 
 **The in-place cull recipe.** Before the pass, per bucket: zero `counts[count_at]`; per candidate draw, read its region's bound from table rows `row + 1` / `row + 2` (its `first_instance`), test it (frustum, Hi-Z), and for a survivor `let slot = atomicAdd(&counts[count_at], 1u)` and write its args at `args[args_at + slot]`. The draw call already reads the count, so the CPU side does not change. The candidates are the CPU-written args, read from a copy or a second range before the cull overwrites them.
+
+## Interfaces for the ray-traced lanes (rt_scene)
+
+Where `rt_scene::tier_active()` holds (`HwCaps.ray_query`, static_gx bindless, not `WOW_RT=0`), `static_gx/render/rt_scene.rs` keeps a BLAS per assembled static_gx region and per resident terrain cell and one TLAS over them, in modern frames only. Its module doc is the contract; this is what the probe GI, shadow and reflection lanes build on.
+
+**Rust** (`crate::static_gx::rt_scene`, native only):
+
+| item | what |
+|---|---|
+| `tier_active() -> bool` | the tier's startup decision, readable from any world (false until render startup ran) |
+| `RtTier { active }` | render-world resource, inserted at `RenderStartup` by `init_rt_scene` (a startup system that reads it orders `.after(crate::static_gx::rt_scene::init_rt_scene)`) |
+| `RtScene` | render-world resource, present exactly while `RtTier.active`; `bind_group() -> Option<&BindGroup>` (`None` until the TLAS holds an instance, and in classic frames), `pending()` (entries still waiting for a BLAS) |
+| `layout() -> BindGroupLayoutDescriptor` | the bind group's layout, for a pipeline's `layout` vec |
+| `shader_defs(group) -> Vec<ShaderDefVal>` | `RT_GROUP = group`: the group index the importer binds the scene at |
+| `rt_scene_pass` | the `Core3d` system that records the frame's copies, repack, BLAS and TLAS builds (`.before(Core3dSystems::MainPass)`, once a frame in the first static_gx view); a pass that traces orders `.after(crate::static_gx::rt_scene::rt_scene_pass)` |
+
+**The bind group** (`rt_scene_layout`, compute and fragment): 0 the TLAS; 1 the instance table `array<vec4<u32>>`, two rows a slot; 2 static_gx's region table; 3 static_gx's index arena; 4 the terrain index arena; 5 the attribute arena (5 `u32` a vertex: uv.x, uv.y, octahedral normal snorm16x2, static vertex word, colour unorm8x4); 6 `binding_array<texture_2d_array<f32>, 1024>` (the pool classes); 7 repeat sampler; 8 clamp sampler.
+
+**WGSL** (`#import benilla_modern::rt_scene`): the importer's own first line is `enable wgpu_ray_query;` (naga_oil keeps enables per module), and its pipeline passes `rt_scene::shader_defs(group)`.
+
+| entry | what |
+|---|---|
+| `trace(origin, dir, t_min, t_max, mask) -> RayIntersection` | nearest blocking hit; candidates on cutout geometry pass where the texel's alpha (mip 0) is under 224/255, items a record hides (bit 0) never block |
+| `occluded(origin, dir, t_min, t_max, mask) -> bool` | the same test with `RAY_FLAG_TERMINATE_ON_FIRST_HIT`: shadow and visibility rays |
+| `surface(origin, dir, hit) -> Surface` | a committed hit as `kind`, `row`, `word`, `t`, world `position`, interpolated world `normal` facing the ray, `uv`, vertex `color`, `front_face` |
+| `surface_texel(s, level) -> vec4<f32>` | a static surface's texel through its wrap bits (white on terrain: the splat is not in the scene) |
+| `texel(row, word, uv, level)`, `record(row, word)`, `instance(custom)`, `triangle(inst, geometry, primitive)` | the pieces, for a lane that needs more |
+| `MASK_CELL`, `MASK_WMO`, `MASK_PROP`, `MASK_TERRAIN`, `MASK_STATIC`, `MASK_ALL`; `KIND_*` | instance masks (`1 << kind`) and kinds |
+
+**What the scene holds.** Every region the static_gx GPU cache has assembled; with the tier on, `prepare_static_gx` also assembles the regions the camera has not drawn, four a frame, so the cache (and with it the cascades' static casters and the GI voxelizer's casters) holds every streamed region. Builds go nearest the camera first, `WOW_RT_BUDGET` triangles a frame (default 262144); until `pending()` is 0 some resident geometry is missing from the TLAS. Terrain hits carry no texture: a lane that shades terrain takes its colour elsewhere.
 
 ## Planned hooks (not yet landed)
 
