@@ -353,8 +353,9 @@ fn extract_tar_gz(path: &Path, output_dir: &Path) {
 }
 
 /// Determines whether the CRT is being statically or dynamically linked.
+/// BENILLA: read from the target's resolved features, not a substring of the rustflags, which
+/// missed `+crt-static` anywhere but first in a `target-feature` list.
 fn static_crt() -> bool {
-    env::var("CARGO_ENCODED_RUSTFLAGS")
-        .map(|flags| flags.contains("target-feature=+crt-static"))
-        .unwrap_or(false)
+    env::var("CARGO_CFG_TARGET_FEATURE")
+        .is_ok_and(|features| features.split(',').any(|f| f == "crt-static"))
 }
