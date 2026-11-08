@@ -1118,6 +1118,7 @@ mod tests {
             reflect: Handle::default(),
             reflect_blur: Handle::default(),
             size: UVec2::ONE,
+            depth_pyramid: false,
         });
         app.world_mut().spawn((
             WorldCamera,

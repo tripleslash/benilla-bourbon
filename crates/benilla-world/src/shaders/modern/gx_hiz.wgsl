@@ -7,6 +7,10 @@
 // `[floor(x * S / D), ceil((x + 1) * S / D))`, so level 0 (ratio in [1, 2)) takes up to 3x3 texels
 // and every later level exactly 2x2: no source texel is ever skipped, and the pyramid stays
 // conservative.
+//
+// fork: G — `HIZ_LINEAR`: the levels above the water's linear view depth copy (`modern::rt_reflect`,
+// yards, the sky at 1e9). The same minimum is then the NEAREST depth over the footprint, which is
+// what a reflection march skips cells by; only the empty value differs.
 
 #ifdef HIZ_FROM_DEPTH
 #ifdef HIZ_MULTISAMPLED
@@ -18,6 +22,13 @@
 @group(0) @binding(0) var src: texture_2d<f32>;
 #endif
 @group(0) @binding(1) var dst: texture_storage_2d<r32float, write>;
+
+// What a texel reduces from: reverse-Z's far plane, or past any linear depth.
+#ifdef HIZ_LINEAR
+const HIZ_EMPTY: f32 = 3.0e38;
+#else
+const HIZ_EMPTY: f32 = 1.0;
+#endif
 
 // The farthest depth at one source texel.
 fn load_src(p: vec2<u32>) -> f32 {
@@ -46,7 +57,7 @@ fn downsample(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = textureDimensions(src);
     let lo = (id.xy * size) / out;
     let hi = min(((id.xy + 1u) * size + out - 1u) / out, size);
-    var d = 1.0;
+    var d = HIZ_EMPTY;
     for (var y = lo.y; y < hi.y; y += 1u) {
         for (var x = lo.x; x < hi.x; x += 1u) {
             d = min(d, load_src(vec2<u32>(x, y)));
