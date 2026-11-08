@@ -212,6 +212,13 @@ Fork systems go in `PreUpdate`, `Update` or `Last`.
 | `benilla-app/src/video.rs` | `with_render_api`'s `disabled_features` is `boot_disabled_features()`: `gpu_stats::disabled_features()` plus, with the stored `rayTracing` "0" (`boot_ray_tracing`), `EXPERIMENTAL_RAY_QUERY`, `EXPERIMENTAL_RAY_HIT_VERTEX_RETURN`, `EXTENDED_ACCELERATION_STRUCTURE_VERTEX_FORMATS` and `ACCELERATION_STRUCTURE_BINDING_ARRAY`, so `HwCaps.ray_query` is false and every ray-traced lane is off for the session | ray tracing setting |
 | `benilla-app/src/cvars/table.rs` | `ours("rayTracing", "1", …)` in its own fork-owned block after dlss's | ray tracing setting |
 | `benilla-app/assets/ui/OptionsFrame.xml` | `BENILLA_TOOLTIP_RAY_TRACING`; `$parentRowRayTracing` (checkbox, hidden, shown under `BENILLA_NATIVE`) after Auto Exposure, inserted into `BENILLA_OPTIONS_PAGE_ROWS.Graphics` after `RowAutoExposure` on native, with `RowWeatherDensity` re-anchored under it; Turtle's window: `BENILLA_RAY_TRACING` label, a native-only `PIXEL_SHADERS` checkbutton row on `rayTracing`, last in the Lighting section | ray tracing setting |
+| `terrain.wgsl`, `wow_model.wgsl`, `static_gx.wgsl` | `#ifdef RT_SHADOWS` `#import benilla_modern::rtshadow` after `locallight`; at every modern `sunshadow::sun_visibility` site (static_gx's exterior and doorway sites) an `#ifdef RT_SHADOWS` twin calling `rtshadow::sun_visibility(…, to_sun)` (`-normalize(wow_light.light_sun.xyz)`, terrain's `ml`), and in `modern_cell_lights` an `#ifdef RT_SHADOWS` twin calling `rtshadow::local_visibility` with the light's live position and its fixture box (`light_spare` rows 9-11); the original calls byte for byte under `#else` | rt shadows |
+| `liquid_cata.wgsl` | `#ifdef RT_SHADOWS` `#import benilla_modern::rtshadow` after `skydome`; the surface's and the bed probe's `sun_visibility_load` each times `rtshadow::sun_visibility_ray` under `#ifdef RT_SHADOWS`, the original under `#else` | rt shadows |
+| `benilla-assets/src/materials.rs` | `RT_SHADOW_LAYOUT` (a `OnceLock<BindGroupLayoutDescriptor>`) and `push_rt_shadows`, called at the end of `WowModelExt::specialize`'s and `TerrainExtension::specialize`'s modern blocks and in `LiquidCataExt::specialize`: the scene's layout appended after the material's group, `RT_SHADOWS` and `RT_GROUP` on the fragment stage, never on a prepass pipeline | rt shadows |
+| `benilla-world/src/static_gx/render.rs` | `GxPipelines::rt`, `rt_shadow_layout`, `RT_SHADOW_GROUP` (3); `prepare_static_gx` appends the scene's layout to the colour pipelines' layout and `RT_SHADOWS` / `RT_GROUP` to their fragment defs only (`vertex_defs` keeps the vertex stage's); `static_gx_pass` binds `RtScene::bind_group_or_stub` at group 3 in the colour job (native only), and returns when `rt` holds but neither exists | rt shadows |
+| `benilla-world/src/static_gx/render/modern_shadow.rs` (fork-owned, under upstream's `static_gx/render`) | `gx_shadow_pass`: with `modern::shadow::rt_shadows()` a cascade's static pass draws no terrain or static_gx caster (it only clears) and its `layer_key` takes no caster and hash 0; the sky map keeps its static casters; `draw_local_atlas` gets no caster and hash 0 and settles a slot after one frame | rt shadows |
+| `benilla-world/src/shaders.rs` | `modern_libraries`: native only, `load_shader_library!` for `shaders/modern/rt_shadow.wgsl` | rt shadows |
+| `third_party/bevy_pbr/src/material.rs` (vendored, its `BENILLA.md` fourth delta) | `DrawMaterial` gains `SetMaterialExtraBindGroup<{ MATERIAL_BIND_GROUP_INDEX + 1 }>` before `DrawMesh`; `MaterialExtraBindGroup` (render-world resource) and the command are new. Re-apply on a bevy_pbr bump | rt shadows |
 
 ## Interfaces for Hi-Z / RT (bindless static_gx)
 
@@ -307,6 +314,47 @@ Where `crate::modern::gi::rt_gi()` holds (native, `rt_scene::tier_active()`, not
 **For F (RT shadows).** The hit's sun term is the line `sunshadow::sun_visibility_anywhere(..., lift)` in `gi_trace_rt.wgsl`'s `trace_rays`; with ray-traced sun visibility it may become `rt_scene::occluded(lift, to_sun, 0.0, far, MASK_ALL)` (the shader already binds the scene at group 1). The heightfield is not F's to remove: the froxels' ground banks read it.
 **For G (RT reflections).** Nothing of this lane is shared beyond `rt_scene`; `cast` in `gi_trace_rt.wgsl` is the pattern for shading a hit (vertex normal, texel at a mip, ground albedo on terrain).
 **For H (async compute).** The trace pass at either tier reads the modern block, the cascades, the light table, the heightfield (setup) and, at this tier, the TLAS; it must stay after `rt_scene_pass`'s TLAS build and before `froxel_pass`. The voxel path's `gi_voxel_pass` dependency stays only when `rt_gi()` is false.
+
+## Interfaces for the ray-traced shadows and the froxel rays (rt shadows)
+
+Where `crate::modern::shadow::rt_shadows()` holds (native, `rt_scene::tier_active()`, not `WOW_RT_SHADOWS=0`; `WOW_RT=0` and the `rayTracing` CVar imply off), every modern receiver takes the sun's and the shadowed lamps' visibility through the static world and the terrain as a ray query against the TLAS, and the maps keep only what the scene does not hold. Where `crate::modern::volumetrics::rt_froxel()` holds (not `WOW_RT_FROXEL=0`), the froxel scatter does the same per froxel. The two lanes are independent. `modern/rt_shadow.rs`'s module doc is the contract.
+
+**What changes at the lane.** The cascades (layers 0-3) draw the entity casters alone; their `modern_shadow_static_c*` spans only clear. The sky map (layer 4) keeps its static casters. The lamp atlas draws no static face (`modern_local_shadow` only clears a slot's tiles). The receivers multiply the maps' term (entities) by the rays' term (static world, terrain), under the same shade floor. With `WOW_RT_FROXEL=0` and the shadows on, the froxels see the entity cascades alone inside the cascade range: an A/B lever for the scatter's cost, not a look.
+
+**The penumbra.** The sun: four rays to a ring at 0.7 of a disc `SUN_CONE` = 0.0093 rad in radius (twice the sun's), the opposite pair first, the other two only where those disagree; the pattern turns per receiver by `locallight`'s wrapped world-position hash. Contact-hardening, in place of the cascades' fixed five-tap PCF; no temporal accumulation is assumed. The shade floor's cover read is three rays from a `COVER_RADIUS_YD` ring in the tangent plane, times the entity cascades' own ring. A lamp: four rays to a ring at 0.7 of the tier's emitter radius (`soft.y`) where the tier filters (`soft.x > 1`), else one. The water, the probe hits and the froxels take one ray.
+
+**Rust:**
+
+| item | what |
+|---|---|
+| `modern::shadow::rt_shadows() -> bool`, `modern::volumetrics::rt_froxel() -> bool` | the lanes' decisions, any world, fixed for the session once render startup ran (false before) |
+| `RtScene::bind_group_or_stub() -> Option<&BindGroup>` | the scene's bind group, or before its first instance (and in a classic frame) a stand-in over an empty TLAS that every ray misses; `None` only before the first `prepare_rt_scene`. For a pipeline that declares the scene for the whole session |
+| `benilla_assets::materials::RT_SHADOW_LAYOUT` | `rt_scene::layout()`, set at `RenderStartup` by `modern::rt_shadow::init_rt_shadows` (`.after(init_rt_scene)`) where `rt_shadows()` holds; the material lanes' `specialize` appends it as group 4 |
+| `bevy::pbr::MaterialExtraBindGroup(Option<BindGroup>)` | render-world resource bound at group 4 by every `DrawMaterial` draw; inserted only where `rt_shadows()` holds, filled every frame in `PrepareBindGroups` (`bind_rt_shadows`) |
+| static_gx group 3 | the colour pipelines' scene (`RT_SHADOW_GROUP`), bound in `static_gx_pass`'s colour job |
+| `GiPipelines::voxel_rt`, `GiFrame::shadow_bind` | the voxel probe trace binds the scene at group 1 for its hits' sun where `rt_shadows() && !rt_gi()` |
+| `FroxelPipelines::scatter_rt`, `FroxelTargets::scatter_rt_bind` | the froxel rays' pipeline (`modern_froxel_scatter_rt`: the scatter layout, then `rt_scene::layout()` at 1, defs `rt_scene::shader_defs(1)` + `RT_FROXEL`) and its scene |
+| `LightParams::slot_clear` | the twelve slots' fixture boxes (`ShadowLight::clear`) in the light block's spare rows 9-11 (native only; rows 12-13 stay free) |
+
+**WGSL** (`#import benilla_modern::rtshadow` under `#ifdef RT_SHADOWS` / `RT_FROXEL`; the importer needs no `enable`, the module and `rt_scene` carry it):
+
+| entry | what |
+|---|---|
+| `sun_visibility(map, samp, c, p, n, view_distance, lite, to_sun)` | `sunshadow::sun_visibility`'s twin: entity cascades times `sun_rays`, under the shade floor |
+| `sun_visibility_anywhere(map, samp, c, p, to_sun)` | the probe hits' twin (`p` already lifted) |
+| `sun_visibility_fast(map, samp, c, p, view_distance, to_sun)` | the froxels' twin: the cascade tap times one ray |
+| `sun_visibility_ray(c, p, to_sun)` | one ray alone, 1 with no cascades this frame (the water) |
+| `sun_ray(origin, dir)`, `sun_rays(p, n, to_sun, view_distance, soft)`, `cover_rays(…)`, `entity_cascades(…)` | the pieces: one ray (`MASK_ALL`, `SUN_REACH` = 1200 yd), the soft ring, the cover ring, the cascades without their far term |
+| `local_visibility(map, samp, g, slot, anchor, light, clear, p, n, near, fade)` | `locallight::local_visibility`'s twin: the atlas (entities) times `lamp_rays`, under the floor and the fade |
+| `lamp_rays(p, n, light, clear, near, emitter, taps)`, `lamp_ray`, `fixture_entry` | rays to a lamp that stop at its fixture box and the cube's near plane; a zero `n` starts at `p` |
+| `locallight::local_visibility_raw(…) -> f32` | the atlas lookup before the floor and the fade; -1 where the blocker search found nothing (wholly lit) |
+
+**Spans and instruments.** The receivers' rays run inside the colour passes (`static_gx`, `main_opaque_pass_3d`, the transparent pass for the water), so their cost reads against a `WOW_RT_SHADOWS=0` run of the same spans. What the lane removes reads in the `modern_shadow_static_c0..c3` spans and in `WOW_GX_PERF`'s static shadow caster draws (only the sky map's remain), and in `modern_local_shadow`. The froxel rays: `modern_froxel_scatter_rt` in place of `modern_froxel_scatter`.
+
+**Ordering.** `froxel_pass` `.after(rt_scene_pass)` on native, besides its existing edges; the volumetrics `init_pipelines` `.after(init_rt_scene)`. The receivers draw in `MainPass`, after `rt_scene_pass`.
+
+**For G (RT reflections).** `liquid_cata`'s pipelines already declare the scene at group 4 and compile `RT_SHADOWS` where `rt_shadows()` holds. A reflection lane in the water reuses that one mechanism (`push_rt_shadows`, `MaterialExtraBindGroup`) under a condition of its own (shadows on or reflections on) rather than a second group; a reflected hit's sun is `rtshadow::sun_visibility_anywhere` or `sun_ray`. The receivers' `lite` (mirror) paths take no ray; with the mirror camera off at the tier, nothing of this lane draws into it.
+**For H (async compute).** A pass that binds the scene, the stand-in included, must be recorded after `rt_scene_pass`'s TLAS build in submission order (wgpu refuses an unbuilt TLAS); on another queue that is a fence after it. The voxel trace's group 1 (`voxel_rt`) moves with the trace. The froxels stay on the main queue.
 
 ## Planned hooks (not yet landed)
 
