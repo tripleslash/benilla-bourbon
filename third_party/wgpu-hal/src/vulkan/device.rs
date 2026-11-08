@@ -2541,6 +2541,15 @@ impl crate::Device for super::Device {
                     | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
             )
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        // BENILLA: async compute — shared with the compute family (`concurrent_families`): a ray
+        // query on the async queue reads an acceleration structure the main queue built.
+        let families = self.shared.concurrent_families();
+        let vk_buffer_info = match &families {
+            Some(families) => vk_buffer_info
+                .sharing_mode(vk::SharingMode::CONCURRENT)
+                .queue_family_indices(families),
+            None => vk_buffer_info,
+        };
 
         unsafe {
             let raw_buffer = self
