@@ -41,6 +41,9 @@ const HEIGHT_HALF: f32 = 384.0;
 const HEIGHT_SNAP: f32 = 32.0;
 /// How far above and below the camera the heightfield can hold a surface.
 const HEIGHT_REACH: f32 = 600.0;
+/// The margin (yd) the trace's highest-ground bound (`GiClip.bounds.x`) adds for the depth
+/// encoding's rounding.
+const HEIGHT_ROUNDING: f32 = 0.5;
 /// A clipmap level re-centres when the camera comes this close to its edge (in voxels).
 const SCROLL_MARGIN: i32 = 8;
 /// Casters re-voxelized per frame because they arrived — each costs one box per level, and each box
@@ -85,6 +88,22 @@ struct GiVoxelPipelines {
     height: GiMap<u64, CachedRenderPipelineId>,
     /// [`conservative_lane`], decided once at startup.
     conservative: bool,
+    /// The heightfield's depth format ([`height_format`]), decided once at startup.
+    height_format: TextureFormat,
+}
+
+/// The heightfield's depth format. Native: `Depth16Unorm`, half the bytes the trace and the
+/// froxels read, a step of `2 * HEIGHT_REACH / 65535` (under 2 cm) well inside
+/// [`HEIGHT_ROUNDING`]; it binds as `texture_depth_2d` and decodes as the float one does.
+/// `WOW_GI_HEIGHT16=0` and the web keep `Depth32Float`.
+fn height_format() -> TextureFormat {
+    if !cfg!(target_arch = "wasm32")
+        && crate::launch_env::var("WOW_GI_HEIGHT16").as_deref() != Some("0")
+    {
+        TextureFormat::Depth16Unorm
+    } else {
+        TextureFormat::Depth32Float
+    }
 }
 
 /// Whether the voxelizer rasterizes conservatively at one pixel a voxel: the device can
@@ -226,6 +245,7 @@ fn init_gi_pipelines(
         clear,
         height: GiMap::default(),
         conservative,
+        height_format: height_format(),
     });
 }
 
@@ -467,7 +487,7 @@ fn prepare_gi_voxels(
             mip_level_count: 1,
             sample_count: 1,
             dimension: TextureDimension::D2,
-            format: TextureFormat::Depth32Float,
+            format: pipes.height_format,
             usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
@@ -744,7 +764,7 @@ fn prepare_gi_voxels(
     // fork: P8b — the highest ground the map can hold: the top of every resident terrain cell whose
     // box reaches into its window. Every cell the map draws is one of these (a cell whose mesh is not
     // resident yet is simply not drawn), so no texel stands above it, and the trace skips the map
-    // for any ray point higher than this (`probegi::march`). The half-yard covers the depth
+    // for any ray point higher than this (`probegi::march`). `HEIGHT_ROUNDING` covers the depth
     // encoding's rounding.
     clip.bounds.x = terrain
         .as_deref()
@@ -755,7 +775,7 @@ fn prepare_gi_voxels(
                     (c.x - centre.x).abs() <= HEIGHT_HALF + h.x
                         && (c.z - centre.z).abs() <= HEIGHT_HALF + h.z
                 })
-                .map(|(_, c, h, _)| c.y + h.y + 0.5)
+                .map(|(_, c, h, _)| c.y + h.y + HEIGHT_ROUNDING)
                 .fold(crate::modern::gi::NO_TERRAIN, f32::max)
         });
     let mut key = 0u64;
@@ -812,7 +832,7 @@ fn prepare_gi_voxels(
                     ..default()
                 },
                 depth_stencil: Some(DepthStencilState {
-                    format: TextureFormat::Depth32Float,
+                    format: pipes.height_format,
                     depth_write_enabled: Some(true),
                     depth_compare: Some(CompareFunction::GreaterEqual),
                     stencil: StencilState::default(),
@@ -1234,5 +1254,9 @@ mod tests {
         // And the stored depth decodes back to the height.
         let height = clip.hf.y + ndc.z * clip.hf.z;
         assert!((height - p.y).abs() < 1e-2, "{height} vs {}", p.y);
+        // Stored as 16-bit unorm, it still decodes inside the trace's rounding margin.
+        let stored = (ndc.z * 65535.0).round() / 65535.0;
+        let height = clip.hf.y + stored * clip.hf.z;
+        assert!((height - p.y).abs() < 0.05 * HEIGHT_ROUNDING, "{height} vs {}", p.y);
     }
 }
