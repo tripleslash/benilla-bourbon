@@ -62,6 +62,9 @@ pub(crate) fn modern_libraries(app: &mut App) {
         bevy::asset::embedded_asset!(app, "shaders/modern/gx_cull.wgsl");
         // fork: the probe trace's ray-query stage (`modern::gi::rt_gi`), native only.
         bevy::asset::embedded_asset!(app, "shaders/modern/gi_trace_rt.wgsl");
+        // fork: the ray-traced shadows' library (`modern::rt_shadow`), native only: imported under
+        // `RT_SHADOWS` / `RT_FROXEL`, which only the ray-traced tier's pipelines carry.
+        bevy::shader::load_shader_library!(app, "shaders/modern/rt_shadow.wgsl");
     }
     bevy::asset::embedded_asset!(app, "shaders/modern/froxel_scatter.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/modern/froxel_integrate.wgsl");

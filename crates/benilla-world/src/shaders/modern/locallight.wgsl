@@ -319,6 +319,30 @@ fn local_visibility(
     if (slot >= MAX_SHADOWED || !atlas_live(g) || fade <= 0.0) {
         return 1.0;
     }
+    let visibility = local_visibility_raw(map, samp, g, slot, light_pos, world_pos, normal, near);
+    if (visibility < 0.0) {
+        return 1.0;
+    }
+    // Faint: the shadow may only take `shade` of the light away. `shade == 1` is P6's behaviour.
+    let shaded = mix(1.0 - g.soft.z, 1.0, visibility);
+    return mix(1.0, shaded, fade);
+}
+
+// fork: the atlas lookup of [`local_visibility`] before the shade floor and the cross-fade: the
+// share of the cube's compare taps that pass, or -1 where the soft path's blocker search found
+// nothing in front of the receiver (wholly lit; [`local_visibility`] returns 1 there without
+// mixing). Split out for the ray-traced twin (`rtshadow::local_visibility`), which multiplies it
+// by its rays before the floor; the caller has already tested the slot, the atlas and the fade.
+fn local_visibility_raw(
+    map: texture_depth_2d_array,
+    samp: sampler_comparison,
+    g: LightGrid,
+    slot: u32,
+    light_pos: vec3<f32>,
+    world_pos: vec3<f32>,
+    normal: vec3<f32>,
+    near: f32,
+) -> f32 {
     // Offset along the normal by a texel of the face, so a lit surface never shadows itself at a
     // grazing angle. One texel is `2 * major / tile` yards across at distance `major`.
     let raw = cube_face(world_pos - light_pos);
@@ -346,8 +370,7 @@ fn local_visibility(
     let taps = max(u32(g.soft.x), 1u);
     if (taps <= 1u) {
         let face_uv = clamp(ct.xy, vec2<f32>(inset), vec2<f32>(1.0 - inset));
-        let one = textureSampleCompareLevel(map, samp, tile.xy + face_uv * tile.w, i32(tile.z), depth);
-        return mix(1.0, mix(1.0 - g.soft.z, 1.0, one), fade);
+        return textureSampleCompareLevel(map, samp, tile.xy + face_uv * tile.w, i32(tile.z), depth);
     }
 
     // fork: **the penumbra of a finite emitter**, contact-hardening. A point light stands in for a
@@ -386,7 +409,7 @@ fn local_visibility(
         }
     }
     if (blockers <= 0.0) {
-        return 1.0;
+        return -1.0;
     }
     let occluder = max(blocker / blockers, near);
     let penumbra_yd = g.soft.y * max(ct.w - occluder, 0.0) / occluder;
@@ -409,8 +432,5 @@ fn local_visibility(
         lit = lit + textureSampleCompareLevel(map, samp, uv, i32(tile.z), depth);
         taken = taken + 1u;
     }
-    let visibility = lit / f32(max(taken, 1u));
-    // Faint: the shadow may only take `shade` of the light away. `shade == 1` is P6's behaviour.
-    let shaded = mix(1.0 - g.soft.z, 1.0, visibility);
-    return mix(1.0, shaded, fade);
+    return lit / f32(max(taken, 1u));
 }
