@@ -134,17 +134,19 @@ pub fn run(origin: &str, current: Option<u64>) -> Outcome {
 /// Where the worker is: [`RUNNING`] until it ends in [`DONE`] or [`FAILED`], or the window is
 /// closed first ([`CANCELLED`]). Whichever side moves it off [`RUNNING`] decides who removes the
 /// downloaded file.
-const RUNNING: u8 = 0;
-const DONE: u8 = 1;
-const FAILED: u8 = 2;
-const CANCELLED: u8 = 3;
+pub(crate) const RUNNING: u8 = 0;
+pub(crate) const DONE: u8 = 1;
+pub(crate) const FAILED: u8 = 2;
+pub(crate) const CANCELLED: u8 = 3;
 
 /// What the download thread and the progress window share.
 #[derive(Default)]
-struct Shared {
+pub(crate) struct Shared {
     /// Bytes written so far.
-    done: AtomicU64,
-    state: AtomicU8,
+    pub(crate) done: AtomicU64,
+    pub(crate) state: AtomicU8,
+    /// fork: dlss (FORK.md) — the window's heading; empty is the client update's.
+    pub(crate) heading: &'static str,
 }
 
 fn update(origin: &str, current: Option<u64>, exe: &Path) -> io::Result<Outcome> {
@@ -163,7 +165,7 @@ fn update(origin: &str, current: Option<u64>, exe: &Path) -> io::Result<Outcome>
     let worker = {
         let (shared, staged, origin) = (shared.clone(), staged.clone(), origin.to_string());
         std::thread::spawn(move || {
-            let result = download(file, &origin, &manifest, &sha1, &shared);
+            let result = download(file, &origin, &manifest, &sha1, &shared, 0);
             if let Err(e) = &result {
                 eprintln!("update: {e}");
             }
@@ -198,7 +200,7 @@ fn update(origin: &str, current: Option<u64>, exe: &Path) -> io::Result<Outcome>
 
 /// The progress window until the worker ends; `true` when the player closed it first. With no
 /// window to show, the wait is silent.
-fn wait(shared: &Arc<Shared>, total: u64) -> bool {
+pub(crate) fn wait(shared: &Arc<Shared>, total: u64) -> bool {
     #[cfg(windows)]
     if let Some(closed) = window::run(shared.clone(), total) {
         return closed;
@@ -211,7 +213,7 @@ fn wait(shared: &Arc<Shared>, total: u64) -> bool {
 }
 
 /// A blocking HTTPS agent whose every call, body included, ends within `limit`.
-fn agent(limit: Duration) -> ureq::Agent {
+pub(crate) fn agent(limit: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(limit))
         .timeout_connect(Some(Duration::from_secs(5)))
@@ -241,12 +243,14 @@ fn fetch_manifest(origin: &str) -> io::Result<Manifest> {
 
 /// Fetch the parts in order into `file`, counting and hashing as they arrive, and stop as soon as
 /// the window is closed. Ok only for exactly the manifest's length with the manifest's hash.
-fn download(
+/// `base`: bytes already counted in `shared` by earlier files of the same window (fork: dlss).
+pub(crate) fn download(
     mut file: File,
     origin: &str,
     manifest: &Manifest,
     sha1: &[u8; 20],
     shared: &Shared,
+    base: u64,
 ) -> io::Result<()> {
     let agent = agent(Duration::from_secs(600));
     let mut hash = Sha1::new();
@@ -279,7 +283,7 @@ fn download(
             }
             hash.update(&buf[..n]);
             file.write_all(&buf[..n])?;
-            shared.done.store(done, Ordering::Relaxed);
+            shared.done.store(base + done, Ordering::Relaxed);
         }
     }
     if done != manifest.bytes {
@@ -351,7 +355,7 @@ fn sibling(exe: &Path, ext: &str) -> PathBuf {
 }
 
 /// A bare file name: no separator, no `..`, nothing a URL or path would read as structure.
-fn plain(name: &str) -> bool {
+pub(crate) fn plain(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('.')
         && name

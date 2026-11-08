@@ -26,6 +26,9 @@ fn main() -> benilla_app::AppExit {
     if relaunched_newer() {
         return benilla_app::AppExit::Success;
     }
+    // fork: dlss (FORK.md) — NVIDIA's DLSS runtime into wow-data/dlss/ before the renderer
+    // looks for it; anything short of a verified copy leaves the client on FSR.
+    fetch_dlss();
     benilla_app::run(BuildId {
         version: env!("CARGO_PKG_VERSION"),
         describe: env!("BENILLA_GIT_DESCRIBE"),
@@ -51,4 +54,19 @@ fn relaunched_newer() -> bool {
 #[cfg(feature = "dev")]
 fn relaunched_newer() -> bool {
     false
+}
+
+/// fork: dlss (FORK.md) — on a machine with an NVIDIA GPU, fetch whatever of the DLSS runtime
+/// the site serves and `wow-data/dlss/` lacks (`benilla_desktop::dlss`).
+fn fetch_dlss() {
+    let (Some(origin), Ok(exe)) = (benilla_app::data_origin(), std::env::current_exe()) else {
+        return;
+    };
+    let Some(dir) = exe.parent().map(|d| d.join(HOME).join("dlss")) else {
+        return;
+    };
+    if !benilla_app::has_nvidia_gpu() {
+        return;
+    }
+    benilla_desktop::dlss::ensure(&origin, &dir, benilla_app::DLSS_RUNTIME_FILES);
 }

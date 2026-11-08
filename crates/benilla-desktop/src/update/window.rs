@@ -197,6 +197,7 @@ unsafe extern "system" fn window_proc(
 /// One frame's numbers, read out of [`Ui`] so no borrow is held while painting.
 #[derive(Clone, Copy)]
 struct View {
+    heading: &'static str,
     done: u64,
     total: u64,
     scale: f32,
@@ -206,6 +207,7 @@ struct View {
 impl View {
     fn of(ui: &Ui) -> View {
         View {
+            heading: ui.shared.heading,
             done: ui.shared.done.load(Ordering::Relaxed).min(ui.total),
             total: ui.total,
             scale: ui.scale,
@@ -248,7 +250,12 @@ unsafe fn paint(hdc: HDC, ui: View) {
     SetTextColor(mem, TEXT);
     text(
         mem,
-        "Downloading the new client\u{2026}",
+        // fork: dlss (FORK.md) — the DLSS runtime's fetch names itself.
+        if ui.heading.is_empty() {
+            "Downloading the new client\u{2026}"
+        } else {
+            ui.heading
+        },
         rect(s(24), s(16), w - s(24), s(46)),
     );
     SetTextColor(mem, DIM);
