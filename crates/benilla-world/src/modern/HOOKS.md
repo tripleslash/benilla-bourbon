@@ -207,6 +207,8 @@ Fork systems go in `PreUpdate`, `Update` or `Last`.
 | `benilla-world/src/static_gx/render.rs` | `init_pipelines`: `GxBindless::new(caps)` (it reads `ray_query`, `batch::gpu_cull_lane` and the native allocation floors itself); `assemble_region` passes `&draw.groups` to `place` (the key bound rows) | gpu cull |
 | `benilla-world/src/static_gx/mod.rs` | `pub(crate) use render::gpu_cull;` (native only) | gpu cull |
 | `benilla-world/src/shaders.rs` | `modern_libraries`: native only, `embedded_asset!` for `shaders/modern/gx_hiz.wgsl` and `shaders/modern/gx_cull.wgsl` | gpu cull |
+| `benilla-world/src/shaders.rs` | `modern_libraries`: native only, `embedded_asset!` for `shaders/modern/gi_trace_rt.wgsl` | rt gi |
+| `benilla-world/src/static_gx/render/modern_gi.rs` (fork-owned, under upstream's `static_gx/render`) | `prepare_gi_voxels`: with `modern::gi::rt_gi()` no clipmap texture, caster diff, box or voxel raster pipeline (so `gi_voxel_pass` records no `modern_gi_voxel_clear` / `modern_gi_voxelize`); the heightfield is drawn as before; `ModernGiScene.albedo` / `.normal` are `None` | rt gi |
 
 ## Interfaces for Hi-Z / RT (bindless static_gx)
 
@@ -283,6 +285,25 @@ Where `rt_scene::tier_active()` holds (`HwCaps.ray_query`, static_gx bindless, n
 | `MASK_CELL`, `MASK_WMO`, `MASK_PROP`, `MASK_TERRAIN`, `MASK_STATIC`, `MASK_ALL`; `KIND_*` | instance masks (`1 << kind`) and kinds |
 
 **What the scene holds.** Every region the static_gx GPU cache has assembled; with the tier on, `prepare_static_gx` also assembles the regions the camera has not drawn, four a frame, so the cache (and with it the cascades' static casters and the GI voxelizer's casters) holds every streamed region. Builds go nearest the camera first, `WOW_RT_BUDGET` triangles a frame (default 262144); until `pending()` is 0 some resident geometry is missing from the TLAS. Terrain hits carry no texture: a lane that shades terrain takes its colour elsewhere.
+
+## Interfaces for the ray-traced probe GI (rt gi)
+
+Where `crate::modern::gi::rt_gi()` holds (native, `rt_scene::tier_active()`, not `WOW_RT_GI=0`; `WOW_RT=0` implies off), each probe ray is a ray query against the TLAS instead of the voxel DDA, and the voxelizer does not run. Everything else in the probe GI (classify, setup, sum, blend, the field's layout and sampling) is unchanged.
+
+| item | what |
+|---|---|
+| `modern::gi::rt_gi() -> bool` | the lane's decision, any world, fixed for the session once render startup ran (false before) |
+| `modern_gi_trace_rt` | pipeline (`gi_trace_rt.wgsl`, entry `trace_rays`): group 0 the `modern_gi_trace` layout, group 1 `rt_scene::layout()` with `rt_scene::shader_defs(1)`; queued in `gi::node::init_pipelines` (`.after(rt_scene::init_rt_scene)`) |
+| span `modern_gi_trace_rt` | the trace pass at this tier (setup, ray query, sum), in place of `modern_gi_trace`; the voxel path's `modern_gi_voxel_clear` / `modern_gi_voxelize` spans and voxel draws are absent; `modern_gi_heightfield` remains |
+| `gi_trace_pass` | `.after(rt_scene::rt_scene_pass)` on native, besides its existing edges (after `gx_shadow_pass` and `gi_voxel_pass`, before `froxel_pass` and `MainPass`); same (main) queue as before |
+| `ModernGiScene` | `albedo` / `normal` `None` at this tier; `height` and `clip` (`hf*`, `bounds.x`, `info.w` = the reach) as before. The field is off (`GiParams.params.x = 0`) until `RtScene::bind_group()` is `Some` |
+| `GiFrame.vox_stub` | a 1x1x1 `Rgba8Unorm` 3D view fills the trace layout's bindings 4 and 5 (the clipmap's slots) at this tier |
+
+**What a hit is.** `rt_scene::trace(probe, dir, tune.z, clip.info.w, MASK_ALL)`. Albedo: static items' texel at mip 3 through `rt_scene::texel`, `linear_to_srgb`'d (mid grey untextured); terrain the `GiParams.ground` albedo. Normal: the interpolated vertex normal through `object_to_world`, not turned to the ray, so a ray leaving a surface by its back counts toward the probe's backface share. Two-sided (lit through, never back-faced): the region's cutout geometry. No `FOLIAGE_GAP`: rays pass leaves where their texels do. Light: `sunshadow::sun_visibility_anywhere` (the cascades), the probe's four near lights, the previous field's nearest probe; a miss is `probegi::miss_radiance` with distance = the reach.
+
+**For F (RT shadows).** The hit's sun term is the line `sunshadow::sun_visibility_anywhere(..., lift)` in `gi_trace_rt.wgsl`'s `trace_rays`; with ray-traced sun visibility it may become `rt_scene::occluded(lift, to_sun, 0.0, far, MASK_ALL)` (the shader already binds the scene at group 1). The heightfield is not F's to remove: the froxels' ground banks read it.
+**For G (RT reflections).** Nothing of this lane is shared beyond `rt_scene`; `cast` in `gi_trace_rt.wgsl` is the pattern for shading a hit (vertex normal, texel at a mip, ground albedo on terrain).
+**For H (async compute).** The trace pass at either tier reads the modern block, the cascades, the light table, the heightfield (setup) and, at this tier, the TLAS; it must stay after `rt_scene_pass`'s TLAS build and before `froxel_pass`. The voxel path's `gi_voxel_pass` dependency stays only when `rt_gi()` is false.
 
 ## Planned hooks (not yet landed)
 
