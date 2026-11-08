@@ -49,6 +49,17 @@
 //! the meta buffer, and zeroes its counts and late counts. The cull fills `args`/`counts` (the
 //! early prepass and the colour pass draw them) and `late_args`/`late_counts` (the late prepass,
 //! [`GxBatch::emit_late`]).
+//!
+//! # The mesh-shader lane's buffers (`meshlets`, native only)
+//!
+//! Where that lane can run, the twins also hold three buffers at the same offsets: the mesh meta
+//! (`[first meshlet in the meshlet table, meshlet count]` per candidate, 8 bytes, CPU-written),
+//! the task dispatches (`DispatchIndirectArgs`, 12 bytes, at each arg slot) and the candidate refs
+//! (`u32` at each arg slot: the candidate's index, bit 31 for a late survivor), both written by the
+//! cull beside `args`. A culled batch whose every draw maps onto whole meshlets
+//! ([`GxBatch::meshlets`]) writes its mesh meta in `finish`; its passes may then draw each bucket
+//! as one `multi_draw_mesh_tasks_indirect_count` over the dispatches with the same counts
+//! ([`GxBatch::emit_mesh`]), or draw `args` as before.
 
 use super::bindless::{GxBindless, GxShared};
 use super::{GxCellDraw, GxCellGpu, GxRegionBinds, GxRun, GxSel};
@@ -86,6 +97,11 @@ const META_SIZE: u64 = 16;
 
 /// A draw's selection key when it has none of its own: the cull takes the region's bound.
 const NO_KEY: u16 = u16::MAX;
+
+/// fork: meshlets — bytes of a candidate's mesh meta, a task dispatch and a candidate ref.
+const MESH_META_SIZE: u64 = 8;
+const MESH_ARGS_SIZE: u64 = 12;
+const MESH_REF_SIZE: u64 = 4;
 
 /// fork: whether the two-phase GPU cull (`gpu_cull`, native only) runs: where static_gx draws
 /// bindless and `WOW_GX_GPUCULL=0` did not turn it off. Never on wasm32.
@@ -172,6 +188,8 @@ struct GxScratch {
     buckets: Vec<Option<GxBucket>>,
     /// fork: GPU cull — one per arg of a culled batch (the module header).
     meta: Vec<[u32; 4]>,
+    /// fork: meshlets — one per arg of a culled batch whose draws map onto meshlets.
+    mesh_meta: Vec<[u32; 2]>,
 }
 
 impl GxScratch {
@@ -181,6 +199,7 @@ impl GxScratch {
         self.counts.clear();
         self.buckets.clear();
         self.meta.clear();
+        self.mesh_meta.clear();
     }
 }
 
@@ -271,6 +290,13 @@ pub(super) struct GxCullTwins {
     /// Phase 2's survivors and counts: the late prepass's draws.
     late_args: Option<Buffer>,
     late_counts: Option<Buffer>,
+    /// fork: meshlets — the mesh-shader lane can run (`meshlets::capable`): the three below exist.
+    meshlets: bool,
+    /// Per candidate `[first meshlet, meshlet count]`.
+    mesh_meta: Option<Buffer>,
+    /// At each arg slot, a survivor's task dispatch and its candidate ref.
+    mesh_args: Option<Buffer>,
+    mesh_refs: Option<Buffer>,
 }
 
 impl GxCullTwins {
@@ -298,8 +324,26 @@ impl GxCullTwins {
             u64::from(counts) * COUNT_SIZE,
             drawn | BufferUsages::COPY_DST,
         );
+        if self.meshlets {
+            self.mesh_meta = make("static_gx_mesh_meta", draws * MESH_META_SIZE, written);
+            self.mesh_args = make("static_gx_mesh_args", draws * MESH_ARGS_SIZE, drawn);
+            self.mesh_refs = make(
+                "static_gx_mesh_refs",
+                draws * MESH_REF_SIZE,
+                BufferUsages::STORAGE,
+            );
+        }
         self.capacity = (args, counts);
     }
+}
+
+/// fork: meshlets — the mesh-shader lane's buffers beside the cull's (the module header).
+#[derive(Clone, Copy)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))] // read by `meshlets`, native only
+pub(super) struct GxMeshBuffers<'a> {
+    pub meta: &'a Buffer,
+    pub args: &'a Buffer,
+    pub refs: &'a Buffer,
 }
 
 /// fork: GPU cull — this frame's indirect buffers and their cull twins, everything the cull's bind
@@ -313,6 +357,8 @@ pub(super) struct GxCullBuffers<'a> {
     pub meta: &'a Buffer,
     pub late_args: &'a Buffer,
     pub late_counts: &'a Buffer,
+    /// fork: meshlets — the mesh-shader lane's, where it can run.
+    pub mesh: Option<GxMeshBuffers<'a>>,
 }
 
 impl GxIndirect {
@@ -322,9 +368,20 @@ impl GxIndirect {
         self.cull.is_some()
     }
 
+    /// fork: meshlets — whether this session runs the mesh-shader lane: the GPU cull runs and the
+    /// lane is capable (`meshlets::capable`).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // read by `meshlets`, native only
+    pub(super) fn meshlet_lane(&self) -> bool {
+        self.cull.as_ref().is_some_and(|c| c.meshlets)
+    }
+
     /// fork: every buffer the GPU cull binds, once all exist; `None` without its lane.
     pub(super) fn cull_buffers(&self) -> Option<GxCullBuffers<'_>> {
         let twins = self.cull.as_ref()?;
+        let mesh = match (&twins.mesh_meta, &twins.mesh_args, &twins.mesh_refs) {
+            (Some(meta), Some(args), Some(refs)) => Some(GxMeshBuffers { meta, args, refs }),
+            _ => None,
+        };
         Some(GxCullBuffers {
             args: self.args.buffer.as_ref()?,
             counts: self.counts.buffer.as_ref()?,
@@ -332,6 +389,7 @@ impl GxIndirect {
             meta: twins.meta.as_ref()?,
             late_args: twins.late_args.as_ref()?,
             late_counts: twins.late_counts.as_ref()?,
+            mesh,
         })
     }
 }
@@ -356,7 +414,10 @@ pub(super) fn init_indirect(mut commands: Commands, caps: Option<Res<HwCaps>>) {
             COUNT_SIZE,
             floor(MIN_COUNTS, NATIVE_MIN_COUNTS, COUNT_SIZE),
         ),
-        cull: (native && gpu_cull_lane(caps)).then(GxCullTwins::default),
+        cull: (native && gpu_cull_lane(caps)).then(|| GxCullTwins {
+            meshlets: super::bindless::mesh_capable(caps),
+            ..GxCullTwins::default()
+        }),
     });
 }
 
@@ -399,6 +460,8 @@ pub(super) struct GxBatch<'w> {
     /// fork: GPU cull — [`Self::set_culled`], and the candidates `finish` handed the cull.
     culled: bool,
     cull_range: Option<(u32, u32)>,
+    /// fork: meshlets — `finish` wrote every candidate's meshlets ([`Self::meshlets`]).
+    meshlets: bool,
 }
 
 impl<'w> GxBatch<'w> {
@@ -424,6 +487,7 @@ impl<'w> GxBatch<'w> {
             counts_at: None,
             culled: false,
             cull_range: None,
+            meshlets: false,
         }
     }
 
@@ -436,6 +500,7 @@ impl<'w> GxBatch<'w> {
         self.counts_at = None;
         self.culled = false;
         self.cull_range = None;
+        self.meshlets = false;
     }
 
     /// fork: GPU cull — have [`Self::finish`] hand this batch to the two-phase cull (`gpu_cull`,
@@ -451,6 +516,23 @@ impl<'w> GxBatch<'w> {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // read by `gpu_cull`, native only
     pub(super) fn cull_range(&self) -> Option<(u32, u32)> {
         self.cull_range
+    }
+
+    /// fork: meshlets — [`Self::finish`] handed the cull a range and wrote every candidate's
+    /// meshlets (each draw is a run of whole items of regions that have them, none over
+    /// `meshlet::MAX_DRAW_MESHLETS`): the cull's mesh variant can fill the task dispatches.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // read by `gpu_cull`, native only
+    pub(super) fn meshlets(&self) -> bool {
+        self.meshlets
+    }
+
+    /// fork: meshlets — the vertex slabs the batch draws from, each once per state group.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // read by `meshlets`, native only
+    pub(super) fn slabs(&self) -> impl Iterator<Item = BufferId> + '_ {
+        self.scratch
+            .draws
+            .chunk_by(|a, b| a.state == b.state)
+            .map(|group| group[0].state.vertex)
     }
 
     /// Whether any region was added since the last [`Self::clear`].
@@ -579,15 +661,18 @@ impl<'w> GxBatch<'w> {
         self.args_at = None;
         self.counts_at = None;
         self.cull_range = None;
+        self.meshlets = false;
         // fork: GPU cull — a culled batch keeps each draw to one selection key, its bound.
         let cull = indirect.cull_buffers().filter(|_| self.culled);
         let regions = &self.regions;
+        #[cfg_attr(target_arch = "wasm32", allow(unused_variables))] // `mesh_meta`: native only
         let GxScratch {
             draws,
             args,
             counts,
             buckets,
             meta,
+            mesh_meta,
         } = &mut self.scratch;
         sort_and_fuse(draws, cull.is_some());
         args.clear();
@@ -652,6 +737,25 @@ impl<'w> GxBatch<'w> {
                 u64::from(args_start) * META_SIZE,
                 bytemuck::cast_slice(meta.as_slice()),
             );
+            // fork: meshlets — every candidate's meshlets, in arg order (every bucket is counted
+            // here, so the args are the draws in order), where each draw maps onto them.
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(mesh) = cull.mesh {
+                mesh_meta.clear();
+                mesh_meta.extend(
+                    draws
+                        .iter()
+                        .map_while(|d| mesh_span(&regions[d.region as usize], d)),
+                );
+                if mesh_meta.len() == draws.len() {
+                    self.queue.write_buffer(
+                        mesh.meta,
+                        u64::from(args_start) * MESH_META_SIZE,
+                        bytemuck::cast_slice(mesh_meta.as_slice()),
+                    );
+                    self.meshlets = true;
+                }
+            }
             counts.fill(0);
             let zeros: &[u8] = bytemuck::cast_slice(counts.as_slice());
             let counts_offset = u64::from(counts_start) * COUNT_SIZE;
@@ -706,6 +810,72 @@ impl<'w> GxBatch<'w> {
         let indirect: &'w GxIndirect = self.indirect;
         if let (Some(_), Some(cull)) = (self.cull_range, indirect.cull_buffers()) {
             self.emit_from(pass, pipes, counter, Some((cull.late_args, cull.late_counts)));
+        }
+    }
+
+    /// fork: meshlets — the buckets as mesh-task multi-draws (the module header): per counted
+    /// bucket its pipeline from `pipes`, group 1, its slab's mesh group (`slab_group`) at
+    /// `mesh_group`, the immediates `[bucket's first arg slot, mode]` and one
+    /// `multi_draw_mesh_tasks_indirect_count` over the task dispatches with the bucket's count.
+    /// Group 0 and any pass-wide group are the caller's, as for [`Self::emit`]. Nothing unless
+    /// [`Self::meshlets`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn emit_mesh<'p>(
+        &self,
+        pass: &mut TrackedRenderPass<'p>,
+        pipes: &[Option<&'p RenderPipeline>],
+        mesh_group: usize,
+        slab_group: impl Fn(BufferId) -> Option<&'p BindGroup>,
+        mode: u32,
+        counter: usize,
+    ) where
+        'w: 'p,
+    {
+        let indirect: &'w GxIndirect = self.indirect;
+        let Some(mesh) = indirect.cull_buffers().and_then(|c| c.mesh) else {
+            return;
+        };
+        let (true, Some((_, args_start)), Some(Some((counts, counts_start)))) =
+            (self.meshlets, self.args_at, self.counts_at)
+        else {
+            return;
+        };
+        // The late prepass draws what the colour pass counts again, as `emit_late` does.
+        if mode != super::meshlets::MODE_LATE {
+            crate::static_gx::count_runs(counter, self.gathered);
+        }
+        let mut buckets = self.scratch.buckets.iter().copied();
+        for group in self.scratch.draws.chunk_by(|a, b| a.state == b.state) {
+            let Some(GxBucket {
+                args_at,
+                capacity,
+                count_at: Some(c),
+            }) = buckets.next().flatten()
+            else {
+                continue;
+            };
+            let head = group[0];
+            let Some(pipeline) = pipes.get(usize::from(head.state.pipe)).copied().flatten() else {
+                continue;
+            };
+            let Some(slab) = slab_group(head.state.vertex) else {
+                continue;
+            };
+            let region = self.regions[head.region as usize];
+            let (bind, _) = self.binds(&region, head.slot as usize);
+            let first = args_start + args_at;
+            pass.set_render_pipeline(pipeline);
+            pass.set_bind_group(1, bind, &[]);
+            pass.set_bind_group(mesh_group, slab, &[]);
+            pass.set_immediates(0, bytemuck::cast_slice(&[first, mode]));
+            crate::static_gx::count_draw(counter);
+            pass.wgpu_pass().multi_draw_mesh_tasks_indirect_count(
+                mesh.args,
+                u64::from(first) * MESH_ARGS_SIZE,
+                counts,
+                u64::from(counts_start + c) * COUNT_SIZE,
+                capacity,
+            );
         }
     }
 
@@ -768,6 +938,26 @@ impl<'w> GxBatch<'w> {
             }
         }
     }
+}
+
+/// fork: meshlets — a draw's `[first meshlet in the meshlet table, meshlet count]`: its items'
+/// meshlets in its region's block (`meshlets::span`). `None` where the region has none or the draw
+/// covers more than a multi-draw's dispatch can launch (`meshlet::MAX_DRAW_MESHLETS`).
+#[cfg(not(target_arch = "wasm32"))]
+fn mesh_span(region: &GxRegion<'_>, d: &GxDraw) -> Option<[u32; 2]> {
+    let gpu = region.gpu;
+    let GxRegionBinds::Shared(slots) = &gpu.binds else {
+        return None;
+    };
+    let (first, count) = super::meshlets::span(
+        &gpu.ranges,
+        &gpu.order,
+        &gpu.meshlet_starts,
+        d.first.checked_sub(region.index_base)?,
+        d.count,
+    )?;
+    (count <= crate::static_gx::meshlet::MAX_DRAW_MESHLETS)
+        .then_some([slots.meshlets.first + first, count])
 }
 
 /// Order `draws` by state, row, then index range, and fuse each draw into the one before it where

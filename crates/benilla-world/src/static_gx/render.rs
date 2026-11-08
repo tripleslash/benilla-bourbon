@@ -271,6 +271,12 @@ struct GxPipelines {
     /// never do. Always false on wasm32, where nothing reads it.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     rt: bool,
+    /// fork: meshlets — the mesh twins of [`Self::pipelines`] and [`Self::prepass`], same keys,
+    /// where the lane runs and the frame lays a prepass (`meshlets`); empty elsewhere.
+    #[cfg(not(target_arch = "wasm32"))]
+    mesh: HashMap<(bool, bool), CachedRenderPipelineId>,
+    #[cfg(not(target_arch = "wasm32"))]
+    mesh_prepass: HashMap<(bool, bool), CachedRenderPipelineId>,
 }
 
 /// fork: F — the ray-traced scene's layout for a modern colour pipeline where the session may
@@ -402,6 +408,10 @@ fn init_pipelines(
         specialized_for: None,
         bindless,
         rt: false,
+        #[cfg(not(target_arch = "wasm32"))]
+        mesh: HashMap::default(),
+        #[cfg(not(target_arch = "wasm32"))]
+        mesh_prepass: HashMap::default(),
     });
 }
 
@@ -513,6 +523,14 @@ fn prepare_static_gx(
         pipes.pipelines.clear();
         pipes.prepass.clear();
         let prepassed = modern && prepass_enabled();
+        // fork: meshlets — the mesh twins draw a culled batch, which only a prepassed frame has.
+        #[cfg(not(target_arch = "wasm32"))]
+        let meshed = prepassed && meshlets::lane_active();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            pipes.mesh.clear();
+            pipes.mesh_prepass.clear();
+        }
         // fork: F — the colour pipelines' ray-traced scene, where the session may trace shadows.
         let rt_layout = rt_shadow_layout(modern);
         pipes.rt = rt_layout.is_some();
@@ -546,7 +564,7 @@ fn prepare_static_gx(
                     defs.push(ShaderDefVal::from("GX_PREPASSED"));
                     // The depth-only twin: the same cull mode as the colour pipeline, or a face
                     // only one of them drew would leave depth with no colour on it.
-                    let pre = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
+                    let pre_desc = RenderPipelineDescriptor {
                         label: Some(
                             format!(
                                 "static_gx_prepass c{} t{}",
@@ -589,7 +607,17 @@ fn prepare_static_gx(
                             ..Default::default()
                         },
                         ..default()
-                    });
+                    };
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if meshed {
+                        let id = meshlets::queue_pipeline(
+                            &pipeline_cache,
+                            &pre_desc,
+                            "meshlet_mesh_prepass",
+                        );
+                        pipes.mesh_prepass.insert((cutout, two_sided), id);
+                    }
+                    let pre = pipeline_cache.queue_render_pipeline(pre_desc);
                     pipes.prepass.insert((cutout, two_sided), pre);
                 }
                 // fork: F — the colour pipeline's fragment stage alone traces (the scene's layout
@@ -605,7 +633,7 @@ fn prepare_static_gx(
                     defs.push(ShaderDefVal::from("RT_SHADOWS"));
                     defs.push(ShaderDefVal::UInt("RT_GROUP".into(), RT_SHADOW_GROUP));
                 }
-                let id = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
+                let desc = RenderPipelineDescriptor {
                     label: Some(
                         format!("static_gx c{} t{}", u8::from(cutout), u8::from(two_sided)).into(),
                     ),
@@ -648,7 +676,13 @@ fn prepare_static_gx(
                         ..Default::default()
                     },
                     ..default()
-                });
+                };
+                #[cfg(not(target_arch = "wasm32"))]
+                if meshed {
+                    let id = meshlets::queue_pipeline(&pipeline_cache, &desc, "meshlet_mesh");
+                    pipes.mesh.insert((cutout, two_sided), id);
+                }
+                let id = pipeline_cache.queue_render_pipeline(desc);
                 pipes.pipelines.insert((cutout, two_sided), id);
             }
         }
@@ -1391,6 +1425,19 @@ pub(crate) fn static_gx_pass(
         batch.finish();
         #[cfg(not(target_arch = "wasm32"))]
         let cull = cull.and_then(|c| c.bind(world, &batch));
+        // fork: meshlets — the culled batch as meshlets, where the whole of it can be (`meshlets`);
+        // `None` draws it as the GPU cull does.
+        #[cfg(not(target_arch = "wasm32"))]
+        let mesh = cull.as_ref().and_then(|c| {
+            meshlets::GxMeshletPass::new(
+                world,
+                extracted,
+                &batch,
+                c,
+                &pipes.mesh,
+                &pipes.mesh_prepass,
+            )
+        });
         let view_offsets = &view_bind.main_offsets;
         // `render/static_gx/elapsed_gpu` on Vulkan and DX12: the perf journal's `gpu_static`.
         // fork: the depth prepass — the same draws in the same order through the depth-only twins,
@@ -1406,7 +1453,7 @@ pub(crate) fn static_gx_pass(
         jobs.push((Some(target.get_color_attachment()), depth_attachment));
         let batch = &batch;
         #[cfg(not(target_arch = "wasm32"))]
-        let (cull, view_depth) = (cull.as_ref(), depth);
+        let (cull, view_depth, mesh) = (cull.as_ref(), depth, mesh.as_ref());
         // fork: F — the scene the colour pipelines trace against while the lane is live, else its
         // stand-in (the shader then takes the cascades' path); with neither (before the scene's
         // first prepare) a pipeline that declares it cannot draw.
@@ -1434,6 +1481,9 @@ pub(crate) fn static_gx_pass(
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some(cull) = cull {
                     cull.early(render_context);
+                    if let Some(mesh) = mesh {
+                        mesh.begin(render_context);
+                    }
                 }
                 let (label, table) = if color.is_some() {
                     ("static_gx", &ready)
@@ -1458,7 +1508,25 @@ pub(crate) fn static_gx_pass(
                 if let (Some(bind), 1) = (rt_bind, used) {
                     pass.set_bind_group(RT_SHADOW_GROUP as usize, bind, &[]);
                 }
-                batch.emit(&mut pass, table, 0);
+                // fork: meshlets — the mesh group follows the pipeline's last group: the light's
+                // (3), or the colour pass's ray-traced scene's (4).
+                #[cfg(not(target_arch = "wasm32"))]
+                let meshed = if let Some(mesh) = mesh {
+                    let (mode, group) = if used == 1 {
+                        (meshlets::MODE_COLOUR, 3 + usize::from(rt_bind.is_some()))
+                    } else {
+                        (meshlets::MODE_EARLY, 3)
+                    };
+                    mesh.emit(batch, &mut pass, mode, group);
+                    true
+                } else {
+                    false
+                };
+                #[cfg(target_arch = "wasm32")]
+                let meshed = false;
+                if !meshed {
+                    batch.emit(&mut pass, table, 0);
+                }
                 span.end(&mut pass);
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some(cull) = cull {
@@ -1477,8 +1545,16 @@ pub(crate) fn static_gx_pass(
                     let span = diagnostics.pass_span(&mut pass, "static_gx_prepass_late");
                     pass.set_bind_group(0, &view_bind.main, view_offsets);
                     pass.set_bind_group(2, &light_bind.0, &[]);
-                    batch.emit_late(&mut pass, &ready_pre, 0);
+                    // fork: meshlets — every survivor's meshlets the early prepass left undrawn.
+                    match mesh {
+                        Some(mesh) => mesh.emit(batch, &mut pass, meshlets::MODE_LATE, 3),
+                        None => batch.emit_late(&mut pass, &ready_pre, 0),
+                    }
                     span.end(&mut pass);
+                    drop(pass);
+                    if let Some(mesh) = mesh {
+                        mesh.end(render_context);
+                    }
                 }
             },
         );

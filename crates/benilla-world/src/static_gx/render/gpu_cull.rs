@@ -22,6 +22,11 @@
 //!    pyramid; a survivor is appended to its bucket and written into the late buckets.
 //! 5. `static_gx_prepass_late` draws the late buckets (`GxBatch::emit_late`).
 //!
+//! Where the mesh-shader lane runs (`meshlets.rs`) and a batch maps onto meshlets, the two phases
+//! run their `GX_MESHLETS` variant (`static_gx_cull_early_mesh` / `_late_mesh` pipelines, the same
+//! spans): a survivor also gets its task dispatch and candidate ref beside its args, and the three
+//! passes draw it as meshlets; its args stay valid, so the vertex path can still draw them.
+//!
 //! The colour pass then draws the buckets, which hold both phases' survivors by then. No CPU work
 //! is added past one uniform write and four queue writes a view (`batch.rs`, the module header):
 //! the GPU fills the args and counts B's multi-draws already read.
@@ -84,13 +89,13 @@ const STATS: u32 = 2;
 const MIRRORED: u32 = 4;
 
 /// Bytes of the stats buffer: candidates, early survivors, late survivors, unused.
-const STATS_SIZE: u64 = 16;
+pub(super) const STATS_SIZE: u64 = 16;
 
 /// Readback buffers a view keeps for the stats, so a copy never waits on a map.
 const READBACKS: usize = 3;
 
 /// Frames a view's pyramid outlives its last frame (a mirror that stands down and comes back).
-const KEEP_FRAMES: u32 = 300;
+pub(super) const KEEP_FRAMES: u32 = 300;
 
 /// The cull's uniform. Keep in sync with `CullView` in `gx_occlusion.wgsl`.
 #[repr(C)]
@@ -109,7 +114,7 @@ struct CullUniform {
 }
 
 /// Bytes of [`CullUniform`].
-const CULL_UNIFORM_SIZE: u64 = std::mem::size_of::<CullUniform>() as u64;
+pub(super) const CULL_UNIFORM_SIZE: u64 = std::mem::size_of::<CullUniform>() as u64;
 
 /// A readback buffer's state.
 const FREE: u8 = 0;
@@ -121,6 +126,100 @@ const MAPPED: u8 = 3;
 struct Readback {
     buffer: Buffer,
     state: Arc<AtomicU8>,
+}
+
+/// Four GPU counters (`array<atomic<u32>, 4>`) read back a few frames late, so a copy never waits
+/// on a map: the cull's `GX_CULL` counters and the meshlet lane's `GX_MESHLET` ones.
+pub(super) struct GpuCounters {
+    buffer: Buffer,
+    readback: [Readback; READBACKS],
+    next: AtomicUsize,
+    /// Sums since the last [`Self::take`]: readbacks landed, then counters 0, 1 and 2.
+    totals: [u64; 4],
+}
+
+impl GpuCounters {
+    pub(super) fn new(device: &RenderDevice, label: &'static str, readback: &'static str) -> Self {
+        let buffer = |label: &'static str, usage: BufferUsages| {
+            device.create_buffer(&BufferDescriptor {
+                label: Some(label),
+                size: STATS_SIZE,
+                usage,
+                mapped_at_creation: false,
+            })
+        };
+        let slot = || Readback {
+            buffer: buffer(readback, BufferUsages::MAP_READ | BufferUsages::COPY_DST),
+            state: Arc::new(AtomicU8::new(FREE)),
+        };
+        Self {
+            buffer: buffer(
+                label,
+                BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+            ),
+            readback: [slot(), slot(), slot()],
+            next: AtomicUsize::new(0),
+            totals: [0; 4],
+        }
+    }
+
+    /// The counters, for a bind group.
+    pub(super) fn buffer(&self) -> &Buffer {
+        &self.buffer
+    }
+
+    /// Zero the counters, before the passes that count.
+    pub(super) fn clear(&self, encoder: &mut CommandEncoder) {
+        encoder.clear_buffer(&self.buffer, 0, None);
+    }
+
+    /// Copy the counters into a free readback buffer, after the passes that count; none free
+    /// skips this frame's.
+    pub(super) fn copy(&self, encoder: &mut CommandEncoder) {
+        let at = self.next.fetch_add(1, Ordering::Relaxed) % self.readback.len();
+        let r = &self.readback[at];
+        if r
+            .state
+            .compare_exchange(FREE, COPIED, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            encoder.copy_buffer_to_buffer(&self.buffer, 0, &r.buffer, 0, STATS_SIZE);
+        }
+    }
+
+    /// Map what the last frames copied and fold what has landed into the totals.
+    pub(super) fn poll(&mut self) {
+        for r in &self.readback {
+            match r.state.load(Ordering::Acquire) {
+                COPIED => {
+                    r.state.store(MAPPING, Ordering::Release);
+                    let state = Arc::clone(&r.state);
+                    r.buffer.map_async(MapMode::Read, .., move |result| {
+                        let next = if result.is_ok() { MAPPED } else { FREE };
+                        state.store(next, Ordering::Release);
+                    });
+                }
+                MAPPED => {
+                    let stats: [u32; 4] = {
+                        let bytes = r.buffer.get_mapped_range(..);
+                        bytemuck::pod_read_unaligned(&bytes[..STATS_SIZE as usize])
+                    };
+                    r.buffer.unmap();
+                    r.state.store(FREE, Ordering::Release);
+                    self.totals[0] += 1;
+                    for (sum, n) in self.totals[1..].iter_mut().zip(&stats[..3]) {
+                        *sum += u64::from(*n);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The sums since the last take: `[readbacks, counter 0, counter 1, counter 2]`.
+    pub(super) fn take(&mut self) -> [u64; 4] {
+        std::mem::take(&mut self.totals)
+    }
 }
 
 /// A view's pyramid texture and its views.
@@ -150,37 +249,20 @@ struct GxHiZView {
     down: Vec<BindGroup>,
     /// The cull's bind group, for `(buffers, generation)`.
     cull: Option<([BufferId; 7], u32, BindGroup)>,
+    /// fork: meshlets — the mesh variant's bind group, for `(buffers, generation)`.
+    cull_mesh: Option<([BufferId; 10], u32, BindGroup)>,
     uniform: Buffer,
-    stats: Buffer,
-    readback: [Readback; READBACKS],
-    next_readback: AtomicUsize,
+    /// `GX_CULL`: candidates, early and late survivors.
+    stats: GpuCounters,
     /// The matrix the pyramid's current contents were built under; `None` before the first build
     /// and after a remake.
     history: Mutex<Option<Mat4>>,
     /// The frame [`prepare_gpu_cull`] last saw the view.
     seen: u32,
-    /// `GX_CULL` sums since the last line: readbacks, candidates, early and late survivors.
-    totals: [u64; 4],
 }
 
 impl GxHiZView {
     fn new(device: &RenderDevice, primary: bool) -> Self {
-        let buffer = |label: &'static str, size: u64, usage: BufferUsages| {
-            device.create_buffer(&BufferDescriptor {
-                label: Some(label),
-                size,
-                usage,
-                mapped_at_creation: false,
-            })
-        };
-        let readback = || Readback {
-            buffer: buffer(
-                "static_gx_cull_readback",
-                STATS_SIZE,
-                BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-            ),
-            state: Arc::new(AtomicU8::new(FREE)),
-        };
         Self {
             primary,
             pyramid: None,
@@ -189,21 +271,16 @@ impl GxHiZView {
             reduce: None,
             down: Vec::new(),
             cull: None,
-            uniform: buffer(
-                "static_gx_cull_view",
-                CULL_UNIFORM_SIZE,
-                BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-            ),
-            stats: buffer(
-                "static_gx_cull_stats",
-                STATS_SIZE,
-                BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-            ),
-            readback: [readback(), readback(), readback()],
-            next_readback: AtomicUsize::new(0),
+            cull_mesh: None,
+            uniform: device.create_buffer(&BufferDescriptor {
+                label: Some("static_gx_cull_view"),
+                size: CULL_UNIFORM_SIZE,
+                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            stats: GpuCounters::new(device, "static_gx_cull_stats", "static_gx_cull_readback"),
             history: Mutex::new(None),
             seen: 0,
-            totals: [0; 4],
         }
     }
 
@@ -257,39 +334,11 @@ impl GxHiZView {
         self.generation = self.generation.wrapping_add(1);
         self.reduce = None;
         self.cull = None;
+        self.cull_mesh = None;
         *self
             .history
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner) = None;
-    }
-
-    /// Map what the last frames copied and fold what has landed into [`Self::totals`].
-    fn poll_readbacks(&mut self) {
-        for r in &self.readback {
-            match r.state.load(Ordering::Acquire) {
-                COPIED => {
-                    r.state.store(MAPPING, Ordering::Release);
-                    let state = Arc::clone(&r.state);
-                    r.buffer.map_async(MapMode::Read, .., move |result| {
-                        let next = if result.is_ok() { MAPPED } else { FREE };
-                        state.store(next, Ordering::Release);
-                    });
-                }
-                MAPPED => {
-                    let stats: [u32; 4] = {
-                        let bytes = r.buffer.get_mapped_range(..);
-                        bytemuck::pod_read_unaligned(&bytes[..STATS_SIZE as usize])
-                    };
-                    r.buffer.unmap();
-                    r.state.store(FREE, Ordering::Release);
-                    self.totals[0] += 1;
-                    for (sum, n) in self.totals[1..].iter_mut().zip(&stats[..3]) {
-                        *sum += u64::from(*n);
-                    }
-                }
-                _ => {}
-            }
-        }
     }
 }
 
@@ -302,6 +351,15 @@ struct GxHiZPipes {
     reduce: CachedComputePipelineId,
     reduce_ms: CachedComputePipelineId,
     down: CachedComputePipelineId,
+    early: CachedComputePipelineId,
+    late: CachedComputePipelineId,
+    /// fork: meshlets — the cull's `GX_MESHLETS` variant, where the mesh-shader lane runs.
+    mesh: Option<GxCullMeshPipes>,
+}
+
+/// fork: meshlets — the two phases under `GX_MESHLETS`: a survivor also gets its task dispatch.
+struct GxCullMeshPipes {
+    layout: BindGroupLayoutDescriptor,
     early: CachedComputePipelineId,
     late: CachedComputePipelineId,
 }
@@ -340,6 +398,27 @@ impl GxHiZ {
             size: pyramid.size,
             mip_count: pyramid.levels.len() as u32,
             clip_from_world: *state.history.lock().unwrap_or_else(PoisonError::into_inner),
+        })
+    }
+}
+
+/// fork: meshlets — what the task stage binds of one view's cull: its uniform, its pyramid (every
+/// level) and the pyramid's generation, which changes whenever the pyramid is remade.
+pub(super) struct GxMeshInputs<'a> {
+    pub uniform: &'a Buffer,
+    pub pyramid: &'a TextureView,
+    pub generation: u32,
+}
+
+impl GxHiZ {
+    /// fork: meshlets — `view`'s [`GxMeshInputs`], once its pyramid exists (after
+    /// [`prepare_gpu_cull`]).
+    pub(super) fn mesh_inputs(&self, view: &RetainedViewEntity) -> Option<GxMeshInputs<'_>> {
+        let state = self.views.get(view)?;
+        Some(GxMeshInputs {
+            uniform: &state.uniform,
+            pyramid: &state.pyramid.as_ref()?.all,
+            generation: state.generation,
         })
     }
 }
@@ -403,26 +482,39 @@ fn init_gpu_cull(
             ),
         ),
     );
-    let cull_layout = BindGroupLayoutDescriptor::new(
-        "static_gx_cull_layout",
-        &BindGroupLayoutEntries::sequential(
-            ShaderStages::COMPUTE,
-            (
-                uniform_buffer_sized(false, std::num::NonZero::new(CULL_UNIFORM_SIZE)),
-                // The region table and the candidates.
-                storage_buffer_read_only_sized(false, None),
-                storage_buffer_read_only_sized(false, None),
-                // Meta, args, counts, late args, late counts.
-                storage_buffer_sized(false, None),
-                storage_buffer_sized(false, None),
-                storage_buffer_sized(false, None),
-                storage_buffer_sized(false, None),
-                storage_buffer_sized(false, None),
-                texture_2d(TextureSampleType::Float { filterable: false }),
-                storage_buffer_sized(false, std::num::NonZero::new(STATS_SIZE)),
-            ),
+    let cull_entries = BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            uniform_buffer_sized(false, std::num::NonZero::new(CULL_UNIFORM_SIZE)),
+            // The region table and the candidates.
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            // Meta, args, counts, late args, late counts.
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+            texture_2d(TextureSampleType::Float { filterable: false }),
+            storage_buffer_sized(false, std::num::NonZero::new(STATS_SIZE)),
         ),
     );
+    let cull_layout = BindGroupLayoutDescriptor::new("static_gx_cull_layout", &cull_entries);
+    // fork: meshlets — the same entries, then the mesh meta (read) and the task dispatches and
+    // candidate refs the survivors write (`gx_cull.wgsl` under `GX_MESHLETS`).
+    let cull_mesh_layout = indirect.meshlet_lane().then(|| {
+        let extra = BindGroupLayoutEntries::with_indices(
+            ShaderStages::COMPUTE,
+            (
+                (10, storage_buffer_read_only_sized(false, None)),
+                (11, storage_buffer_sized(false, None)),
+                (12, storage_buffer_sized(false, None)),
+            ),
+        );
+        let entries: Vec<BindGroupLayoutEntry> =
+            cull_entries.iter().chain(extra.iter()).cloned().collect();
+        BindGroupLayoutDescriptor::new("static_gx_cull_mesh_layout", &entries)
+    });
     let hiz: Handle<Shader> =
         asset_server.load("embedded://benilla_world/shaders/modern/gx_hiz.wgsl");
     let cull: Handle<Shader> =
@@ -466,6 +558,23 @@ fn init_gpu_cull(
             "cull_early",
         ),
         late: queue("static_gx_cull_late", &cull_layout, &cull, &[], "cull_late"),
+        mesh: cull_mesh_layout.map(|layout| GxCullMeshPipes {
+            early: queue(
+                "static_gx_cull_early_mesh",
+                &layout,
+                &cull,
+                &["GX_MESHLETS"],
+                "cull_early",
+            ),
+            late: queue(
+                "static_gx_cull_late_mesh",
+                &layout,
+                &cull,
+                &["GX_MESHLETS"],
+                "cull_late",
+            ),
+            layout,
+        }),
         reduce_layout,
         reduce_ms_layout,
         down_layout,
@@ -482,7 +591,7 @@ fn init_gpu_cull(
 /// Keep each static_gx view's pyramid sized to its depth and its bind groups current; drop the
 /// views gone [`KEEP_FRAMES`]; with `WOW_GX_PERF`, fold the readbacks and print `GX_CULL`. After
 /// the depth textures, the indirect buffers and the region table are prepared.
-fn prepare_gpu_cull(
+pub(super) fn prepare_gpu_cull(
     mut hiz: ResMut<GxHiZ>,
     views: Query<(&ExtractedView, &ViewDepthTexture, &StaticGxView)>,
     indirect: Res<GxIndirect>,
@@ -539,6 +648,7 @@ fn prepare_gpu_cull(
         }
         let (Some(b), Some(table)) = (buffers, table) else {
             state.cull = None;
+            state.cull_mesh = None;
             continue;
         };
         let key = [
@@ -569,20 +679,65 @@ fn prepare_gpu_cull(
                     b.late_args.as_entire_binding(),
                     b.late_counts.as_entire_binding(),
                     &pyramid.all,
-                    state.stats.as_entire_binding(),
+                    state.stats.buffer().as_entire_binding(),
                 )),
             );
             state.cull = Some((key, generation, bind));
+        }
+        // fork: meshlets — the mesh variant's group: the same, then the mesh meta, task
+        // dispatches and candidate refs.
+        let (Some(mesh_pipes), Some(m)) = (pipes.mesh.as_ref(), b.mesh) else {
+            state.cull_mesh = None;
+            continue;
+        };
+        let mesh_key = [
+            key[0],
+            key[1],
+            key[2],
+            key[3],
+            key[4],
+            key[5],
+            key[6],
+            m.meta.id(),
+            m.args.id(),
+            m.refs.id(),
+        ];
+        if state
+            .cull_mesh
+            .as_ref()
+            .is_none_or(|(k, g, _)| (*k, *g) != (mesh_key, generation))
+        {
+            let layout = pipeline_cache.get_bind_group_layout(&mesh_pipes.layout);
+            let bind = device.create_bind_group(
+                "static_gx_cull_mesh",
+                &layout,
+                &BindGroupEntries::sequential((
+                    state.uniform.as_entire_binding(),
+                    table.as_entire_binding(),
+                    b.cand.as_entire_binding(),
+                    b.meta.as_entire_binding(),
+                    b.args.as_entire_binding(),
+                    b.counts.as_entire_binding(),
+                    b.late_args.as_entire_binding(),
+                    b.late_counts.as_entire_binding(),
+                    &pyramid.all,
+                    state.stats.buffer().as_entire_binding(),
+                    m.meta.as_entire_binding(),
+                    m.args.as_entire_binding(),
+                    m.refs.as_entire_binding(),
+                )),
+            );
+            state.cull_mesh = Some((mesh_key, generation, bind));
         }
     }
     states.retain(|_, s| now.wrapping_sub(s.seen) <= KEEP_FRAMES);
     if crate::static_gx::gx_perf_enabled() {
         for state in states.values_mut() {
-            state.poll_readbacks();
+            state.stats.poll();
         }
         if now.is_multiple_of(64) {
             for state in states.values_mut() {
-                let [frames, candidates, early, late] = std::mem::take(&mut state.totals);
+                let [frames, candidates, early, late] = state.stats.take();
                 let per = |n: u64| n / frames.max(1);
                 println!(
                     "GX_CULL {} per frame: candidates={} early={} late={} culled={} ({frames} \
@@ -607,6 +762,11 @@ pub(super) struct GxCullPass<'w> {
     late: &'w ComputePipeline,
     reduce_bind: &'w BindGroup,
     cull_bind: &'w BindGroup,
+    /// fork: meshlets — the `GX_MESHLETS` variant's early and late pipelines and bind group,
+    /// where the lane runs and all three are ready.
+    mesh: Option<(&'w ComputePipeline, &'w ComputePipeline, &'w BindGroup)>,
+    /// [`Self::bind`] took the mesh variant: the survivors carry their task dispatches.
+    meshlets: bool,
     clip_from_world: Mat4,
     eye: Vec3,
     /// The view's `world_from_view` mirrors handedness (a reflected camera).
@@ -638,6 +798,13 @@ impl<'w> GxCullPass<'w> {
         let (_, _, cull_bind) = state.cull.as_ref()?;
         let cache = world.resource::<PipelineCache>();
         let p = &hiz.pipes;
+        let mesh = p.mesh.as_ref().and_then(|m| {
+            Some((
+                cache.get_compute_pipeline(m.early)?,
+                cache.get_compute_pipeline(m.late)?,
+                &state.cull_mesh.as_ref()?.2,
+            ))
+        });
         Some(Self {
             state,
             reduce: cache.get_compute_pipeline(if state.multisampled {
@@ -650,6 +817,8 @@ impl<'w> GxCullPass<'w> {
             late: cache.get_compute_pipeline(p.late)?,
             reduce_bind,
             cull_bind,
+            mesh,
+            meshlets: false,
             clip_from_world: clip_from_world(view),
             eye: view.world_from_view.translation(),
             mirrored: view.world_from_view.to_matrix().determinant() < 0.0,
@@ -695,7 +864,20 @@ impl<'w> GxCullPass<'w> {
             bytemuck::bytes_of(&uniform),
         );
         self.groups = count.div_ceil(CULL_WORKGROUP);
+        // fork: meshlets — a batch `finish` laid out for meshlets takes the mesh variant.
+        if let (true, Some((early, late, bind))) = (batch.meshlets(), self.mesh) {
+            self.early = early;
+            self.late = late;
+            self.cull_bind = bind;
+            self.meshlets = true;
+        }
         Some(self)
+    }
+
+    /// fork: meshlets — the survivors carry their task dispatches and candidate refs this frame
+    /// (`gx_cull.wgsl` under `GX_MESHLETS`), so the mesh-shader lane can draw them.
+    pub(super) fn meshlets(&self) -> bool {
+        self.meshlets
     }
 
     /// Phase 1, `static_gx_cull_early`: before the early prepass.
@@ -703,7 +885,7 @@ impl<'w> GxCullPass<'w> {
         let diagnostics = rec.diagnostic_recorder();
         let encoder = rec.command_encoder();
         if self.stats {
-            encoder.clear_buffer(&self.state.stats, 0, None);
+            self.state.stats.clear(encoder);
         }
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("static_gx_cull_early"),
@@ -766,16 +948,7 @@ impl<'w> GxCullPass<'w> {
             span.end(&mut pass);
         }
         if self.stats {
-            let readback = &self.state.readback;
-            let at = self.state.next_readback.fetch_add(1, Ordering::Relaxed) % readback.len();
-            let r = &readback[at];
-            if r
-                .state
-                .compare_exchange(FREE, COPIED, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
-            {
-                encoder.copy_buffer_to_buffer(&self.state.stats, 0, &r.buffer, 0, STATS_SIZE);
-            }
+            self.state.stats.copy(encoder);
         }
     }
 }
