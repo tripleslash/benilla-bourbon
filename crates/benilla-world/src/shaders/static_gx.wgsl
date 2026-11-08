@@ -855,8 +855,13 @@ struct GxVsOut {
 #endif
 }
 
+// fork: meshlets — the mesh stage (`static_gx_mesh.wgsl`) calls this body per output vertex.
+#ifdef GX_MESHLETS
+fn gx_vertex(v: GxVertex) -> GxVsOut {
+#else
 @vertex
 fn vertex(v: GxVertex) -> GxVsOut {
+#endif
     var out: GxVsOut;
 #ifdef GX_BINDLESS
     gx_enter(v.instance);
@@ -1036,8 +1041,13 @@ struct GxPrepassOut {
 #endif
 }
 
+// fork: meshlets — the mesh stage's prepass entry calls this body per output vertex.
+#ifdef GX_MESHLETS
+fn gx_prepass_vertex(v: GxPrepassVertex) -> GxPrepassOut {
+#else
 @vertex
 fn prepass_vertex(v: GxPrepassVertex) -> GxPrepassOut {
+#endif
     var out: GxPrepassOut;
 #ifdef GX_BINDLESS
     gx_enter(v.instance);

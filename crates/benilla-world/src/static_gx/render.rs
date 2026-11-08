@@ -1523,6 +1523,9 @@ pub(super) fn build(app: &mut App) {
     // fork: the two-phase Hi-Z GPU cull of the retained passes, native only.
     #[cfg(not(target_arch = "wasm32"))]
     gpu_cull::build(app);
+    // fork: the mesh-shader lane over the cull's survivors, native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    meshlets::build(app);
 }
 
 /// Copy the collector's published half into the extractable resource.
@@ -1673,3 +1676,7 @@ pub(crate) mod rt_scene;
 // reuse (`modern/HOOKS.md`, "Interfaces for the Hi-Z pyramid"). Native only.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod gpu_cull;
+// fork: the GPU cull's survivors drawn as meshlets through task and mesh stages
+// (`modern/HOOKS.md`, "Interfaces for meshlets and mesh shaders"). Native only.
+#[cfg(not(target_arch = "wasm32"))]
+mod meshlets;
