@@ -167,13 +167,15 @@ mod tests {
         }
     }
 
-    /// The cata water (`benilla_assets`'s `liquid_cata.wgsl`) composed as the material pipeline
-    /// composes it, over the two vertex layouts the liquid meshes draw (plain, and a WMO interior
-    /// pool's with its vertex colour), validated and translated for this platform's backend. Every
-    /// other check that would compile it needs an install and a frame; this one needs neither.
-    #[test]
-    fn the_cata_water_shader_composes_and_translates() {
-        use bevy::shader::{Shader, ShaderCache, ShaderCacheSource, ShaderDefVal};
+    /// A `ShaderCache` that composes for `features` over every embedded shader library plus the
+    /// cata water (`benilla_assets`'s `liquid_cata.wgsl`), and the water's id in it.
+    fn cata_water_cache(
+        features: bevy::render::render_resource::WgpuFeatures,
+    ) -> (
+        bevy::shader::ShaderCache<naga::Module, ()>,
+        AssetId<bevy::shader::Shader>,
+    ) {
+        use bevy::shader::{Shader, ShaderCache, ShaderCacheSource};
         let app = crate::game_plugins::schedule_tests::headless_client_unrun();
         let server = app.world().resource::<AssetServer>();
         let source = server.get_source(AssetSourceId::from("embedded")).unwrap();
@@ -182,7 +184,7 @@ mod tests {
 
         let mut cache: ShaderCache<naga::Module, ()> = ShaderCache::new(
             (),
-            bevy::render::render_resource::WgpuFeatures::empty(),
+            features,
             bevy::render::render_resource::DownlevelFlags::all(),
             |_, source, _| match source {
                 ShaderCacheSource::Naga(module) => Ok(module),
@@ -204,31 +206,49 @@ mod tests {
             };
             cache.set_shader(id, Shader::from_wgsl(text, format!("embedded://{path}")));
         }
+        (cache, water)
+    }
 
+    /// The material pipeline's defs for the cata water over a liquid mesh's vertex layout: plain,
+    /// or a WMO interior pool's with its vertex colour.
+    fn cata_water_defs(colors: bool) -> Vec<bevy::shader::ShaderDefVal> {
+        use bevy::shader::ShaderDefVal;
         let storage =
             bevy::render::settings::WgpuLimits::default().max_storage_buffers_per_shader_stage;
+        let mut defs: Vec<ShaderDefVal> = [
+            "VERTEX_POSITIONS",
+            "VERTEX_NORMALS",
+            "VERTEX_UVS",
+            "VERTEX_UVS_A",
+            "VERTEX_UVS_B",
+        ]
+        .iter()
+        .map(|&d| d.into())
+        .collect();
+        if colors {
+            defs.push("VERTEX_COLORS".into());
+        }
+        defs.push(ShaderDefVal::UInt("MATERIAL_BIND_GROUP".into(), 3));
+        defs.push(ShaderDefVal::UInt(
+            "AVAILABLE_STORAGE_BUFFER_BINDINGS".into(),
+            storage,
+        ));
+        defs.push(ShaderDefVal::UInt("MAX_DIRECTIONAL_LIGHTS".into(), 10));
+        defs.push(ShaderDefVal::UInt("MAX_CASCADES_PER_LIGHT".into(), 4));
+        defs.push(ShaderDefVal::UInt("MAX_RECT_LIGHTS".into(), 8));
+        defs
+    }
+
+    /// The cata water composed as the material pipeline composes it, over the two vertex layouts
+    /// the liquid meshes draw, validated and translated for this platform's backend: the variant
+    /// the web and the classic path draw. Every other check that would compile it needs an install
+    /// and a frame; this one needs neither.
+    #[test]
+    fn the_cata_water_shader_composes_and_translates() {
+        let (mut cache, water) =
+            cata_water_cache(bevy::render::render_resource::WgpuFeatures::empty());
         for colors in [false, true] {
-            let mut defs: Vec<ShaderDefVal> = [
-                "VERTEX_POSITIONS",
-                "VERTEX_NORMALS",
-                "VERTEX_UVS",
-                "VERTEX_UVS_A",
-                "VERTEX_UVS_B",
-            ]
-            .iter()
-            .map(|&d| d.into())
-            .collect();
-            if colors {
-                defs.push("VERTEX_COLORS".into());
-            }
-            defs.push(ShaderDefVal::UInt("MATERIAL_BIND_GROUP".into(), 3));
-            defs.push(ShaderDefVal::UInt(
-                "AVAILABLE_STORAGE_BUFFER_BINDINGS".into(),
-                storage,
-            ));
-            defs.push(ShaderDefVal::UInt("MAX_DIRECTIONAL_LIGHTS".into(), 10));
-            defs.push(ShaderDefVal::UInt("MAX_CASCADES_PER_LIGHT".into(), 4));
-            defs.push(ShaderDefVal::UInt("MAX_RECT_LIGHTS".into(), 8));
+            let defs = cata_water_defs(colors);
             let module = cache.get(0, water, &defs).unwrap_or_else(|e| {
                 panic!("colors {colors}: liquid_cata.wgsl does not compose: {e:?}")
             });
@@ -257,6 +277,59 @@ mod tests {
             naga::back::spv::write_vec(&module, &info, &naga::back::spv::Options::default(), None)
                 .unwrap_or_else(|e| {
                     panic!("colors {colors}: liquid_cata.wgsl does not translate to SPIR-V: {e:?}")
+                });
+        }
+    }
+
+    /// fork: F and G — the cata water's native ray-traced variant, as `benilla_assets`'
+    /// `push_rt_water` builds its colour pipeline where both lanes may run: `RT_SHADOWS` and
+    /// `RT_REFLECT`, the scene at `RT_GROUP` 4 (the group after the material's), composed with
+    /// the ray-query and binding-array capabilities the native device has (`rt_scene.wgsl`'s
+    /// `binding_array` of the texture pool) and the native libraries (`rt_scene`, `rtshadow`,
+    /// `rtreflect`), then validated and written as SPIR-V. Vulkan and DX12 only: neither the web
+    /// nor Metal compiles it.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "macos")))]
+    #[test]
+    fn the_cata_water_shader_composes_with_the_ray_traced_lanes() {
+        use bevy::render::render_resource::WgpuFeatures;
+        use bevy::shader::ShaderDefVal;
+        use naga::valid::Capabilities;
+        let (mut cache, water) = cata_water_cache(
+            WgpuFeatures::EXPERIMENTAL_RAY_QUERY
+                | WgpuFeatures::TEXTURE_BINDING_ARRAY
+                | WgpuFeatures::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
+        );
+        // What `wgpu_naga_bridge::features_to_naga_capabilities` makes of those features and of
+        // `DownlevelFlags::all()`, which the composer validates against.
+        let capabilities = Capabilities::RAY_QUERY
+            | Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY
+            | Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY_NON_UNIFORM_INDEXING
+            | Capabilities::STORAGE_BUFFER_BINDING_ARRAY_NON_UNIFORM_INDEXING
+            | Capabilities::SHADER_FLOAT16_IN_FLOAT32
+            | Capabilities::MULTISAMPLED_SHADING
+            | Capabilities::CUBE_ARRAY_TEXTURES;
+        for colors in [false, true] {
+            let mut defs = cata_water_defs(colors);
+            defs.push("RT_SHADOWS".into());
+            defs.push("RT_REFLECT".into());
+            defs.push(ShaderDefVal::UInt("RT_GROUP".into(), 4));
+            let module = cache.get(0, water, &defs).unwrap_or_else(|e| {
+                panic!("colors {colors}: the ray-traced liquid_cata.wgsl does not compose: {e:?}")
+            });
+            let info =
+                naga::valid::Validator::new(naga::valid::ValidationFlags::all(), capabilities)
+                    .validate(&module)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                        "colors {colors}: the ray-traced liquid_cata.wgsl does not validate: {e:?}"
+                    )
+                    });
+            naga::back::spv::write_vec(&module, &info, &naga::back::spv::Options::default(), None)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "colors {colors}: the ray-traced liquid_cata.wgsl does not translate to \
+                         SPIR-V: {e:?}"
+                    )
                 });
         }
     }
