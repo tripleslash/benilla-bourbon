@@ -38,6 +38,10 @@ use bevy::render::render_resource::binding_types::{
 };
 use std::time::Duration;
 
+/// fork: N — the cascades' shared entity casters in one multiview pass (native only).
+#[cfg(not(target_arch = "wasm32"))]
+mod multiview;
+
 #[derive(Clone, Copy, ShaderType)]
 struct CasterView {
     clip_from_world: Mat4,
@@ -193,6 +197,10 @@ struct EntityShadowPipelines {
     cut_layout: BindGroupLayoutDescriptor,
     shader: Handle<Shader>,
     by_key: StrideMap<(MeshVertexBufferLayoutRef, bool, bool, bool), CachedRenderPipelineId>,
+    /// fork: N — the `MULTIVIEW` variants by (layout, skinned, cutout, pass mask)
+    /// (`modern_shadow/multiview.rs`).
+    #[cfg(not(target_arch = "wasm32"))]
+    mv_by_key: StrideMap<(MeshVertexBufferLayoutRef, bool, bool, u32), CachedRenderPipelineId>,
 }
 
 impl EntityShadowPipelines {
@@ -211,6 +219,23 @@ impl EntityShadowPipelines {
         if let Some(id) = self.by_key.get(&key) {
             return Some(*id);
         }
+        let descriptor = self.descriptor(mesh, skinned, cutout, clip, false)?;
+        let id = cache.queue_render_pipeline(descriptor);
+        self.by_key.insert(key, id);
+        Some(id)
+    }
+
+    /// The caster pipeline's descriptor for one mesh layout. fork: N — `multiview` is the
+    /// `MULTIVIEW` variant (group 0 every cascade's matrix, `multiview::view_layout`), never
+    /// asked with `clip` and only on native.
+    fn descriptor(
+        &self,
+        mesh: &RenderMesh,
+        skinned: bool,
+        cutout: bool,
+        clip: bool,
+        multiview: bool,
+    ) -> Option<RenderPipelineDescriptor> {
         let mut attrs = vec![Mesh::ATTRIBUTE_POSITION.at_shader_location(0)];
         if cutout {
             attrs.push(Mesh::ATTRIBUTE_UV_0.at_shader_location(2));
@@ -221,8 +246,19 @@ impl EntityShadowPipelines {
         }
         let vertex_layout = mesh.layout.0.get_layout(&attrs).ok()?;
         let mut defs: Vec<ShaderDefVal> = Vec::new();
+        #[cfg(not(target_arch = "wasm32"))]
+        let view_layout = if multiview {
+            multiview::view_layout()
+        } else {
+            self.view_layout.clone()
+        };
+        #[cfg(target_arch = "wasm32")]
+        let view_layout = self.view_layout.clone();
+        if multiview {
+            defs.push("MULTIVIEW".into());
+        }
         let mut layout = vec![
-            self.view_layout.clone(),
+            view_layout,
             if skinned {
                 self.skin_layout.clone()
             } else {
@@ -242,8 +278,13 @@ impl EntityShadowPipelines {
         if cutout || clip {
             defs.push("CUTOUT_OR_CLIP".into());
         }
-        let descriptor = RenderPipelineDescriptor {
-            label: Some("modern_shadow_entity".into()),
+        let label = if multiview {
+            "modern_shadow_entity_mv"
+        } else {
+            "modern_shadow_entity"
+        };
+        Some(RenderPipelineDescriptor {
+            label: Some(label.into()),
             layout,
             vertex: VertexState {
                 shader: self.shader.clone(),
@@ -269,10 +310,7 @@ impl EntityShadowPipelines {
                 bias: DepthBiasState::default(),
             }),
             ..default()
-        };
-        let id = cache.queue_render_pipeline(descriptor);
-        self.by_key.insert(key, id);
-        Some(id)
+        })
     }
 }
 
@@ -303,6 +341,10 @@ struct EntityDrawCmd {
     /// animated part's bounds are re-fitted as it animates, so a tree swaying beside a lamp moved
     /// its centre every frame while its placement stood still.
     pose: (Vec3, Quat),
+    /// fork: N — [`Self::pipeline`]'s `MULTIVIEW` twins by pass mask, queued for the masks the
+    /// session can draw and only for a part the cascades take (`modern_shadow/multiview.rs`).
+    #[cfg(not(target_arch = "wasm32"))]
+    mv: multiview::MaskPipelines,
 }
 
 #[derive(Resource, Default)]
@@ -378,6 +420,16 @@ struct ModernShadowFrame {
     /// they are wanted, not after [`ATLAS_SETTLE_FRAMES`]: set by a ray-tracing switch, which
     /// changes what every slot holds at once with nothing streaming to wait out.
     hurry_until: u32,
+    /// fork: N — the multiview pass's attachments: the working array's layers `0..n` as one
+    /// `D2Array` view, for n = 2..=4 at index n - 2; made once per working texture.
+    #[cfg(not(target_arch = "wasm32"))]
+    mv_views: Vec<TextureView>,
+    /// fork: N — every cascade's clip matrix for the multiview pipelines' group 0, and its bind
+    /// group: `None` in a frame the lane cannot draw (`multiview::prepare`).
+    #[cfg(not(target_arch = "wasm32"))]
+    mv_uniform: UniformBuffer<multiview::MultiviewViews>,
+    #[cfg(not(target_arch = "wasm32"))]
+    mv_bind: Option<BindGroup>,
 }
 
 /// fork (perf): one shadow layer's static casters. The cached layer used to be keyed on the whole
@@ -451,6 +503,17 @@ const HELD_CASCADES_FROM: usize = 2;
 /// ([`cascade_key`]) may be held: a re-centred cascade is redrawn whole.
 fn holds_entities(layer: usize, frame_no: u32) -> bool {
     layer >= HELD_CASCADES_FROM && (frame_no as usize + layer) % 2 == 1
+}
+
+/// What cascade `layer`'s entity casters cull against: the camera's footprint in the map
+/// (`ModernCascades::cull_from_world`) on the cascades redrawn every frame, the cascade's whole
+/// clip on the held ones. One function, so the multiview pass culls as each layer's pass does.
+fn entity_cull_for(cascades: &ModernCascades, layer: usize) -> Mat4 {
+    if layer < HELD_CASCADES_FROM {
+        cascades.cull_from_world[layer]
+    } else {
+        cascades.clip_from_world[layer]
+    }
 }
 
 /// A storage buffer holding `rects` for one restore draw. A buffer made per draw is freed in a
@@ -575,6 +638,8 @@ fn init_shadow_pipelines(
         ),
         shader: asset_server.load("embedded://benilla_world/shaders/modern/entity_shadow.wgsl"),
         by_key: StrideMap::default(),
+        #[cfg(not(target_arch = "wasm32"))]
+        mv_by_key: StrideMap::default(),
     });
     commands.insert_resource(TerrainShadowPipelines {
         view_layout: view_layout.clone(),
@@ -692,9 +757,14 @@ fn prepare_modern_shadow(
     mut uniforms: ResMut<CasterViewBuffer>,
     mut frame: ResMut<ModernShadowFrame>,
     mut uploaded_plane: Option<ResMut<crate::modern::shadow::UploadedMirrorPlane>>,
+    #[cfg(not(target_arch = "wasm32"))] caps: Option<Res<crate::modern::caps::HwCaps>>,
 ) {
     frame.count = 0;
     frame.bind = None;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        frame.mv_bind = None;
+    }
     frame.frame_no = frame.frame_no.wrapping_add(1);
     *frame.restore_next.get_mut() = 0;
     // fork: the ray-traced shadows switched (on or off): every cascade and the sky map redraw from
@@ -738,6 +808,8 @@ fn prepare_modern_shadow(
         .is_some_and(|t| t.id() != image.texture.id())
     {
         frame.layers.clear();
+        #[cfg(not(target_arch = "wasm32"))]
+        frame.mv_views.clear();
         frame.cache = None;
         for key in &frame.cache_keys {
             key.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -914,6 +986,17 @@ fn prepare_modern_shadow(
         &BindGroupEntries::single(binding),
     ));
     frame.count = cascades.count;
+    // fork: N — the multiview pass's views, matrices and bind group.
+    #[cfg(not(target_arch = "wasm32"))]
+    multiview::prepare(
+        &device,
+        &queue,
+        &pipeline_cache,
+        caps.as_deref(),
+        &cascades,
+        &image.texture,
+        &mut frame,
+    );
 }
 
 /// Queue a terrain caster pipeline for every vertex stride the resident cells use.
@@ -993,6 +1076,8 @@ fn prepare_entity_shadows(
     mut buffer: ResMut<EntityDrawBuffer>,
     mut cut_binds: ResMut<CutoutBinds>,
     mut frame: ResMut<EntityShadowFrame>,
+    #[cfg(not(target_arch = "wasm32"))] caps: Option<Res<crate::modern::caps::HwCaps>>,
+    #[cfg(not(target_arch = "wasm32"))] cascades: Option<Res<ModernCascades>>,
 ) {
     frame.draws.clear();
     frame.draw_bind = None;
@@ -1003,6 +1088,9 @@ fn prepare_entity_shadows(
     if casters.parts.is_empty() {
         return;
     }
+    // fork: N — the multiview masks this session can draw with the live cascades.
+    #[cfg(not(target_arch = "wasm32"))]
+    let mv_wanted = multiview::wanted(caps.as_deref(), cascades.map_or(0, |c| c.count));
     buffer.0.clear();
     for part in &casters.parts {
         let Some(mesh) = meshes.get(part.mesh) else {
@@ -1023,6 +1111,20 @@ fn prepare_entity_shadows(
         };
         let Some(pipeline) = pipeline else {
             continue;
+        };
+        // fork: N — the multiview twins, for a part the sun's cascades draw.
+        #[cfg(not(target_arch = "wasm32"))]
+        let mv = if part.sun {
+            multiview::pipelines(
+                &mut pipes,
+                &pipeline_cache,
+                mesh,
+                skinned,
+                cutout,
+                &mv_wanted,
+            )
+        } else {
+            [None; multiview::MASKS.len()]
         };
         // fork: a part whose bounds hold a shadowed light is that lamp's own model (a swaying lantern
         // on the entity lane), and its cube cuts the fixture's box out of it.
@@ -1072,6 +1174,8 @@ fn prepare_entity_shadows(
                     part.world_from_local.to_scale_rotation_translation();
                 (translation, rotation)
             },
+            #[cfg(not(target_arch = "wasm32"))]
+            mv,
         });
     }
     // Drop the bind groups of cutout textures no caster uses any more: each holds its texture alive.
@@ -1169,6 +1273,15 @@ pub(crate) fn gx_shadow_pass(
         // fork: F — at the ray-traced shadows' lane the receivers trace the static world and the
         // terrain (`modern::rt_shadow`): the cascades and the lamp atlas keep the entities alone.
         let rt = crate::modern::shadow::rt_shadows();
+        // fork: N — the entity parts two or more of this frame's cascades take are drawn once, by
+        // the multiview job after the layers (`modern_shadow/multiview.rs`); a layer's own pass
+        // keeps the rest. Planned before any layer records, so every job reads the same split.
+        #[cfg(not(target_arch = "wasm32"))]
+        let mv_plan = multiview::plan(world, frame, cascades, pipeline_cache);
+        #[cfg(not(target_arch = "wasm32"))]
+        let mv_takes = |j: usize, i: usize| mv_plan.as_ref().is_some_and(|p| p.takes(j, i));
+        #[cfg(target_arch = "wasm32")]
+        let mv_takes = |_: usize, _: usize| false;
 
         // The local-light atlas is the layer after the sky map and is its own job below: it is
         // not a cascade, it is not cleared every frame, and no entity is drawn into it.
@@ -1425,11 +1538,7 @@ pub(crate) fn gx_shadow_pass(
             // frame: a held layer keeps one frame's entities for the next, and the camera may turn
             // in between. The static casters keep the full map, as their layer is cached across
             // camera turns.
-            let entity_cull = if i < HELD_CASCADES_FROM {
-                cascades.cull_from_world[i]
-            } else {
-                clip_from_world
-            };
+            let entity_cull = entity_cull_for(cascades, i);
             let Some(entities) = world.get_resource::<EntityShadowFrame>() else {
                 return;
             };
@@ -1464,7 +1573,7 @@ pub(crate) fn gx_shadow_pass(
             // fork: P8b — and WHERE: the tiles the issued casters' footprints touch in this layer,
             // which is all next frame's restore puts back.
             let mut wrote = [0u32; RESTORE_TILES];
-            for cmd in &entities.draws {
+            for (j, cmd) in entities.draws.iter().enumerate() {
                 if !cmd.sun || outside_box(&entity_cull, cmd.center, Vec3::splat(cmd.radius)) {
                     continue;
                 }
@@ -1475,6 +1584,12 @@ pub(crate) fn gx_shadow_pass(
                     SHADOW_MAP_SIZE,
                 );
                 mark_tiles(&mut wrote, footprint, SHADOW_MAP_SIZE);
+                // fork: N — a part the multiview pass draws into this layer: its tiles are this
+                // layer's to restore all the same.
+                if mv_takes(j, i) {
+                    drew = true;
+                    continue;
+                }
                 let Some(pipeline) = pipeline_cache.get_render_pipeline(cmd.pipeline) else {
                     continue;
                 };
@@ -1556,14 +1671,29 @@ pub(crate) fn gx_shadow_pass(
 
         // fork: every cascade layer, the sky map and the atlas write only their own array layer
         // (and its cached copy), so each records as a job of its own (`crate::par_encode`): in
-        // parallel on native, submitted in this order everywhere.
-        let mut jobs: Vec<Option<usize>> = (0..frame.layers.len().min(SKY_LAYER + 1))
-            .map(Some)
+        // parallel on native, submitted in this order everywhere. fork: N — the multiview job
+        // writes several cascade layers, so it is submitted after all of them.
+        enum Job {
+            Layer(usize),
+            #[cfg(not(target_arch = "wasm32"))]
+            Multiview,
+            Atlas,
+        }
+        let mut jobs: Vec<Job> = (0..frame.layers.len().min(SKY_LAYER + 1))
+            .map(Job::Layer)
             .collect();
-        jobs.push(None);
+        #[cfg(not(target_arch = "wasm32"))]
+        jobs.extend(mv_plan.is_some().then_some(Job::Multiview));
+        jobs.push(Job::Atlas);
         crate::par_encode::record(&mut render_context, jobs, |rec, job| match job {
-            Some(i) => layer_job(rec, i),
-            None => atlas_job(rec),
+            Job::Layer(i) => layer_job(rec, i),
+            #[cfg(not(target_arch = "wasm32"))]
+            Job::Multiview => {
+                if let Some(plan) = mv_plan.as_ref() {
+                    multiview::draw(rec, world, plan, pipeline_cache, meshes, allocator);
+                }
+            }
+            Job::Atlas => atlas_job(rec),
         });
     }
 }
