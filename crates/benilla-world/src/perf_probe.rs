@@ -293,9 +293,9 @@ struct PassSums {
     seen: Option<bevy::platform::time::Instant>,
 }
 
-/// fork: perf — the passes `modern::async_compute` puts on the async queue.
+/// fork: perf — the timed passes `modern::async_compute` puts on the async queue.
 fn on_async_queue(pass: &str) -> bool {
-    pass.starts_with("modern_light_bin") || pass.starts_with("modern_froxel")
+    pass.starts_with("modern_light_bin")
 }
 
 impl PassSums {
