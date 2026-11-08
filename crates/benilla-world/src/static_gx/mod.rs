@@ -23,6 +23,9 @@ mod cull;
 mod pick;
 mod pool;
 mod render;
+// fork: the meshlets the mesh-shader lane draws, built at bake (`render/meshlets.rs`).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod meshlet;
 
 /// The retained pass's render system, re-exported for the passes that order against it: the
 /// gather, the fog composite and the water's scene copy must not run until it has written the WMO

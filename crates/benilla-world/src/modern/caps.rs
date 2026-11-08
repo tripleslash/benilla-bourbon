@@ -11,6 +11,10 @@
 //! A field is a capability, not a decision: a lane combines it with its own lever (static_gx's
 //! bindless layout needs `binding_arrays && mdi_count` and honours `WOW_GX_BINDLESS=0`).
 //!
+//! [`HwCaps::mesh_shader`] is read from the features and limits, then held to the backends whose
+//! shader translation emits task and mesh stages: naga 29 writes them to SPIR-V only (its HLSL
+//! backend lists no `MESH_SHADER` capability), so DX12 and Metal never claim it.
+//!
 //! [`alloc_floor`] is the native allocation tier: the floor a native lane's self-growing buffer
 //! opens at, sized against [`HwCaps::buffer_bytes`] instead of the floor the lane began with.
 
@@ -48,7 +52,22 @@ pub struct HwCaps {
     /// The largest storage-buffer binding the device takes, and no larger than its largest
     /// buffer, in bytes. 0 on wasm32.
     pub buffer_bytes: u64,
+    /// Task and mesh shaders that static_gx's meshlet lane can compile and draw from WGSL
+    /// (`static_gx/render/meshlets.rs`): `EXPERIMENTAL_MESH_SHADER`, the task stage's
+    /// `draw_index` (`SHADER_DRAW_INDEX`), the counted multi-draw and immediates, the output,
+    /// workgroup and payload limits of the meshlet format (`static_gx::meshlet`), five bind
+    /// groups, [`MESH_STORAGE_BUFFERS`] storage buffers a stage, and a backend naga writes mesh
+    /// stages for (Vulkan; `init` clears it elsewhere).
+    pub mesh_shader: bool,
 }
+
+/// Storage buffers per shader stage the meshlet lane binds at most: the mesh-variant GPU cull's
+/// eleven; the task stage's own group beside the region table.
+pub const MESH_STORAGE_BUFFERS: u32 = 16;
+
+/// Bind groups a mesh pipeline of the meshlet lane takes: the view, the region table, the light,
+/// the ray-traced scene (colour, where it is declared) and its own.
+pub const MESH_BIND_GROUPS: u32 = 5;
 
 impl HwCaps {
     /// The capabilities in `features` and `limits`.
@@ -73,8 +92,47 @@ impl HwCaps {
             buffer_bytes: limits
                 .max_storage_buffer_binding_size
                 .min(limits.max_buffer_size),
+            mesh_shader: mesh_shader_capable(features, limits),
         }
     }
+}
+
+/// Whether `features` and `limits` hold everything [`HwCaps::mesh_shader`] names, the backend
+/// aside.
+#[cfg(not(target_arch = "wasm32"))]
+fn mesh_shader_capable(features: WgpuFeatures, limits: &WgpuLimits) -> bool {
+    use crate::static_gx::meshlet::{
+        MAX_DRAW_TASKS, MESHLET_TRIANGLES, MESHLET_VERTICES, MESH_THREADS, TASK_MESHLETS,
+        TASK_PAYLOAD_BYTES,
+    };
+    let needed = WgpuFeatures::EXPERIMENTAL_MESH_SHADER
+        | WgpuFeatures::SHADER_DRAW_INDEX
+        | WgpuFeatures::MULTI_DRAW_INDIRECT_COUNT
+        | WgpuFeatures::INDIRECT_FIRST_INSTANCE
+        | WgpuFeatures::IMMEDIATES;
+    features.contains(needed)
+        && limits.max_immediate_size >= 8
+        && limits.max_mesh_output_vertices >= MESHLET_VERTICES
+        && limits.max_mesh_output_primitives >= MESHLET_TRIANGLES
+        && limits.max_mesh_invocations_per_workgroup >= MESH_THREADS
+        && limits.max_mesh_invocations_per_dimension >= MESH_THREADS
+        && limits.max_task_invocations_per_workgroup >= TASK_MESHLETS
+        && limits.max_task_invocations_per_dimension >= TASK_MESHLETS
+        && limits.max_task_payload_size >= TASK_PAYLOAD_BYTES
+        && limits.max_task_mesh_workgroups_per_dimension >= MAX_DRAW_TASKS
+        && limits.max_task_mesh_workgroup_total_count >= MAX_DRAW_TASKS
+        && limits.max_bind_groups >= MESH_BIND_GROUPS
+        && limits.max_storage_buffers_per_shader_stage >= MESH_STORAGE_BUFFERS
+}
+
+#[cfg(target_arch = "wasm32")]
+fn mesh_shader_capable(_: WgpuFeatures, _: &WgpuLimits) -> bool {
+    false
+}
+
+/// Whether naga 29 writes task and mesh stages for `backend`'s shader language: SPIR-V alone.
+fn emits_mesh_stages(backend: wgpu::Backend) -> bool {
+    backend == wgpu::Backend::Vulkan
 }
 
 /// The floor, in units of `unit` bytes, a native lane's self-growing buffer opens at: `native`
@@ -103,16 +161,18 @@ pub(crate) fn init(
     device: Res<RenderDevice>,
     adapter: Res<RenderAdapterInfo>,
 ) {
-    let caps = HwCaps::from_parts(device.features(), &device.limits());
+    let mut caps = HwCaps::from_parts(device.features(), &device.limits());
+    caps.mesh_shader &= emits_mesh_stages(adapter.0.backend);
     info!(
         "caps: binding_arrays={} mdi_count={} immediates={} ray_query={} conservative_raster={} \
-         async_compute={} ({} on {:?})",
+         async_compute={} mesh_shader={} ({} on {:?})",
         caps.binding_arrays,
         caps.mdi_count,
         caps.immediates,
         caps.ray_query,
         caps.conservative_raster,
         caps.async_compute,
+        caps.mesh_shader,
         adapter.0.name,
         adapter.0.backend,
     );
@@ -159,6 +219,36 @@ mod tests {
         );
         let count_only = WgpuFeatures::MULTI_DRAW_INDIRECT_COUNT;
         assert!(!HwCaps::from_parts(count_only, &limits).mdi_count);
+    }
+
+    /// The mesh-shader capability needs the feature set and every limit of the meshlet format;
+    /// only Vulkan's translation emits the stages.
+    #[test]
+    fn mesh_shaders_need_the_features_the_limits_and_spirv() {
+        let features = WgpuFeatures::EXPERIMENTAL_MESH_SHADER
+            | WgpuFeatures::SHADER_DRAW_INDEX
+            | WgpuFeatures::MULTI_DRAW_INDIRECT_COUNT
+            | WgpuFeatures::INDIRECT_FIRST_INSTANCE
+            | WgpuFeatures::IMMEDIATES;
+        let mut limits = WgpuLimits::default().using_recommended_minimum_mesh_shader_values();
+        limits.max_immediate_size = 128;
+        limits.max_storage_buffers_per_shader_stage = MESH_STORAGE_BUFFERS;
+        limits.max_bind_groups = MESH_BIND_GROUPS;
+        // wgpu's recommended minimum dispatch (256 a dimension, 1024 in all) is under the lane's.
+        assert!(!HwCaps::from_parts(features, &limits).mesh_shader);
+        limits.max_task_mesh_workgroups_per_dimension = 1 << 22;
+        limits.max_task_mesh_workgroup_total_count = 1 << 22;
+        assert_eq!(
+            HwCaps::from_parts(features, &limits).mesh_shader,
+            !cfg!(target_arch = "wasm32")
+        );
+        let no_draw_index = features - WgpuFeatures::SHADER_DRAW_INDEX;
+        assert!(!HwCaps::from_parts(no_draw_index, &limits).mesh_shader);
+        limits.max_mesh_output_primitives = 64;
+        assert!(!HwCaps::from_parts(features, &limits).mesh_shader);
+        assert!(emits_mesh_stages(wgpu::Backend::Vulkan));
+        assert!(!emits_mesh_stages(wgpu::Backend::Dx12));
+        assert!(!emits_mesh_stages(wgpu::Backend::Metal));
     }
 
     /// The native floor holds under an eighth of the binding, never under the web floor, and the

@@ -322,6 +322,9 @@ pub(super) struct BakedCell {
     draws: Vec<render::GxItemDraw>,
     groups: Vec<(u16, Aabb)>,
     killed: Vec<u64>,
+    /// fork: the region's meshlets, where the mesh-shader lane can run (`meshlet`).
+    #[cfg(not(target_arch = "wasm32"))]
+    meshlets: Option<std::sync::Arc<super::meshlet::GxMeshlets>>,
 }
 
 impl BakedCell {
@@ -337,6 +340,8 @@ impl BakedCell {
             sets: Vec::new(),
             killed: self.killed,
             killed_rev: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            meshlets: self.meshlets,
         }
     }
 }
@@ -456,6 +461,20 @@ fn bake_cell(items: &[GxItem]) -> BakedCell {
         .iter()
         .map(|w| (*w - origin64).as_vec3().to_array())
         .collect();
+    // fork: each item's meshlets, from the same recentred positions and indices the mesh takes.
+    #[cfg(not(target_arch = "wasm32"))]
+    let meshlets = super::meshlet::wanted().then(|| {
+        let spans: Vec<super::meshlet::ItemSpan> = draws
+            .iter()
+            .zip(items)
+            .map(|(draw, item)| super::meshlet::ItemSpan {
+                indices: draw.index_range.clone(),
+                two_sided: draw.two_sided,
+                sway: item.foliage_wind,
+            })
+            .collect();
+        std::sync::Arc::new(super::meshlet::build(&positions, &indices, &spans))
+    });
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD,
@@ -484,6 +503,8 @@ fn bake_cell(items: &[GxItem]) -> BakedCell {
             })
             .collect(),
         killed,
+        #[cfg(not(target_arch = "wasm32"))]
+        meshlets,
     }
 }
 

@@ -65,6 +65,10 @@ pub(crate) struct GxCellDraw {
     pub groups: Vec<(u16, Aabb)>,
     /// A prop region's distinct referrer sets, indexed like `groups`.
     pub sets: Vec<std::sync::Arc<[u16]>>,
+    /// fork: the region's meshlets, items in bake order, where the mesh-shader lane can run
+    /// (`super::meshlet`; `None` for a region baked without it).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub meshlets: Option<std::sync::Arc<super::meshlet::GxMeshlets>>,
 }
 
 /// Marks a view the retained pass draws into. Without it the node would run for EVERY Core3d
