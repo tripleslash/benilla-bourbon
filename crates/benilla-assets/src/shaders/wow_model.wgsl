@@ -30,11 +30,17 @@
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
     pbr_bindings,
-    forward_io::VertexOutput,
     mesh_view_bindings::{lights, view},
     shadows,
     mesh_functions,
 }
+// fork: the depth prepass (`benilla_world::entity_cull`) builds its `VertexOutput` for Bevy's
+// material read from the prepass's own struct, which `pbr_fragment` takes there.
+#ifdef PREPASS_PIPELINE
+#import bevy_pbr::prepass_io::VertexOutput
+#else
+#import bevy_pbr::forward_io::VertexOutput
+#endif
 
 // bevy_pbr 0.18.1's `forward_io::FragmentOutput`. No depth output: a fragment depth write costs
 // the pipeline early-Z, so the sky lane pins its depth in the vertex stage.
@@ -348,7 +354,14 @@ const DETAIL_DOODAD_LOD_BIAS: f32 = 0.25;
 // Bevy's `VertexOutput` (same fields, locations and defs; no tangents, morphs or visibility
 // ranges) plus our interpolants; the fragment rebuilds a `VertexOutput` from it.
 struct WowVsOut {
+    // fork: invariant where a depth prepass runs (`DEPTH_PREPASS`, the prepass and the main pass of
+    // its view alike): the prepass lays this depth and the main pass must land on it bit for bit
+    // under `GreaterEqual`, from two pipelines the driver compiles apart.
+#ifdef DEPTH_PREPASS
+    @builtin(position) @invariant position: vec4<f32>,
+#else
     @builtin(position) position: vec4<f32>,
+#endif
     @location(0) world_position: vec4<f32>,
     @location(1) world_normal: vec3<f32>,
 #ifdef VERTEX_UVS_A
@@ -1303,6 +1316,9 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
     out.instance_index = vertex.instance_index;
 #endif
 
+    // fork: the depth prepass (`benilla_world::entity_cull`) stops at the position and the
+    // coordinates its discards read; the lighting below is the colour pass's.
+#ifndef PREPASS_PIPELINE
     // Point lights: none on WMO surfaces, none here on interior M2 props (their group's MOLR lights
     // are in the SH probe), else the ≤3 nearest to the instance origin (clutter: its MCNK chunk).
     var point_lit = vec4<f32>(0.0);
@@ -1367,11 +1383,18 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
     if (lit_here) {
         out.primary = vertex_light(out.world_normal, point_lit, vcol, probe_slot, raw_tag);
     }
+#endif
     return out;
 }
 
+// fork: in the depth prepass (`benilla_world::entity_cull`) the fragment is the discards alone: no
+// colour target, so no output, and the colour lane below the cut is not compiled.
 @fragment
+#ifdef PREPASS_PIPELINE
+fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) {
+#else
 fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
+#endif
     // The UI model tile's cell clip: the reference gives each `<Model>` pane its widget rect as the
     // viewport; our panes share an atlas, so the tile passes its cell as a mat-anim row
     // (`anim_slots.w`, `[min.x, min.y, max.x, max.y]` in atlas texels) and this is the scissor.
@@ -1537,6 +1560,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     // Chrome/Metal a colour-masked twin carrying the whole lighting stack lost its cutout: it wrote
     // depth over the entire card, and a fading tree's holes blocked the sky behind them (black).
     // Declared ahead of the cut: both lanes write it, and the twin's lane has nothing below.
+#ifndef PREPASS_PIPELINE
     var out: WowFragOut;
 #ifdef WOW_ZFILL
     out.color = vec4<f32>(0.0);
@@ -1795,4 +1819,5 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     out.color = vec4<f32>(out_rgb, select(faded_alpha, 1.0, opaque_intent));
 #endif
     return out;
+#endif
 }

@@ -233,13 +233,9 @@ impl Plugin for WorldFoundation {
                 mb * 1024 * 1024,
             ));
         }
-        // Direct draws on every camera: Bevy's indirect lane is a per-draw encode loop on Metal
-        // (no MULTI_DRAW_INDIRECT) plus GPU preprocessing; `WOW_INDIRECT=1` restores it. A
-        // required component, as `NoIndirectDrawing` must ride a camera's spawn: the work-item
-        // buffers latch the first time a view is seen, and a later insert panics in wgpu.
-        if std::env::var_os("WOW_INDIRECT").is_none() {
-            app.register_required_components::<bevy::camera::Camera, bevy::render::view::NoIndirectDrawing>();
-        }
+        // Direct draws on every camera; `$WOW_ENTITY_GPU_CULL=1` puts the world camera on the
+        // indirect lane with the depth prepass and GPU occlusion culling (`entity_cull`).
+        app.add_plugins(crate::entity_cull::EntityCullPlugin);
     }
 
     fn finish(&self, app: &mut App) {

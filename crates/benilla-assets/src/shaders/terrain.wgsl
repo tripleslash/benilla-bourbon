@@ -227,7 +227,13 @@ fn modern_cell_lights(
 // per-vertex-clamped sun glint that must be Gouraud-interpolated (Q14). Same struct on both stages, so
 // `@builtin(position)` is clip-position out / frag-coord in (`world_position` is unused until Step 5 fog).
 struct TerrainVsOut {
+    // fork: invariant where a depth prepass runs (`DEPTH_PREPASS`): the prepass and the main pass
+    // must land on the same depth bit for bit under `GreaterEqual` (`benilla_world::entity_cull`).
+#ifdef DEPTH_PREPASS
+    @builtin(position) @invariant clip_position: vec4<f32>,
+#else
     @builtin(position) clip_position: vec4<f32>,
+#endif
     @location(0) world_position: vec4<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) uv_b: vec2<f32>,
@@ -408,6 +414,9 @@ fn vertex(in: Vertex) -> TerrainVsOut {
     out.uv_b = in.uv_b;
     out.color = in.color;
 
+    // fork: the depth prepass (`benilla_world::entity_cull`) stops at the position and what the
+    // far-clip wall reads; the light below is the colour pass's.
+#ifndef PREPASS_PIPELINE
     // Sun specular per vertex: white material, row-9 colour, shininess `light_spec.w` (20), local
     // viewer; clamped here, then Gouraud-interpolated.
     let n = normalize(world_normal);
@@ -452,11 +461,18 @@ fn vertex(in: Vertex) -> TerrainVsOut {
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );
+#endif
     return out;
 }
 
+// fork: in the depth prepass (`benilla_world::entity_cull`) the fragment is the far-clip wall
+// alone: no colour target, so no output, and the splat below the cut is not compiled.
 @fragment
+#ifdef PREPASS_PIPELINE
+fn fragment(in: TerrainVsOut) {
+#else
 fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
+#endif
     // The far-clip wall: the reference clips the detailed world per pixel at its far plane
     // (`farclip`, about 777 yd). Discard beyond `fog_params.w` (0 disables) on planar eye-Z.
     if (wow_light.fog_params.w > 0.0) {
@@ -465,6 +481,7 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
             discard;
         }
     }
+#ifndef PREPASS_PIPELINE
 
     // Per-chunk array indices baked per vertex, COLOR the 4 layers and UV1.x the alpha; constant
     // across a chunk, so they interpolate back to the integer. (fork: UV1.x's fraction is the
@@ -702,4 +719,5 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
     }
     // fork: alpha above 1 is the wet reflection tag; every other opaque write stays at or below 1.
     return vec4<f32>(colorspace::modern_out(tuned, wow_light.point_count.y), 1.0 + wet_reflect);
+#endif
 }

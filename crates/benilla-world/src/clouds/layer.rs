@@ -54,6 +54,11 @@ pub struct CloudExt {
 }
 
 impl MaterialExtension for CloudExt {
+    /// fork: sky geometry pinned to the far depth: never in the depth prepass (`entity_cull`).
+    fn enable_prepass() -> bool {
+        false
+    }
+
     /// The shared sky vertex stage, which pins every sky vertex to the far depth.
     fn vertex_shader() -> ShaderRef {
         SKY_VERTEX_SHADER.into()

@@ -13,9 +13,9 @@ use bevy::pbr::{
 use bevy::prelude::*;
 use bevy::render::render_resource::{
     AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, ColorWrites,
-    CompareFunction, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+    CompareFunction, FragmentState, RenderPipelineDescriptor, SpecializedMeshPipelineError,
 };
-use bevy::shader::ShaderRef;
+use bevy::shader::{ShaderDefVal, ShaderRef};
 
 // fork: modern lighting (FORK.md, P2) — the modern sun's cascade shadow map
 // (`benilla_world::modern::shadow`) and its cascade block, as constant handles so every material can
@@ -38,6 +38,76 @@ pub fn modern_vertex_walks() -> bool {
 // (`benilla_world::modern::volumetrics`), sampled by the transparent lanes.
 pub const MODERN_FOG_VOLUME: Handle<Image> =
     bevy::asset::uuid_handle!("e8a1c6d2-4f37-4b9e-a0c5-93d17b2f6e48");
+
+/// fork: is `descriptor` a depth-prepass pipeline (`benilla_world::entity_cull`)? Bevy's prepass
+/// specializes a material through the same `specialize` as its colour pass, and marks its own
+/// pipelines with this def.
+fn is_prepass(descriptor: &RenderPipelineDescriptor) -> bool {
+    descriptor
+        .vertex
+        .shader_defs
+        .iter()
+        .any(|d| matches!(d, ShaderDefVal::Bool(name, true) if name == "PREPASS_PIPELINE"))
+}
+
+/// fork: fit a depth-prepass pipeline to a material whose prepass twin runs its colour pass's own
+/// vertex stage and discards (`wow_model.wgsl`, `terrain.wgsl`), so that the depth it lays is the
+/// depth the colour pass then draws on.
+///
+/// Bevy's prepass binds its own attribute locations (position 0, UVs 1 and 2, colour 7) and
+/// declares a normal only for a normal prepass; the colour pass's stage reads Bevy's forward
+/// locations (0-5) and its normal, which an environment-mapped coordinate, and so a cutout, depends
+/// on. The prepass has no fragment stage for an opaque material, so a material whose opaque draws
+/// can discard (the far-clip wall) gets one, `discards`, with no colour target. It is made after
+/// `StandardMaterial::specialize`, which pushes fragment defs only for features no world material
+/// uses (normal maps, the UV-B channels, transmission, clearcoat, anisotropy).
+fn fit_prepass(
+    descriptor: &mut RenderPipelineDescriptor,
+    layout: &MeshVertexBufferLayoutRef,
+    discards: bool,
+) -> Result<(), SpecializedMeshPipelineError> {
+    let mut attrs = Vec::with_capacity(5);
+    for (attr, loc) in [
+        (Mesh::ATTRIBUTE_POSITION, 0),
+        (Mesh::ATTRIBUTE_NORMAL, 1),
+        (Mesh::ATTRIBUTE_UV_0, 2),
+        (Mesh::ATTRIBUTE_UV_1, 3),
+        (Mesh::ATTRIBUTE_COLOR, 5),
+    ] {
+        if layout.0.contains(attr) {
+            attrs.push(attr.at_shader_location(loc));
+        }
+    }
+    descriptor.vertex.buffers = vec![layout.0.get_layout(&attrs)?];
+    if layout.0.contains(Mesh::ATTRIBUTE_NORMAL) {
+        descriptor.vertex.shader_defs.push("VERTEX_NORMALS".into());
+    }
+    // `prepass_io::VertexOutput` carries `world_normal` only under this def, and `pbr_fragment`
+    // reads it.
+    descriptor
+        .vertex
+        .shader_defs
+        .push("NORMAL_PREPASS_OR_DEFERRED_PREPASS".into());
+    match descriptor.fragment.as_mut() {
+        Some(fragment) => {
+            if layout.0.contains(Mesh::ATTRIBUTE_NORMAL) {
+                fragment.shader_defs.push("VERTEX_NORMALS".into());
+            }
+            fragment
+                .shader_defs
+                .push("NORMAL_PREPASS_OR_DEFERRED_PREPASS".into());
+        }
+        None if discards => {
+            descriptor.fragment = Some(FragmentState {
+                shader: descriptor.vertex.shader.clone(),
+                shader_defs: descriptor.vertex.shader_defs.clone(),
+                ..default()
+            });
+        }
+        None => {}
+    }
+    Ok(())
+}
 
 /// Compile the five WGSL files into the binary under `embedded://benilla_assets/shaders/…`. Call
 /// after Bevy's `AssetPlugin`, whose registry this fills; [`crate::register_asset_loaders`] does.
@@ -224,6 +294,16 @@ impl MaterialExtension for WowModelExt {
         "embedded://benilla_assets/shaders/wow_model.wgsl".into()
     }
 
+    /// fork: the depth prepass's twin (`benilla_world::entity_cull`): the same file's vertex stage
+    /// up to the position, and its fragment's discards up to the depth-prime cut.
+    fn prepass_vertex_shader() -> ShaderRef {
+        "embedded://benilla_assets/shaders/wow_model.wgsl".into()
+    }
+
+    fn prepass_fragment_shader() -> ShaderRef {
+        "embedded://benilla_assets/shaders/wow_model.wgsl".into()
+    }
+
     /// The reference writes depth for every M2 batch, transparent ones too, and tests `LEQUAL`,
     /// unless render flag 0x10 (no write) or 0x08 (no test) clears it (`0x70c190`).
     fn specialize(
@@ -232,6 +312,19 @@ impl MaterialExtension for WowModelExt {
         layout: &MeshVertexBufferLayoutRef,
         key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        // fork: the depth prepass's twin, before anything below pushes a def to its fragment: the
+        // rebuilds below then give it the colour pass's vertex input, and every depth and discard
+        // rule below applies to it as to the colour pass. Its discards are the fragment's ahead of
+        // the depth-prime cut: the far-clip wall, the UI cell, the twin cutout and (Bevy's own
+        // fragment, `MAY_DISCARD`) the alpha-mask cutout.
+        if is_prepass(descriptor) {
+            let k = &key.bind_group_data;
+            fit_prepass(
+                descriptor,
+                layout,
+                !k.no_far_wall || k.ui_cell || k.twin_cutout,
+            )?;
+        }
         // `WOW_RIG_SKIN` skins from the shared buffer's palette. The base layout lacks our joint
         // attributes: rebuild it with Bevy's conditionals (mesh.rs, locations 0-5) plus 10/11.
         if layout.0.contains(crate::ATTRIBUTE_WOW_JOINT_INDEX) {
@@ -438,6 +531,18 @@ impl MaterialExtension for WowModelExt {
                 });
             }
         }
+        // fork: a part that blends lays no prepass depth (`benilla_world::entity_cull`), though its
+        // colour pass writes depth: that write lands after what it blends over (clutter, in the
+        // alpha-mask phase, over the opaque terrain), and laid first it would keep that ground from
+        // drawing under it, so a faded tuft blended over the clear colour. The draw stays in the
+        // phase, a depth test with no write and no fragment, so it touches nothing.
+        if is_prepass(descriptor) && (key.clutter || key.additive || key.modulate || key.modulate2x)
+        {
+            descriptor.fragment = None;
+            if let Some(ds) = descriptor.depth_stencil.as_mut() {
+                ds.depth_write_enabled = Some(false);
+            }
+        }
         Ok(())
     }
 }
@@ -455,6 +560,13 @@ pub struct WdlExt {
 }
 
 impl MaterialExtension for WdlExt {
+    /// fork: out of the world camera's depth prepass (`benilla_world::entity_cull`): the far band
+    /// lies past `farclip`, where it hides nothing the occlusion test could use, and Bevy's
+    /// default prepass would not run its vertex stage.
+    fn enable_prepass() -> bool {
+        false
+    }
+
     fn vertex_shader() -> ShaderRef {
         "embedded://benilla_assets/shaders/wdl.wgsl".into()
     }
@@ -753,6 +865,11 @@ pub struct LiquidCataExt {
 }
 
 impl MaterialExtension for LiquidCataExt {
+    /// fork: a blended surface: never in the depth prepass (`benilla_world::entity_cull`).
+    fn enable_prepass() -> bool {
+        false
+    }
+
     fn vertex_shader() -> ShaderRef {
         "embedded://benilla_assets/shaders/liquid_cata.wgsl".into()
     }
@@ -777,6 +894,11 @@ impl MaterialExtension for LiquidCataExt {
 }
 
 impl MaterialExtension for LiquidExt {
+    /// fork: a blended surface: never in the depth prepass (`benilla_world::entity_cull`).
+    fn enable_prepass() -> bool {
+        false
+    }
+
     fn vertex_shader() -> ShaderRef {
         "embedded://benilla_assets/shaders/liquid.wgsl".into()
     }
@@ -867,14 +989,28 @@ impl MaterialExtension for TerrainExtension {
         "embedded://benilla_assets/shaders/terrain.wgsl".into()
     }
 
+    /// fork: the depth prepass's twin (`benilla_world::entity_cull`): the same file's vertex stage
+    /// up to the position, and its fragment's far-clip wall.
+    fn prepass_vertex_shader() -> ShaderRef {
+        "embedded://benilla_assets/shaders/terrain.wgsl".into()
+    }
+
+    fn prepass_fragment_shader() -> ShaderRef {
+        "embedded://benilla_assets/shaders/terrain.wgsl".into()
+    }
+
     /// fork: modern lighting — compile one lighting model, not both ([`TerrainKey`]). The def
     /// reaches the vertex stage too: it decides which walk of the light table a vertex makes.
     fn specialize(
         _pipeline: &MaterialExtensionPipeline,
         descriptor: &mut RenderPipelineDescriptor,
-        _layout: &MeshVertexBufferLayoutRef,
+        layout: &MeshVertexBufferLayoutRef,
         key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        // fork: the depth prepass's twin; the far-clip wall can discard any terrain draw.
+        if is_prepass(descriptor) {
+            fit_prepass(descriptor, layout, true)?;
+        }
         if key.bind_group_data.modern {
             descriptor.vertex.shader_defs.push("WOW_MODERN".into());
             if let Some(fragment) = descriptor.fragment.as_mut() {

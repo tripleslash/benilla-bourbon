@@ -160,6 +160,14 @@ pub(crate) struct WorldShadowPlugin;
 struct ShadowCasterMaterial {}
 
 impl Material for ShadowCasterMaterial {
+    /// Out of the world camera's depth prepass (`benilla_world::entity_cull`): the proxy is a
+    /// CPU copy of triangles the real parts already draw, and its main pass discards every
+    /// fragment, so prepass depth from it would hide what the main pass shows. Its shadow pass is
+    /// `enable_shadows`, untouched.
+    fn enable_prepass() -> bool {
+        false
+    }
+
     fn fragment_shader() -> ShaderRef {
         "embedded://benilla_app/shaders/shadow_caster.wgsl".into()
     }

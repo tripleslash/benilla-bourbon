@@ -120,11 +120,6 @@ pub(super) fn setup_player(
             speed: 100.0,
         },
     ));
-    // `WOW_NO_INDIRECT=1` opts out of indirect draws and GPU culling for an A/B; it rides the
-    // spawn, as the phase cache latches the preprocessing mode on first sight of the view.
-    if std::env::var_os("WOW_NO_INDIRECT").is_some() {
-        world_cam.insert(bevy::render::view::NoIndirectDrawing);
-    }
     // No clustered light assignment here: world shaders take point lights from our own buffer
     // (`lighting::global_light`). `Clusters` stays so the view bind group builds; other cameras
     // keep bevy's default, and `WOW_CLUSTERS=1` restores it on this one.

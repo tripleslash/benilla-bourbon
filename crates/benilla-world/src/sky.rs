@@ -65,6 +65,12 @@ pub struct SkyExt {
 }
 
 impl MaterialExtension for SkyExt {
+    /// fork: sky geometry pinned to the far depth by its own vertex stage, which Bevy's default
+    /// prepass would not run: never in the depth prepass (`crate::entity_cull`).
+    fn enable_prepass() -> bool {
+        false
+    }
+
     /// The shared sky vertex stage, which pins depth to the far plane ([`crate::sky_order`]).
     fn vertex_shader() -> ShaderRef {
         crate::sky_order::SKY_VERTEX_SHADER.into()

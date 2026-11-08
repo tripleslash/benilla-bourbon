@@ -33,6 +33,11 @@ pub struct CelestialExt {
 }
 
 impl MaterialExtension for CelestialExt {
+    /// fork: sky geometry pinned to the far depth: never in the depth prepass (`entity_cull`).
+    fn enable_prepass() -> bool {
+        false
+    }
+
     /// The shared sky vertex stage, the far-depth pin ([`crate::sky_order`]).
     fn vertex_shader() -> ShaderRef {
         SKY_VERTEX_SHADER.into()
@@ -89,6 +94,11 @@ pub struct StarExt {
 }
 
 impl MaterialExtension for StarExt {
+    /// fork: sky geometry pinned to the far depth: never in the depth prepass (`entity_cull`).
+    fn enable_prepass() -> bool {
+        false
+    }
+
     /// The shared sky vertex stage, the far-depth pin ([`crate::sky_order`]).
     fn vertex_shader() -> ShaderRef {
         SKY_VERTEX_SHADER.into()
