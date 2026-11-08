@@ -423,7 +423,7 @@ impl super::CommandEncoder {
         if count == 0 {
             return;
         }
-        let record = mem::size_of::<Direct3D12::D3D12_QUERY_DATA_PIPELINE_STATISTICS>() as u64;
+        let record = size_of::<Direct3D12::D3D12_QUERY_DATA_PIPELINE_STATISTICS>() as u64;
         let size = u64::from(count) * record;
         let buffer = {
             let (resource, allocation) =

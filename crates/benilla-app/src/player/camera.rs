@@ -666,7 +666,8 @@ impl CollisionArm {
         }
     }
 
-    /// The length a clear cast would seat the camera at this frame.
+    /// The length a clear cast would seat the camera at this frame; the tests read it.
+    #[cfg(test)]
     pub(super) fn length(&self) -> f32 {
         self.length
     }

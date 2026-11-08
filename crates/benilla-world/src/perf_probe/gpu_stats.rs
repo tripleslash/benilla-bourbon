@@ -292,7 +292,7 @@ fn print_stats(
     };
     print.stats.fold(&store);
     print.frame += 1;
-    if print.frame % print.every != 0 {
+    if !print.frame.is_multiple_of(print.every) {
         return;
     }
     if let Some(line) = print.stats.line() {
