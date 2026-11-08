@@ -30,6 +30,12 @@ bevy = { version = "0.19.1", default-features = false, features = [
     "ui_bevy_render",
     "scene",
     "picking",
+    # DX12 compiles shaders with DXC linked into the binary. Without it bevy falls back to FXC
+    # unless a `dxcompiler.dll` sits in the working directory, and FXC takes 76 s on the GI probe
+    # trace alone, compiled again at every boot (DX12 has no pipeline cache): the worldview took
+    # 213 s to settle at Northshire on Cinematic, 16 s with DXC. Only x64 Windows MSVC links it;
+    # the build fetches a pinned, hash-checked archive once. `WGPU_DX12_COMPILER` still overrides.
+    "statically-linked-dxc",
 ] }
 # For the `WOW_GPU_MS` meter's query set, which bevy does not wrap; must match bevy's wgpu, which
 # resolves to the vendored copy (`third_party/wgpu`, below).
@@ -80,6 +86,10 @@ bevy_render = { path = "third_party/bevy_render" }
 # skinned rig's bind pose), so dress, gear and particles could vanish behind nothing.
 # `third_party/bevy_pbr/BENILLA.md` has the diff.
 bevy_pbr = { path = "third_party/bevy_pbr" }
+# mach-dxcompiler-rs 0.1.7, the statically linked DXC behind `statically-linked-dxc`: its build
+# script may take the release archive from a local copy instead of GitHub, checked against the same
+# pinned SHA-256. `third_party/mach-dxcompiler-rs/BENILLA.md` has the hunk and where the copy goes.
+mach-dxcompiler-rs = { path = "third_party/mach-dxcompiler-rs" }
 # bevy_winit 0.19.1, forked for three pieces of per-frame state its runner rebuilt on every call: a
 # `world.query` on each window event (`RedrawRequested` is one a frame), the focus `SystemState` in
 # `redraw_requested`, and the monitor `SystemState` in `about_to_wait`. A fresh query state scans every

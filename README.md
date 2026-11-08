@@ -111,7 +111,10 @@ benilla builds and runs on macOS, Linux and Windows. You need:
   with Warden off.
 - **Stable Rust and a C compiler**, which some dependencies build with: on macOS the
   Xcode command line tools, on Linux the ALSA and udev development packages and pkg-config, on
-  Windows the MSVC build tools that the Rust installer sets up.
+  Windows the MSVC build tools that the Rust installer sets up, at Visual Studio 2022 17.14
+  (MSVC 14.44) or newer with the "C++ ATL" component: the shader compiler DirectX 12 uses (DXC)
+  is linked in prebuilt, built with that toolset and against ATL. The build fetches it from
+  GitHub once; `third_party/mach-dxcompiler-rs/BENILLA.md` says how to give it a local copy.
 
 ```sh
 WOW_DATA=/path/to/WoW/Data cargo run --release -p benilla
