@@ -262,7 +262,7 @@ pub fn gi_enabled() -> bool {
 }
 
 /// fork: **does the probe trace cast its rays against the ray-traced scene this frame?** Native
-/// only: the ray tracing is live (`static_gx::rt_scene::option_live`: capable, the `rayTracing` option on
+/// only: the ray tracing is live (`static_gx::rt_scene::gi_live`: capable, `rayTracing` and `rayTracingGI` on
 /// and the scene ready) and the session may trace probes ([`rt_gi_capable`]). Then each probe ray is
 /// a ray query against the TLAS (`gi_trace_rt.wgsl`) and the voxel clipmap is not kept
 /// (`static_gx::render::modern_gi` frees it, and rebuilds it on the frame this turns false); the
@@ -272,7 +272,7 @@ pub fn gi_enabled() -> bool {
 pub fn rt_gi() -> bool {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        crate::static_gx::rt_scene::option_live() && rt_gi_capable()
+        crate::static_gx::rt_scene::gi_live() && rt_gi_capable()
     }
     #[cfg(target_arch = "wasm32")]
     {

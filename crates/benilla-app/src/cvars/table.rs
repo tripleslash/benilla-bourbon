@@ -1075,15 +1075,35 @@ pub(crate) const REGISTERED: &[Registered] = &[
     ),
     // ── end fork-owned block ──
     // ── fork-owned block: native GPU (hardware ray tracing) ──
-    // `rayTracing` — 1 (the default) lets a native client use the GPU's ray-tracing hardware
-    // where it has it; 0 puts every ray-traced lane (probe GI, shadows, froxel rays) back on its
-    // raster path and frees the ray-traced scene. The knob is
-    // `benilla_world::modern::RayTracingSetting`, extracted each frame: off applies on the next
-    // frame, on as soon as the scene is rebuilt (a few frames, nearest the camera first). The
-    // device keeps the ray-tracing features either way. The web build has no ray tracing to turn
-    // off.
+    // `rayTracing` — the master: 1 (the default) lets a native client use the GPU's ray-tracing
+    // hardware where it has it, for the lanes its three rows below turn on; 0 puts every
+    // ray-traced lane back on its raster path. `rayTracingGI` (probe GI rays), `rayTracingShadows`
+    // (the static world's sun and lamp shadows by ray, the cascades and the lamp atlas keeping the
+    // entities) and `rayTracingVolumetrics` (froxel sun and lamp visibility by ray) are the lanes.
+    // The defaults are the fastest frame that keeps the look (measured on an RTX 3080 Laptop at
+    // 1080p Cinematic): the shadows cost 4–6 ms a frame over the cascades, the other two about
+    // nothing. The knob is `benilla_world::modern::RayTracingSetting` (its `DEFAULT`, welded
+    // below), extracted each frame: off applies on the next frame, on as soon as the scene is
+    // rebuilt (a few frames, nearest the camera first); the scene is freed while no lane asks.
+    // The device keeps the ray-tracing features either way. The web build has no ray tracing to
+    // turn off.
     ours(
         "rayTracing",
+        "1",
+        "benilla's own — 1.12 has no hardware ray tracing",
+    ),
+    ours(
+        "rayTracingGI",
+        "1",
+        "benilla's own — 1.12 has no hardware ray tracing",
+    ),
+    ours(
+        "rayTracingShadows",
+        "0",
+        "benilla's own — 1.12 has no hardware ray tracing",
+    ),
+    ours(
+        "rayTracingVolumetrics",
         "1",
         "benilla's own — 1.12 has no hardware ray tracing",
     ),

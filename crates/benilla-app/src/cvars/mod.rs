@@ -2066,6 +2066,12 @@ mod tests {
         );
         assert_eq!(d["ssaoStrength"], AO_DEFAULT);
         assert_eq!(d["ssgiStrength"], GI_DEFAULT);
+        // fork: native GPU — the ray-tracing master and lanes weld to the engine's defaults.
+        let rt = benilla_world::modern::RayTracingSetting::DEFAULT;
+        assert_eq!(d["rayTracing"] != 0.0, rt.on);
+        assert_eq!(d["rayTracingGI"] != 0.0, rt.gi);
+        assert_eq!(d["rayTracingShadows"] != 0.0, rt.shadows);
+        assert_eq!(d["rayTracingVolumetrics"] != 0.0, rt.volumetrics);
         // The lighting pair welds to the engine's shipped model and tier: Modern at Cinematic.
         assert_eq!(
             d["lightingModel"],

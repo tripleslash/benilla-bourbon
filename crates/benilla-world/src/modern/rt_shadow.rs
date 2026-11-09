@@ -52,7 +52,7 @@ pub(super) fn init_rt_shadows(mut commands: Commands) {
 
 /// Every frame: the scene's bind group while a lane that binds it here is live (these shadows, or
 /// the water's reflections, `super::rt_reflect`), else its stand-in, where the material lanes' draws
-/// bind it. With the reflections alone live (the water's RT tier, the `rayTracing` option off) the
+/// bind it. With the reflections alone live (the water's RT tier, the shadows' option off) the
 /// group is `RtScene::water_bind`, whose lane row keeps every `rtshadow` twin on raster. The water's
 /// shader code also asks its own row of the block (`light_spare[12]`) besides `rt_scene::live()`,
 /// and each lane compiles only where it may run, so neither traces for the other.

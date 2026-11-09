@@ -9,11 +9,11 @@
 //! `benilla_modern::rtreflect`) and fogged as the mirror fogs it. A ray that finds nothing reads the
 //! sky the water already falls back to.
 //!
-//! **The tier asks, nothing else.** The lane runs at the RT tier alone, whatever the `rayTracing`
-//! option says: the tier asks for the scene ([`RtWaterTier`], extracted; `rt_scene` builds it while
-//! the option or this asks), and with only the water asking, the shadows, the probe GI and the
-//! froxels stay on raster (`rt_scene::option_live`). At every other tier the water is what that
-//! tier always was, the option on or off. Where the session cannot trace reflections (no ray
+//! **The tier asks, nothing else.** The lane runs at the RT tier alone, whatever the ray-tracing
+//! options say: the tier asks for the scene ([`RtWaterTier`], extracted; `rt_scene` builds it while
+//! an option's lane or this asks), and with only the water asking, the shadows, the probe GI and
+//! the froxels stay on raster (`rt_scene::gi_live` and its siblings). At every other tier the
+//! water is what that tier always was, the options on or off. Where the session cannot trace reflections (no ray
 //! queries, `WOW_RT=0`, `WOW_RT_REFLECT=0`, the web) the RT tier renders as the experimental tier,
 //! mirror and all, with one log line.
 //!
@@ -52,7 +52,7 @@ impl RtReflectLane {
 
 /// **Does the water's tier ask for the ray-traced scene?** `waterDetail` 4
 /// ([`crate::liquid::WaterDetail::wants_ray_traced_reflection`]), written by [`decide_water_lane`]
-/// and extracted, where `rt_scene::update_rt_tier` reads it beside the `rayTracing` option.
+/// and extracted, where `rt_scene::update_rt_tier` reads it beside the ray-tracing options.
 #[derive(Resource, Clone, Copy, Default, PartialEq, Eq, Debug, ExtractResource)]
 pub(crate) struct RtWaterTier(pub(crate) bool);
 
@@ -134,7 +134,7 @@ pub(crate) fn decide_water_lane(
 
 /// **The ray-traced reflections' lane, this frame**: the scene is live with the water's tier asking
 /// for it (`rt_scene::water_live()`) and the session may trace reflections
-/// ([`rt_reflections_capable`]). Independent of the `rayTracing` option. Per frame, any world
+/// ([`rt_reflections_capable`]). Independent of the ray-tracing options. Per frame, any world
 /// (outside the render world, its latest decision); false before render startup.
 pub(crate) fn rt_reflections() -> bool {
     rt_scene::water_live() && rt_reflections_capable()
@@ -163,7 +163,7 @@ fn init_rt_reflect(mut commands: Commands, extra: Option<Res<MaterialExtraBindGr
     }
     info!(
         "rt reflect: the water declares the scene; at waterDetail 4 it reflects by ray with the \
-         mirror camera off, whatever the rayTracing option says (WOW_RT_REFLECT=0 keeps the mirror)"
+         mirror camera off, whatever the ray-tracing options say (WOW_RT_REFLECT=0 keeps the mirror)"
     );
 }
 

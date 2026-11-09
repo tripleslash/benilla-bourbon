@@ -174,19 +174,71 @@ impl Default for LightingSettings {
     }
 }
 
-/// fork: native GPU — the `rayTracing` option: may the ray-traced lanes run? Written by
-/// `benilla-app`'s CVar callback, extracted to the render world every frame (native only), where
-/// `static_gx::rt_scene::update_rt_tier` turns it into the frame's `enabled` and `live` levels; a
-/// switch takes effect within a few frames, no restart. Default on, the registered default;
-/// `$WOW_RAYTRACING=0` boots it off where no CVar host writes it (the worldview). Has no effect
-/// where the session cannot ray-trace, and none on the web build. The water's ray-traced tier
-/// (`waterDetail` 4) does not read it.
+/// fork: native GPU — the ray-tracing options: which ray-traced lanes may run. `on` is the
+/// `rayTracing` master switch; `gi`, `shadows` and `volumetrics` are `rayTracingGI`,
+/// `rayTracingShadows` and `rayTracingVolumetrics`, each lane's own, read only while `on` holds.
+/// Written by `benilla-app`'s CVar callbacks, extracted to the render world every frame (native
+/// only), where `static_gx::rt_scene::update_rt_tier` turns it into the frame's `enabled` and
+/// `live` levels and each lane's own; a switch takes effect within a few frames, no restart. The
+/// scene is built only while some lane asks. The defaults are the registered ones
+/// ([`RayTracingSetting::DEFAULT`]: ray-traced GI and volumetrics on, shadows on the cascades,
+/// which cost 4–6 ms a frame more on an RTX 3080 Laptop at 1080p Cinematic);
+/// `$WOW_RAYTRACING`, `$WOW_RAYTRACING_GI`, `$WOW_RAYTRACING_SHADOWS` and
+/// `$WOW_RAYTRACING_VOLUMETRICS` (`0` or `1`) override them where no CVar host writes it (the
+/// worldview). Has no effect where the session cannot ray-trace, and none on the web build. The
+/// water's ray-traced tier (`waterDetail` 4) reads none of it.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, ExtractResource)]
-pub struct RayTracingSetting(pub bool);
+pub struct RayTracingSetting {
+    pub on: bool,
+    pub gi: bool,
+    pub shadows: bool,
+    pub volumetrics: bool,
+}
+
+impl RayTracingSetting {
+    /// The registered defaults (`benilla-app`'s CVar table welds its rows to these).
+    pub const DEFAULT: Self = Self {
+        on: true,
+        gi: true,
+        shadows: false,
+        volumetrics: true,
+    };
+
+    /// The probe GI may trace: the master and its lane.
+    pub fn gi_on(self) -> bool {
+        self.on && self.gi
+    }
+
+    /// The sun and lamp shadows may trace.
+    pub fn shadows_on(self) -> bool {
+        self.on && self.shadows
+    }
+
+    /// The froxels may trace.
+    pub fn volumetrics_on(self) -> bool {
+        self.on && self.volumetrics
+    }
+
+    /// Some lane of the options asks for the scene.
+    pub fn any_on(self) -> bool {
+        self.gi_on() || self.shadows_on() || self.volumetrics_on()
+    }
+}
 
 impl Default for RayTracingSetting {
     fn default() -> Self {
-        Self(crate::launch_env::var("WOW_RAYTRACING").as_deref() != Some("0"))
+        let flag = |key: &str, default: bool| match crate::launch_env::var(key).as_deref() {
+            Some("0") => false,
+            Some("1") => true,
+            _ => default,
+        };
+        let d = Self::DEFAULT;
+        Self {
+            on: flag("WOW_RAYTRACING", d.on),
+            gi: flag("WOW_RAYTRACING_GI", d.gi),
+            shadows: flag("WOW_RAYTRACING_SHADOWS", d.shadows),
+            volumetrics: flag("WOW_RAYTRACING_VOLUMETRICS", d.volumetrics),
+        }
     }
 }
 
@@ -398,7 +450,7 @@ impl Plugin for ModernLightingPlugin {
                 lights::plugin,
                 weather::plugin,
             ));
-        // fork: native GPU — the `rayTracing` option, read by the render world each frame.
+        // fork: native GPU — the ray-tracing options, read by the render world each frame.
         app.init_resource::<RayTracingSetting>();
         #[cfg(not(target_arch = "wasm32"))]
         app.add_plugins((

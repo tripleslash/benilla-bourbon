@@ -474,11 +474,21 @@
         if ( BENILLA_NATIVE ) then
             BENILLA_TOOLTIP_RAY_TRACING =
                 "Lets the Modern lighting model use your graphics card's ray-tracing hardware for "
-                .. "the lighting it can trace, such as the light bounced around the world and the "
-                .. "shadows of the world itself. Turn it off if it costs too much frame rate or "
-                .. "misbehaves: the game then lights the world the way it does on cards without ray "
-                .. "tracing. No restart is needed; turned on, it takes a moment to gather the "
-                .. "world around you first. Cards without it ignore this box."
+                .. "the lighting it can trace; the three boxes below choose which. Turn it off if "
+                .. "it costs too much frame rate or misbehaves: the game then lights the world the "
+                .. "way it does on cards without ray tracing. No restart is needed; turned on, it "
+                .. "takes a moment to gather the world around you first. Cards without it ignore "
+                .. "this box."
+            BENILLA_TOOLTIP_RAY_TRACING_GI =
+                "Traces the light bounced around the world by ray instead of through a coarse "
+                .. "copy of it: steadier, more exact indirect light, at about the same frame rate."
+            BENILLA_TOOLTIP_RAY_TRACING_SHADOWS =
+                "Traces the sun's and the lamps' shadows of the world itself by ray: sharp at any "
+                .. "distance, with soft edges that widen away from the caster. Costly: off, the "
+                .. "shadow maps draw them, as they do for characters and creatures either way."
+            BENILLA_TOOLTIP_RAY_TRACING_VOLUMETRICS =
+                "Traces the sun's and the lamps' light through the air by ray, so light shafts "
+                .. "and haze are shadowed by the world beyond the shadow maps' reach."
         end
         BENILLA_TOOLTIP_RENDER_SCALE =
             "Draws the 3D world at a fraction of the window's resolution, or larger than it. "
@@ -796,10 +806,14 @@
                     break
                 end
             end
-            -- fork: native GPU — the Ray Tracing box closes the Lighting section.
+            -- fork: native GPU — the Ray Tracing box and its three lanes close the Lighting
+            -- section.
             for i, rkey in ipairs(graphics) do
                 if ( rkey == "RowAutoExposure" ) then
                     table.insert(graphics, i + 1, "RowRayTracing")
+                    table.insert(graphics, i + 2, "RowRayTracingGI")
+                    table.insert(graphics, i + 3, "RowRayTracingShadows")
+                    table.insert(graphics, i + 4, "RowRayTracingVolumetrics")
                     break
                 end
             end
@@ -1463,6 +1477,19 @@
                 -- UIOptionsFrame.lua:722-726: Right ActionBar 2 needs Right ActionBar.
                 BenillaOptionsRow_SetEnabled(BenillaOptionsFrameContainerBodyActionBarsRowMultiBar4,
                     SHOW_MULTI_ACTIONBAR_3)
+                return
+            end
+            if key == "Graphics" then
+                -- fork: native GPU — the three lanes are dead while Ray Tracing is off, as the
+                -- row shows it (staged or not).
+                if ( BENILLA_NATIVE ) then
+                    local base = "BenillaOptionsFrameContainerBodyGraphics"
+                    local on = BenillaOptionsRow_Shown(getglobal(base .. "RowRayTracing")) ~= "0"
+                    for _, rkey in {"RowRayTracingGI", "RowRayTracingShadows",
+                            "RowRayTracingVolumetrics"} do
+                        BenillaOptionsRow_SetEnabled(getglobal(base .. rkey), on)
+                    end
+                end
                 return
             end
             if key ~= "Audio" then return end
@@ -2971,6 +2998,44 @@
                                                 if ( BENILLA_NATIVE ) then this:Show() end
                                             </OnLoad></Scripts>
                                         </Frame>
+                                        <!-- fork: native GPU — the ray-traced lanes under the
+                                             master (`modern::RayTracingSetting`). -->
+                                        <Frame name="$parentRowRayTracingGI" inherits="BenillaOptionsCheckboxRowTemplate" hidden="true">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowRayTracing" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowRayTracing" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "rayTracingGI", "Ray-Traced Global Illumination",
+                                                    "BENILLA_TOOLTIP_RAY_TRACING_GI", 1)
+                                                this.parentRow = "RowRayTracing"
+                                                if ( BENILLA_NATIVE ) then this:Show() end
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowRayTracingShadows" inherits="BenillaOptionsCheckboxRowTemplate" hidden="true">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowRayTracingGI" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowRayTracingGI" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "rayTracingShadows", "Ray-Traced Shadows",
+                                                    "BENILLA_TOOLTIP_RAY_TRACING_SHADOWS", 1)
+                                                this.parentRow = "RowRayTracing"
+                                                if ( BENILLA_NATIVE ) then this:Show() end
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowRayTracingVolumetrics" inherits="BenillaOptionsCheckboxRowTemplate" hidden="true">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowRayTracingShadows" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowRayTracingShadows" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "rayTracingVolumetrics", "Ray-Traced Volumetrics",
+                                                    "BENILLA_TOOLTIP_RAY_TRACING_VOLUMETRICS", 1)
+                                                this.parentRow = "RowRayTracing"
+                                                if ( BENILLA_NATIVE ) then this:Show() end
+                                            </OnLoad></Scripts>
+                                        </Frame>
                                         <!-- On the CVar, as 1.12's lands: there is no
                                              SetweatherDensity global. -->
                                         <Frame name="$parentRowWeatherDensity" inherits="BenillaOptionsSliderRowTemplate">
@@ -2979,10 +3044,10 @@
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowAutoExposure" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-33"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
-                                                -- fork: native GPU — under the Ray Tracing box
-                                                -- where it shows, the section gap kept.
+                                                -- fork: native GPU — under the Ray Tracing box's
+                                                -- last lane where it shows, the section gap kept.
                                                 if ( BENILLA_NATIVE ) then
-                                                    local above = this:GetParent():GetName() .. "RowRayTracing"
+                                                    local above = this:GetParent():GetName() .. "RowRayTracingVolumetrics"
                                                     this:ClearAllPoints()
                                                     this:SetPoint("TOPLEFT", above, "BOTTOMLEFT", 0, -33)
                                                     this:SetPoint("TOPRIGHT", above, "BOTTOMRIGHT", 0, -33)
@@ -4208,7 +4273,12 @@
             BENILLA_MULTISAMPLE = "Multisampling"
             BENILLA_GRAPHICS_API = "Graphics API"
             -- fork: native GPU — a native client's row only.
-            if ( BENILLA_NATIVE ) then BENILLA_RAY_TRACING = "Ray Tracing" end
+            if ( BENILLA_NATIVE ) then
+                BENILLA_RAY_TRACING = "Ray Tracing"
+                BENILLA_RAY_TRACING_GI = "Ray-Traced Global Illumination"
+                BENILLA_RAY_TRACING_SHADOWS = "Ray-Traced Shadows"
+                BENILLA_RAY_TRACING_VOLUMETRICS = "Ray-Traced Volumetrics"
+            end
             BENILLA_RENDER_SCALE = "Render Scale"
             -- fork: dlss (FORK.md)
             BENILLA_UPSCALER = "Upscaler"
@@ -4516,6 +4586,16 @@
                 tinsert(rows, { category = PIXEL_SHADERS, row = {
                     name = "BENILLA_RAY_TRACING", desc = BENILLA_TOOLTIP_RAY_TRACING,
                     type = "checkbutton", cvar = "rayTracing" } })
+                tinsert(rows, { category = PIXEL_SHADERS, row = {
+                    name = "BENILLA_RAY_TRACING_GI", desc = BENILLA_TOOLTIP_RAY_TRACING_GI,
+                    type = "checkbutton", cvar = "rayTracingGI" } })
+                tinsert(rows, { category = PIXEL_SHADERS, row = {
+                    name = "BENILLA_RAY_TRACING_SHADOWS", desc = BENILLA_TOOLTIP_RAY_TRACING_SHADOWS,
+                    type = "checkbutton", cvar = "rayTracingShadows" } })
+                tinsert(rows, { category = PIXEL_SHADERS, row = {
+                    name = "BENILLA_RAY_TRACING_VOLUMETRICS",
+                    desc = BENILLA_TOOLTIP_RAY_TRACING_VOLUMETRICS,
+                    type = "checkbutton", cvar = "rayTracingVolumetrics" } })
             end
             -- A row placed by its neighbour: the category holding the Turtle row of that name.
             local function placeBeside(entry)
@@ -4578,7 +4658,8 @@
                 { name = "Lighting", from = PIXEL_SHADERS, rows = {
                     "BENILLA_LIGHTING_MODEL", "BENILLA_LIGHTING_QUALITY", "BENILLA_WORLD_SHADOWS",
                     "BENILLA_AMBIENT_OCCLUSION", "BENILLA_INDIRECT_LIGHT", "BENILLA_AUTO_EXPOSURE",
-                    "BENILLA_RAY_TRACING" } },
+                    "BENILLA_RAY_TRACING", "BENILLA_RAY_TRACING_GI", "BENILLA_RAY_TRACING_SHADOWS",
+                    "BENILLA_RAY_TRACING_VOLUMETRICS" } },
                 { name = "Weather & Time", rows = {
                     "WEATHER_DETAIL", "BENILLA_RAIN_SURFACES", "BENILLA_FOLIAGE_WIND",
                     "BENILLA_FOLIAGE_WIND_STRENGTH", "BENILLA_SERVER_TIME_OFFSET" } },

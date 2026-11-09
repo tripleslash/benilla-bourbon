@@ -15,7 +15,8 @@
 //!   [`RtScene`] exists exactly where it holds, and every pipeline that can trace declares the
 //!   scene for the whole session, so nothing re-specializes on a switch.
 //! - **enabled** ([`enabled`]): capable, and something asks for the scene this frame: the
-//!   `rayTracing` option ([`crate::modern::RayTracingSetting`]) or the water's ray-traced tier
+//!   ray-tracing options, a lane of them on ([`crate::modern::RayTracingSetting`]: `rayTracing`
+//!   and `rayTracingGI`, `rayTracingShadows` or `rayTracingVolumetrics`) or the water's ray-traced tier
 //!   ([`crate::modern::rt_reflect::RtWaterTier`], `waterDetail` 4, where the session may trace
 //!   reflections), both extracted every frame. Read each frame. While it holds, the scene is built
 //!   and kept; when it drops, every BLAS, the TLAS, the arenas and the scratch are freed
@@ -24,11 +25,12 @@
 //!   static_gx holds and every resident terrain cell has its BLAS, nothing the camera has not drawn
 //!   is still waiting to be assembled, and the TLAS holds them, for [`READY_FRAMES`] frames in a
 //!   row. Once live, streaming does not drop it: only an empty scene, or more entries waiting than
-//!   built, sends the lanes back to raster. Who traces follows who asked: the option's lanes
+//!   built, sends the lanes back to raster. Who traces follows who asked: the options' lanes
 //!   (`modern::gi::rt_gi`, `modern::shadow::rt_shadows`, `modern::volumetrics::rt_froxel`) key on
-//!   [`option_live`] (live, and the option on), the water's (`modern::rt_reflect::rt_reflections`)
-//!   on [`water_live`] (live, and the water's tier asking), per frame. With only the water asking,
-//!   the shadows, the probe GI and the froxels stay on raster.
+//!   [`gi_live`], [`shadows_live`] and [`froxels_live`] (live, and that lane's option on), the
+//!   water's (`modern::rt_reflect::rt_reflections`) on [`water_live`] (live, and the water's tier
+//!   asking), per frame. A lane whose option is off stays on raster while the scene is live for
+//!   another.
 //!
 //! The three are decided once a frame, in `PrepareAssets` ([`update_rt_tier`]), before anything
 //! reads them, so every pass of a frame agrees. A pass that declares the scene binds
@@ -150,8 +152,11 @@ static CAPABLE: AtomicBool = AtomicBool::new(false);
 static DECIDED: AtomicBool = AtomicBool::new(false);
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static LIVE: AtomicBool = AtomicBool::new(false);
-/// Who asked for the scene this frame: the `rayTracing` option, the water's ray-traced tier.
-static OPTION: AtomicBool = AtomicBool::new(false);
+/// Who asked for the scene this frame: each lane of the ray-tracing options, the water's
+/// ray-traced tier.
+static OPTION_GI: AtomicBool = AtomicBool::new(false);
+static OPTION_SHADOWS: AtomicBool = AtomicBool::new(false);
+static OPTION_FROXELS: AtomicBool = AtomicBool::new(false);
 static WATER: AtomicBool = AtomicBool::new(false);
 /// Regions the camera has not drawn still waiting to be assembled, as [`assemble_unseen`] left
 /// them this frame: part of the scene's readiness.
@@ -168,8 +173,8 @@ pub(crate) fn decided() -> bool {
     DECIDED.load(Ordering::Relaxed)
 }
 
-/// Capable, and the `rayTracing` option or the water's ray-traced tier asks this frame: the scene
-/// is (being) built.
+/// Capable, and a lane of the ray-tracing options or the water's ray-traced tier asks this frame:
+/// the scene is (being) built.
 pub(crate) fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
@@ -180,14 +185,23 @@ pub(crate) fn live() -> bool {
     LIVE.load(Ordering::Relaxed)
 }
 
-/// Live, and the `rayTracing` option on this frame: the option's lanes (shadows, probe GI,
-/// froxels) trace. False while only the water's tier holds the scene.
-pub(crate) fn option_live() -> bool {
-    live() && OPTION.load(Ordering::Relaxed)
+/// Live, and the probe GI's option on this frame (`rayTracing` and `rayTracingGI`).
+pub(crate) fn gi_live() -> bool {
+    live() && OPTION_GI.load(Ordering::Relaxed)
+}
+
+/// Live, and the shadows' option on this frame (`rayTracing` and `rayTracingShadows`).
+pub(crate) fn shadows_live() -> bool {
+    live() && OPTION_SHADOWS.load(Ordering::Relaxed)
+}
+
+/// Live, and the froxels' option on this frame (`rayTracing` and `rayTracingVolumetrics`).
+pub(crate) fn froxels_live() -> bool {
+    live() && OPTION_FROXELS.load(Ordering::Relaxed)
 }
 
 /// Live, and the water's ray-traced tier asking this frame (`modern::rt_reflect`): the water may
-/// reflect by ray, whatever the `rayTracing` option says.
+/// reflect by ray, whatever the ray-tracing options say.
 pub(crate) fn water_live() -> bool {
     live() && WATER.load(Ordering::Relaxed)
 }
@@ -208,8 +222,10 @@ pub(crate) struct RtTier {
     pub capable: bool,
     pub enabled: bool,
     pub live: bool,
-    /// Who asks for the scene this frame: the `rayTracing` option, the water's ray-traced tier.
-    pub option: bool,
+    /// Who asks for the scene this frame: the ray-tracing options (the master folded into each
+    /// lane), the water's ray-traced tier.
+    /// `None` before the first frame.
+    pub option: Option<crate::modern::RayTracingSetting>,
     pub water: bool,
     /// Render frames since startup: the switch lines' clock.
     pub frame: u32,
@@ -622,7 +638,7 @@ impl RtScene {
         self.was_pending = false;
     }
 
-    /// The `rayTracing` option is off: drop every entry and free the memory the scene holds — every
+    /// No ray-tracing option lane asks: drop every entry and free the memory the scene holds — every
     /// BLAS (with its entry and its TLAS instance), the TLAS (replaced by a one-instance one, grown
     /// again on the first build), the instance table, the attribute and terrain-index arenas, the
     /// scratch and the repack jobs. Only the stand-in stays. Dropping a handle while a submitted
@@ -1306,16 +1322,16 @@ pub(crate) fn init_rt_scene(
         .filter(|&b| b > 0)
         .unwrap_or(DEFAULT_BUDGET);
     info!(
-        "rt_scene: ray tracing capable, {budget} triangles a frame; the rayTracing option switches \
+        "rt_scene: ray tracing capable, {budget} triangles a frame; the ray-tracing options switch \
          it at run time (WOW_RT=0 turns it off for the session)"
     );
     commands.insert_resource(RtScene::new(&device, repack_layout, repack, budget));
 }
 
-/// `PrepareAssets`, first thing each frame: decide [`RtTier::enabled`] (capable, and the
-/// `rayTracing` option or the water's ray-traced tier asking) and [`RtTier::live`] (enabled and the
+/// `PrepareAssets`, first thing each frame: decide [`RtTier::enabled`] (capable, and a lane of the
+/// ray-tracing options or the water's ray-traced tier asking) and [`RtTier::live`] (enabled and the
 /// scene ready as the last frame left it), publish both and who asked for every world
-/// ([`enabled`], [`live`], [`option_live`], [`water_live`]), and log one line at each switch: the
+/// ([`enabled`], [`live`], [`gi_live`], [`shadows_live`], [`froxels_live`], [`water_live`]), and log one line at each switch: the
 /// requested and the effective state, the frame, and at a going-live how long the scene took.
 fn update_rt_tier(
     setting: Option<Res<crate::modern::RayTracingSetting>>,
@@ -1328,25 +1344,38 @@ fn update_rt_tier(
     };
     tier.frame = tier.frame.wrapping_add(1);
     let frame = tier.frame;
-    let option = setting.is_none_or(|s| s.0);
-    let water =
-        water.is_some_and(|w| w.0) && crate::modern::rt_reflect::rt_reflections_capable();
-    if (option, water) != (tier.option, tier.water) && tier.capable {
+    // No setting (a stripped app): every lane its registered default. Each lane carries the
+    // master, so `option` compares and logs what traces, not what the rows hold.
+    let s = setting.map_or(crate::modern::RayTracingSetting::DEFAULT, |s| *s);
+    let option = crate::modern::RayTracingSetting {
+        on: s.any_on(),
+        gi: s.gi_on(),
+        shadows: s.shadows_on(),
+        volumetrics: s.volumetrics_on(),
+    };
+    let water = water.is_some_and(|w| w.0) && crate::modern::rt_reflect::rt_reflections_capable();
+    if (Some(option), water) != (tier.option, tier.water) && tier.capable {
         info!(
             "rt: at frame {frame} the scene is asked for by {}",
-            match (option, water) {
-                (true, true) => "the rayTracing option and the water's RT tier",
-                (true, false) => "the rayTracing option",
+            match (option.on, water) {
+                (true, true) => "the ray-tracing options and the water's RT tier",
+                (true, false) => "the ray-tracing options",
                 (false, true) => "the water's RT tier alone (shadows, GI and froxels on raster)",
                 (false, false) => "nothing",
             }
         );
+        info!(
+            "rt: lanes asked at frame {frame}: gi {}, shadows {}, froxels {}",
+            option.gi, option.shadows, option.volumetrics
+        );
     }
-    tier.option = option;
+    tier.option = Some(option);
     tier.water = water;
-    OPTION.store(option, Ordering::Relaxed);
+    OPTION_GI.store(option.gi, Ordering::Relaxed);
+    OPTION_SHADOWS.store(option.shadows, Ordering::Relaxed);
+    OPTION_FROXELS.store(option.volumetrics, Ordering::Relaxed);
     WATER.store(water, Ordering::Relaxed);
-    let requested = option || water;
+    let requested = option.on || water;
     let enabled = tier.capable && requested;
     let scene = scene.as_deref();
     let live = enabled && scene.is_some_and(|s| s.ready);

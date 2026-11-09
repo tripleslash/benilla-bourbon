@@ -95,7 +95,7 @@ pub const WATER_DETAIL_EXPERIMENTAL: u8 = 3;
 /// fork: native GPU — the experimental tier with its planar mirror replaced by ray-traced
 /// reflections (`modern::rt_reflect`): the same combine, the reflected world found by one ray query
 /// per pixel against the ray-traced scene. "Experimental (RT)" on the options page. Independent of
-/// the `rayTracing` option: this tier alone asks for the scene for the water. Where the session
+/// the ray-tracing options: this tier alone asks for the scene for the water. Where the session
 /// cannot ray-trace (the web, no ray queries, `WOW_RT=0`, `WOW_RT_REFLECT=0`) it renders as
 /// [`WATER_DETAIL_EXPERIMENTAL`], mirror and all.
 pub const WATER_DETAIL_RT: u8 = 4;

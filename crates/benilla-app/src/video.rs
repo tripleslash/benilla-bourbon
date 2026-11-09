@@ -149,8 +149,8 @@ pub(crate) fn with_render_api(
         render_creation: bevy::render::settings::WgpuSettings {
             backends: Some(boot_render_backends()),
             // Pipeline statistics only under `WOW_GPU_STATS` (`benilla_world::boot`'s gate).
-            // fork: the hardware ray-tracing features stay whatever `rayTracing` says: the option
-            // switches the ray-traced lanes at run time (`benilla_world::modern::RayTracingSetting`).
+            // fork: the hardware ray-tracing features stay whatever the `rayTracing*` rows say:
+            // they switch the ray-traced lanes at run time (`benilla_world::modern::RayTracingSetting`).
             disabled_features: benilla_world::perf_probe::gpu_stats::disabled_features(),
             ..default()
         }
@@ -482,7 +482,7 @@ pub(crate) struct VideoKnobs<'w> {
         Option<ResMut<'w, benilla_world::modern::look::AutoExposure>>,
         // fork: the terrain horizon (FORK.md) — `lod` and `lodDist`.
         Option<ResMut<'w, benilla_world::horizon::HorizonCulling>>,
-        // fork: native GPU — `rayTracing`, switched at run time.
+        // fork: native GPU — `rayTracing` and its three lanes, switched at run time.
         Option<ResMut<'w, benilla_world::modern::RayTracingSetting>>,
     ),
 }
@@ -539,9 +539,15 @@ impl VideoKnobs<'_> {
             "farclip" => view.farclip = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end()),
             // fork: native GPU — the ray-traced lanes may run (or not) from the next frame; the
             // render world keeps them on raster until its scene is rebuilt.
-            "raytracing" => {
+            "raytracing" | "raytracinggi" | "raytracingshadows" | "raytracingvolumetrics" => {
                 if let Some(rt) = fork.9.as_deref_mut() {
-                    rt.0 = ev.flag();
+                    let lane = match ev.key().as_str() {
+                        "raytracing" => &mut rt.on,
+                        "raytracinggi" => &mut rt.gi,
+                        "raytracingshadows" => &mut rt.shadows,
+                        _ => &mut rt.volumetrics,
+                    };
+                    *lane = ev.flag();
                 }
             }
             // World flag 4 (`0x688920`): the chunk level the horizon rows are taken at.
