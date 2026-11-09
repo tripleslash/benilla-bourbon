@@ -39,7 +39,7 @@ pub const BINDING_ARRAY_ELEMENTS: u32 = 2048;
 /// The device's native-only capabilities. Default is all false: what the browser has.
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HwCaps {
-    /// Texture and buffer binding arrays, indexed non-uniformly, with at least
+    /// Texture binding arrays, indexed non-uniformly, with at least
     /// [`BINDING_ARRAY_ELEMENTS`] elements per stage.
     pub binding_arrays: bool,
     /// `multi_draw_indexed_indirect_count` in hardware, with each draw's own `first_instance`
@@ -88,8 +88,8 @@ impl HwCaps {
         if cfg!(target_arch = "wasm32") {
             return Self::default();
         }
+        // Texture arrays only: no shader binds a buffer array, and DX12 exposes none (wgpu-hal).
         let arrays = WgpuFeatures::TEXTURE_BINDING_ARRAY
-            | WgpuFeatures::BUFFER_BINDING_ARRAY
             | WgpuFeatures::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
         Self {
             binding_arrays: features.contains(arrays)
