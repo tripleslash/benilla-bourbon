@@ -13,7 +13,6 @@
 //
 // Group 1 is static_gx's own cell layout, bound unchanged (see `static_gx.wgsl`); under
 // `GX_BINDLESS` the shared region table (`benilla_modern::gx_bindless`).
-#import benilla_modern::colorspace
 #ifdef GX_BINDLESS
 #import benilla_modern::gx_bindless
 #endif
@@ -139,11 +138,10 @@ fn fragment(in: VoxelVsOut) {
             discard;
         }
 #endif
+        // The pool keeps the images' unorm formats, so the sample is the authored value the modern
+        // lanes light in, and the probes match them.
         albedo = texel.rgb;
     }
-    // The pool's arrays are sRGB views, so the sample arrives linear; the modern lanes light in the
-    // authored value space, and the probes have to match them.
-    albedo = colorspace::linear_to_srgb(albedo);
 
 #ifdef VOXEL_CONSERVATIVE
 #ifdef TWO_SIDED

@@ -17,7 +17,6 @@ enable wgpu_ray_query;
 #import benilla_modern::probegi
 #import benilla_modern::sunshadow
 #import benilla_modern::locallight
-#import benilla_modern::colorspace
 #import benilla_modern::rt_scene
 // fork: F — the ray-traced shadows, where they run.
 #ifdef RT_SHADOWS
@@ -164,9 +163,9 @@ fn cast_ray(origin: vec3<f32>, dir: vec3<f32>, t_min: f32, reach: f32) -> RtHit 
     var albedo = UNTEXTURED;
     if ((word & rt_scene::WORD_TEXTURED) != 0u) {
         let uv = rt_scene::vertex_uv(v.x) * w.x + rt_scene::vertex_uv(v.y) * w.y + rt_scene::vertex_uv(v.z) * w.z;
-        // The pool's arrays are sRGB views, so the sample arrives linear; the probes light in the
-        // authored value space, as `static_gx_voxel.wgsl` writes the voxel.
-        albedo = colorspace::linear_to_srgb(rt_scene::texel(inst.row, word, uv, ALBEDO_MIP).rgb);
+        // The pool keeps the images' unorm formats, so the sample is the authored value the probes
+        // light in, as `static_gx_voxel.wgsl` writes the voxel.
+        albedo = rt_scene::texel(inst.row, word, uv, ALBEDO_MIP).rgb;
     }
     let two_sided = select(0.0, 1.0, hit.geometry_index == inst.cutout_geometry);
     return RtHit(1.0, hit.t, pos, albedo, nrm, two_sided);
