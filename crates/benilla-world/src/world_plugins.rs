@@ -235,8 +235,8 @@ impl Plugin for WorldFoundation {
                 mb * 1024 * 1024,
             ));
         }
-        // Direct draws on every camera; `$WOW_ENTITY_GPU_CULL=1` puts the world camera on the
-        // indirect lane with the depth prepass and GPU occlusion culling (`entity_cull`).
+        // The world camera on the indirect lane with the depth prepass and GPU occlusion culling
+        // (`entity_cull`); `$WOW_ENTITY_GPU_CULL=0` puts every camera on direct draws.
         app.add_plugins(crate::entity_cull::EntityCullPlugin);
     }
 
