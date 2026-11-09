@@ -82,10 +82,9 @@
 #import benilla_modern::rtshadow
 #endif
 // fork: G — the ray-traced reflections (`benilla_modern::rtreflect`, native only), where that lane
-// may run; the hits take their ambient from the probe field.
+// may run.
 #ifdef RT_REFLECT
 #import benilla_modern::rtreflect
-#import benilla_modern::probegi
 #endif
 #import bevy_pbr::{
     mesh_functions,
@@ -136,8 +135,8 @@ struct LiquidParams {
     // z = is `reflect_map` live this frame (the reference's `HasFakeReflection`);
     // w = the world Y the mirror was rendered about (`liquid::reflect`'s plane).
     path: vec4<f32>,
-    // x = fork: G — the ray-traced reflection lane stands in for the mirror this frame (0 no, 1 the
-    // Hi-Z march then a ray, 2 a ray alone; native only, `liquid::reflect`); y = frame count;
+    // x = fork: G — the ray-traced reflection lane stands in for the mirror this frame (0 no, 1 by
+    // ray; native only, `waterDetail` 4, `liquid::reflect`); y = frame count;
     // z = scroll flag; w = clock enable.
     anim: vec4<f32>,
     // x/y = the two bump tiling scales; z = scroll rate; w = bump strength (the reference's c23.w).
@@ -469,185 +468,102 @@ fn mirror_read_rough(uv: vec2<f32>, lost: vec3<f32>, v: vec3<f32>, d_eye: f32, r
 }
 
 #ifdef RT_REFLECT
-// fork: G — **the ray-traced reflection lane** (`benilla_world`'s `modern::rt_reflect`): where it
-// stands in for the mirror (`anim.x`: 1 march then ray, 2 ray alone), the reflected ray is marched
-// through this frame's Hi-Z pyramid (`scene_depth`'s levels: the nearest linear depth per cell),
-// and what the screen cannot answer — the ray leaves it, or passes behind what it shows — is one ray
-// query against the scene, while the scene is live for this lane (`light_spare[12].y`).
+// fork: G — **the ray-traced reflection lane** (`benilla_world`'s `modern::rt_reflect`, the
+// `waterDetail` 4 tier): where it stands in for the mirror (`anim.x`), the reflected ray is one ray
+// query against the scene, while the scene is live for this lane (`light_spare[12].y`), and its hit
+// is the colour the mirror's own render would have drawn there: lit as that render lights the
+// surface, fogged as its fog composite fogs it, in the mirror buffer's value space.
 //
-// The march's steps, how far behind its surface a ray may reach and still count as hitting it (yd,
-// plus a share of the depth), and how far it looks (yd).
-const LANE_SSR_STEPS: u32 = 64u;
-const LANE_SSR_THICK_YD: f32 = 0.35;
-const LANE_SSR_THICK_REL: f32 = 0.02;
-const LANE_SSR_REACH_YD: f32 = 600.0;
 // The reflected ray's start above the surface (yd), and the ray query's reach where no far clip is
 // set (yd).
 const LANE_LIFT_YD: f32 = 0.05;
 const LANE_REACH_YD: f32 = 1200.0;
-// The probe lookup's lift off a hit along its normal (yd), out of the surface the probes sit around.
-const LANE_PROBE_LIFT_YD: f32 = 0.5;
-// The ground's albedo where the probe field has none to give (the authored value space).
-const LANE_GROUND: vec3<f32> = vec3<f32>(0.3, 0.28, 0.22);
+// The ground's albedo where the probe field has none to give (the authored value space,
+// `modern::gi::GROUND_ALBEDO`): the splat set is not in the scene.
+const LANE_GROUND: vec3<f32> = vec3<f32>(0.40, 0.37, 0.31);
+// static_gx's vertex word bits the hit's lighting reads (`static_gx.wgsl`'s WORD_*).
+const LANE_WORD_UNLIT: u32 = 262144u;
+const LANE_WORD_WMO: u32 = 4194304u;
+const LANE_WORD_INTERIOR: u32 = 8388608u;
+const LANE_WORD_HAS_VC: u32 = 134217728u;
 
-// Where the march ended: `state` 0 a hit at `uv`, 1 the ray left the screen or the steps ran out,
-// 2 the ray passed behind what the screen shows.
-struct LaneMarch {
-    uv: vec2<f32>,
-    state: u32,
-}
-
-// The reflected colour in the reflection's lane (gamma, as the mirror read), what share of it the
-// world fills (the rest is the sky handed in), and what share was fogged where it was drawn.
+// The reflected colour in the reflection's lane (gamma, as the mirror read), and what share of it
+// already carries its fog (a hit, fogged here as the mirror fogs it; the sky handed in does not).
 struct LaneReflection {
     rgb: vec3<f32>,
-    found: f32,
     fogged: f32,
 }
 
-// The Hi-Z march: the ray projected once, then walked in screen space, where uv and 1/depth are
-// both affine along it. A cell whose nearest depth the ray stays in front of is skipped and the walk
-// climbs a level; one it may reach is descended; at level 0 the crossing is found and the ray is
-// a hit if it lies within the thickness of the surface there, else it went behind it.
-fn lane_march(origin: vec3<f32>, dir: vec3<f32>) -> LaneMarch {
-    var res = LaneMarch(vec2<f32>(0.0), 1u);
-    let levels = i32(textureNumLevels(scene_depth));
-    if (levels < 2) {
-        return res;
-    }
-    let vo = (view.view_from_world * vec4<f32>(origin, 1.0)).xyz;
-    let vd = (view.view_from_world * vec4<f32>(dir, 0.0)).xyz;
-    // A ray coming back toward the eye ends short of it.
-    var reach = LANE_SSR_REACH_YD;
-    if (vd.z > 1e-4) {
-        reach = min(reach, (-vo.z - 0.1) / vd.z);
-    }
-    if (reach <= 0.0) {
-        return res;
-    }
-    let h0 = view.clip_from_view * vec4<f32>(vo, 1.0);
-    let h1 = view.clip_from_view * vec4<f32>(vo + vd * reach, 1.0);
-    let k0 = 1.0 / h0.w;
-    let k1 = 1.0 / h1.w;
-    let uv0 = (h0.xy * k0 * vec2<f32>(1.0, -1.0) + 1.0) * 0.5;
-    let uv1 = (h1.xy * k1 * vec2<f32>(1.0, -1.0) + 1.0) * 0.5;
-    let duv = uv1 - uv0;
-    let dk = k1 - k0;
-    // Where the projected ray leaves the screen.
-    var t_end = 1.0;
-    if (duv.x > 0.0) {
-        t_end = min(t_end, (1.0 - uv0.x) / duv.x);
-    } else if (duv.x < 0.0) {
-        t_end = min(t_end, -uv0.x / duv.x);
-    }
-    if (duv.y > 0.0) {
-        t_end = min(t_end, (1.0 - uv0.y) / duv.y);
-    } else if (duv.y < 0.0) {
-        t_end = min(t_end, -uv0.y / duv.y);
-    }
-    let pix = length(duv * vec2<f32>(textureDimensions(scene_depth, 0)));
-    if (pix < 1.0) {
-        return res;
-    }
-    // A pixel out, past the surface's own; and a hundredth of one, to step over a cell's edge.
-    var t = 1.0 / pix;
-    let nudge = 0.01 / pix;
-    var level = 0;
-    for (var i = 0u; i < LANE_SSR_STEPS; i = i + 1u) {
-        if (t >= t_end) {
-            return res;
-        }
-        let uv = uv0 + duv * t;
-        let dims = vec2<f32>(textureDimensions(scene_depth, level));
-        let cell = clamp(floor(uv * dims), vec2<f32>(0.0), dims - 1.0);
-        let edge = (cell + select(vec2<f32>(0.0), vec2<f32>(1.0), duv > vec2<f32>(0.0))) / dims;
-        var t_cell = t_end;
-        if (abs(duv.x) > 1e-8) {
-            t_cell = min(t_cell, (edge.x - uv0.x) / duv.x);
-        }
-        if (abs(duv.y) > 1e-8) {
-            t_cell = min(t_cell, (edge.y - uv0.y) / duv.y);
-        }
-        t_cell = max(t_cell, t);
-        let near = textureLoad(scene_depth, vec2<i32>(cell), level).x;
-        let k_near = 1.0 / max(near, 1e-4);
-        // The ray's farthest point inside the cell: the smaller 1/depth of its two ends.
-        let k_far = min(k0 + dk * t, k0 + dk * t_cell);
-        if (k_far > k_near) {
-            t = t_cell + nudge;
-            level = min(level + 1, levels - 1);
-        } else if (level > 0) {
-            level = level - 1;
-        } else {
-            var t_hit = t;
-            if (abs(dk) > 1e-12) {
-                t_hit = clamp((k_near - k0) / dk, t, t_cell);
-            }
-            let behind = 1.0 / max(k0 + dk * t_hit, 1e-9) - near;
-            res.uv = uv0 + duv * t_hit;
-            res.state = select(2u, 0u, behind <= LANE_SSR_THICK_YD + near * LANE_SSR_THICK_REL);
-            return res;
-        }
-    }
-    return res;
-}
-
-// A reflected hit lit as the world lights it, in the authored value space: the texel (the ground's
-// albedo on terrain) times the ambient — the nearest probe where the field is on, else the ambient
-// row — and the key light under the scene's sun ray and the cloud shadow.
+// A reflected hit lit as the water mirror's render lights it, in the authored value space: the
+// mirror takes none of the modern lanes (`sunshadow::mirror_view`: no probe field, sky map or light
+// grid), so this is `static_gx.wgsl`'s `modern_gx_rgb` with `modern_lite`. A WMO surface: the texel
+// times the ambient and the sun's N·L (its MOCV dropped outside, kept inside), plus its SIDN glow by
+// night; a doodad: the texel times its vertex colour times the `Model2` SH sun lobe; terrain: the
+// ground's albedo under the WMO light. The sun is the scene's ray times the cloud shadow, where the
+// mirror has none (`hit.sun`).
 fn lane_shade(hit: rtreflect::ReflectHit, to_sun: vec3<f32>) -> vec3<f32> {
-    let g = modern_block.gi;
-    var albedo = hit.albedo;
-    if (hit.kind == 2u) {
-        albedo = select(LANE_GROUND, g.ground.rgb, dot(g.ground.rgb, vec3<f32>(1.0)) > 0.0);
-    }
-    var ambient = wow_light.light_ambient.rgb;
-    if (g.params.x > 0.5) {
-        let found = probegi::nearest_index(g, hit.position + hit.normal * LANE_PROBE_LIFT_YD);
-        if (found.y > 0.5) {
-            let probe = modern_block.probes[u32(found.x)];
-            if (probe.dc.w > 0.0) {
-                let n = hit.normal;
-                ambient = max(probe.dc.rgb + probe.sh_x.rgb * n.x + probe.sh_y.rgb * n.y + probe.sh_z.rgb * n.z, vec3<f32>(0.0));
-            }
-        }
-    }
+    let n = hit.normal;
+    let amb = wow_light.light_ambient.rgb;
+    let ndotl = max(dot(n, to_sun), 0.0);
     let ct = sunshadow::cloud_taps(modern_block.fog.cloud, hit.position);
     let cloud = sunshadow::cloud_mix(ct, modern_block.cloud[ct.idx.x], modern_block.cloud[ct.idx.y], modern_block.cloud[ct.idx.z], modern_block.cloud[ct.idx.w]);
-    let key = wow_light.light_diffuse.rgb * wow_light.light_sun.w;
-    return albedo * (ambient + key * (max(dot(hit.normal, to_sun), 0.0) * hit.sun * cloud));
+    let shadow = hit.sun * cloud;
+    let lit_nl = clamp(amb + wow_light.light_diffuse.rgb * ndotl, vec3<f32>(0.0), vec3<f32>(1.0));
+    let lit_nl_shadowed = clamp(amb + (lit_nl - amb) * shadow, vec3<f32>(0.0), vec3<f32>(1.0));
+    if (hit.kind == 2u) {
+        let g = modern_block.gi.ground.rgb;
+        let ground = select(LANE_GROUND, g, dot(g, vec3<f32>(1.0)) > 0.0);
+        return ground * lit_nl_shadowed;
+    }
+    let has_vc = (hit.word & LANE_WORD_HAS_VC) != 0u;
+    let vc = select(vec4<f32>(1.0), hit.color, has_vc);
+    let folded = select(hit.albedo, hit.albedo * vc.rgb, has_vc);
+    if ((hit.word & LANE_WORD_UNLIT) != 0u) {
+        return folded;
+    }
+    if ((hit.word & LANE_WORD_WMO) != 0u) {
+        if ((hit.word & LANE_WORD_INTERIOR) != 0u) {
+            return hit.albedo * clamp(vc.rgb * lit_nl, vec3<f32>(0.0), vec3<f32>(1.0));
+        }
+        let sidn_e = hit.sidn * wow_light._grade.x;
+        return hit.albedo * clamp(lit_nl_shadowed + sidn_e, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    // The doodad lane's order-2 SH sun lobe (`_sh` rows: c10 r, g, b, then c13 r, g, b).
+    let quad = vec4<f32>(n.x * n.y, n.y * n.z, n.z * n.z, n.x * n.z);
+    let x2y2 = n.x * n.x - n.y * n.y;
+    let sun_dc = wow_light._grade.yzw;
+    let sun_ambient = vec3<f32>(wow_light._sh[0].w, wow_light._sh[1].w, wow_light._sh[2].w);
+    let sun_lobe = vec3<f32>(
+        sun_ambient.x + sun_dc.x + dot(wow_light._sh[0].xyz, n) + dot(wow_light._sh[3], quad) + wow_light._sh_c16.x * x2y2,
+        sun_ambient.y + sun_dc.y + dot(wow_light._sh[1].xyz, n) + dot(wow_light._sh[4], quad) + wow_light._sh_c16.y * x2y2,
+        sun_ambient.z + sun_dc.z + dot(wow_light._sh[2].xyz, n) + dot(wow_light._sh[5], quad) + wow_light._sh_c16.z * x2y2,
+    );
+    let lit_doodad = clamp(sun_ambient + max(sun_lobe - sun_ambient, vec3<f32>(0.0)) * shadow, vec3<f32>(0.0), vec3<f32>(1.0));
+    // Sun disabled (`light_sun.w`) falls back to the plain light, as static_gx's doodad lane.
+    return folded * select(lit_nl_shadowed, lit_doodad, wow_light.light_sun.w > 0.5);
 }
 
-// The lane's reflection along `dir` from the surface at `surface`, over `sky` where nothing is found.
-// The march's hit fades out toward the screen's edge (the trace's quartic) into the ray's.
+// The lane's reflection along `dir` from the surface at `surface`, over `sky` where nothing is
+// found: the hit's lit colour decoded to the linear radiance the mirror buffer holds, fogged at its
+// own position from this frame's fog volume as the fog composite fogs the mirror's pixels
+// (`froxelfog::fog_at`, the main view's volume at the world point), and handed back gamma, as the
+// water reads the mirror (`modern_in`).
 fn lane_reflection(surface: vec3<f32>, dir: vec3<f32>, sky: vec3<f32>) -> LaneReflection {
-    let origin = surface + vec3<f32>(0.0, LANE_LIFT_YD, 0.0);
-    var screen = 0.0;
-    var near_rgb = sky;
-    if (w.anim.x < 1.5) {
-        let m = lane_march(origin, dir);
-        if (m.state == 0u) {
-            let q = m.uv * 2.0 - 1.0;
-            let q2 = q * q;
-            let q4 = q2 * q2;
-            screen = clamp(1.0 - q4.x, 0.0, 1.0) * clamp(1.0 - q4.y, 0.0, 1.0);
-            near_rgb = colorspace::modern_in(textureSampleLevel(scene_blur, scene_samp, m.uv, 0.0).rgb, wow_light.point_count.y);
-        }
-    }
-    var far_rgb = sky;
-    var far_found = 0.0;
     // The row is loaded before a component is picked.
     let lanes = modern_block.light_spare[12];
-    if (screen < 1.0 && lanes.y > 0.5) {
-        let to_sun = -normalize(wow_light.light_sun.xyz);
-        let reach = select(LANE_REACH_YD, wow_light.fog_params.w, wow_light.fog_params.w > 0.0);
-        let hit = rtreflect::trace(origin, dir, 0.0, reach, to_sun);
-        if (hit.kind != 0u) {
-            far_rgb = lane_shade(hit, to_sun);
-            far_found = 1.0;
-        }
+    if (lanes.y < 0.5) {
+        return LaneReflection(sky, 0.0);
     }
-    return LaneReflection(mix(far_rgb, near_rgb, screen), mix(far_found, 1.0, screen), screen);
+    let origin = surface + vec3<f32>(0.0, LANE_LIFT_YD, 0.0);
+    let to_sun = -normalize(wow_light.light_sun.xyz);
+    let reach = select(LANE_REACH_YD, wow_light.fog_params.w, wow_light.fog_params.w > 0.0);
+    let hit = rtreflect::trace(origin, dir, 0.0, reach, to_sun);
+    if (hit.kind == 0u) {
+        return LaneReflection(sky, 0.0);
+    }
+    let lit = colorspace::srgb_to_linear(lane_shade(hit, to_sun));
+    let fog = froxelfog::fog_at(modern_fog_volume, scene_samp, modern_block.fog, hit.position);
+    return LaneReflection(colorspace::linear_to_srgb(lit * fog.a + fog.rgb), 1.0);
 }
 #endif
 

@@ -2,10 +2,11 @@ enable wgpu_ray_query;
 
 // fork: G — the ray-traced half of the water's reflection (`modern::rt_reflect`, native only): one
 // reflected ray as a ray query against `benilla_modern::rt_scene`'s TLAS (the static world and the
-// terrain, cutout texels alpha-tested), its hit taken as far as the probe trace takes one
-// (`gi_trace_rt.wgsl`'s `cast`): the vertex normal, the texel at a mip in the authored value space,
-// and the sun by one ray through the scene (`rtshadow::sun_ray`). The water lights it with its own
-// rows and probes; a terrain hit leaves its albedo to the caller, the splat not being in the scene.
+// terrain, cutout texels alpha-tested), and what the water needs to light its hit as the mirror's
+// own render lights that surface: the vertex normal, the texel in the authored value space, the
+// vertex colour and the item's word and SIDN, and the sun by one ray through the scene
+// (`rtshadow::sun_ray`). A terrain hit leaves its albedo to the caller, the splat not being in the
+// scene.
 //
 // Every value this module hands back is a plain struct, so the importer declares no ray-query type
 // and needs no `enable` of its own (as with `rtshadow`). Imported as `benilla_modern::rtreflect`,
@@ -14,13 +15,10 @@ enable wgpu_ray_query;
 
 #import benilla_modern::rt_scene
 #import benilla_modern::rtshadow
-#import benilla_modern::colorspace
 
-// The texel level a reflected hit reads: the water reads the mirror and the screen through a
-// quarter-resolution blur, and a hit two levels down is about as soft.
+// The texel level a reflected hit reads: the mirror renders at a reduced size and the water reads
+// it through a blurred chain, and a hit two levels down is about as soft.
 const ALBEDO_MIP: f32 = 2.0;
-// `static_gx_voxel.wgsl`'s untextured albedo, as the probe trace takes it.
-const UNTEXTURED: vec3<f32> = vec3<f32>(0.5);
 // The sun ray's start off the hit, along its normal (yd).
 const SUN_LIFT_YD: f32 = 0.05;
 
@@ -32,9 +30,16 @@ struct ReflectHit {
     position: vec3<f32>,
     // The interpolated vertex normal in world space, turned to face the ray.
     normal: vec3<f32>,
-    // A static hit's texel colour in the authored value space the world lights in (mid grey
-    // untextured); zero on terrain.
+    // A static hit's texel as static_gx samples it: the pool holds the BLP's bytes in a non-sRGB
+    // format (`world_assets::color_texture_format`), so the sample IS the authored (gamma) value
+    // the world lights; white where the item is untextured, as static_gx's `base`. Zero on terrain.
     albedo: vec3<f32>,
+    // The interpolated vertex colour (MOCV or the baked tint); white where the vertex has none.
+    color: vec4<f32>,
+    // The static item's vertex word (`static_gx.wgsl`'s WORD_* bits); 0 on terrain.
+    word: u32,
+    // The item's SIDN night glow colour, 0..1 (its record's z); zero on terrain.
+    sidn: vec3<f32>,
     // The sun's reach at the hit through the scene: 1 lit, 0 shaded (0 where the face turns away).
     sun: f32,
 }
@@ -48,6 +53,9 @@ fn trace(origin: vec3<f32>, dir: vec3<f32>, t_min: f32, reach: f32, to_sun: vec3
     out.position = origin + dir * reach;
     out.normal = -dir;
     out.albedo = vec3<f32>(0.0);
+    out.color = vec4<f32>(1.0);
+    out.word = 0u;
+    out.sidn = vec3<f32>(0.0);
     out.sun = 1.0;
     if (!rt_scene::live()) {
         return out;
@@ -60,17 +68,19 @@ fn trace(origin: vec3<f32>, dir: vec3<f32>, t_min: f32, reach: f32, to_sun: vec3
     out.t = s.t;
     out.position = s.position;
     out.normal = s.normal;
+    out.color = s.color;
     if (s.kind == rt_scene::KIND_TERRAIN) {
         out.kind = 2u;
     } else {
         out.kind = 1u;
-        var albedo = UNTEXTURED;
-        if ((s.word & rt_scene::WORD_TEXTURED) != 0u) {
-            // The pool's arrays are sRGB views: the sample arrives linear, and the world lights in
-            // the authored value space.
-            albedo = colorspace::linear_to_srgb(rt_scene::texel(s.row, s.word, s.uv, ALBEDO_MIP).rgb);
-        }
-        out.albedo = albedo;
+        out.word = s.word;
+        out.albedo = rt_scene::texel(s.row, s.word, s.uv, ALBEDO_MIP).rgb;
+        let rec = rt_scene::record(s.row, s.word);
+        out.sidn = vec3<f32>(
+            f32(rec.z & 0xffu),
+            f32((rec.z >> 8u) & 0xffu),
+            f32((rec.z >> 16u) & 0xffu),
+        ) / 255.0;
     }
     if (dot(out.normal, to_sun) > 0.0) {
         out.sun = rtshadow::sun_ray(out.position + out.normal * SUN_LIFT_YD, to_sun);
