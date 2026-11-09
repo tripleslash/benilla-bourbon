@@ -420,6 +420,20 @@ fn fold_above(r: vec3<f32>) -> vec3<f32> {
     return normalize(r + vec3<f32>(0.0, max(r.y, 0.01) - r.y, 0.0));
 }
 
+/// fork: **the rough surface's reflected lobe**, in radians off the reflected ray: `x` along the
+/// view's bearing (`2·σ_along`), `y` across it (`2·σ_across·μ`, foreshortened at grazing), from the
+/// unresolved slope tensor `lost` and the view ray `v`. The mirror read and the ray-traced lane both
+/// spread their reflection by it.
+fn rough_lobe(lost: vec3<f32>, v: vec3<f32>) -> vec2<f32> {
+    let flat_len = length(v.xz);
+    let b = v.xz / max(flat_len, 1e-4);
+    let c = vec2<f32>(-b.y, b.x);
+    let l_along = b.x * b.x * lost.x + b.y * b.y * lost.y + 2.0 * b.x * b.y * lost.z;
+    let l_across = c.x * c.x * lost.x + c.y * c.y * lost.y + 2.0 * c.x * c.y * lost.z;
+    let mu = clamp(-v.y, 0.0, 1.0);
+    return vec2<f32>(2.0 * sqrt(max(l_along, 0.0)), 2.0 * sqrt(max(l_across, 0.0)) * mu);
+}
+
 /// fork: **the mirror through a rough surface** (the benilla-watershader fork's lobe): the reflected
 /// rays of the facets the pixel no longer draws spread `2·σ` radians along the view's bearing (`up`)
 /// and `2·σ·μ` across it (`side`), the across axis foreshortened at grazing — the tall streaks a
@@ -432,18 +446,13 @@ fn fold_above(r: vec3<f32>) -> vec3<f32> {
 /// drew, never the sky, so water under a dark bank darkens toward the bank; luma-only, so a grey post
 /// does not take the pivot's hue.
 fn mirror_read_rough(uv: vec2<f32>, lost: vec3<f32>, v: vec3<f32>, d_eye: f32, rho: f32) -> vec3<f32> {
-    let flat_len = length(v.xz);
-    let b = v.xz / max(flat_len, 1e-4);
-    let c = vec2<f32>(-b.y, b.x);
-    let l_along = b.x * b.x * lost.x + b.y * b.y * lost.y + 2.0 * b.x * b.y * lost.z;
-    let l_across = c.x * c.x * lost.x + c.y * c.y * lost.y + 2.0 * c.x * c.y * lost.z;
-    let mu = clamp(-v.y, 0.0, 1.0);
+    let lobe = rough_lobe(lost, v);
     let h = MIRROR_HIT_YD / (MIRROR_HIT_YD + d_eye);
     let dims = vec2<f32>(textureDimensions(reflect_map, 0));
     // Mirror texels per radian at the centre of the view, vertically and across alike.
     let per_rad = dims.y * 0.5 * view.clip_from_view[1][1];
-    let sv = 2.0 * sqrt(max(l_along, 0.0)) * h * per_rad;
-    let ss = 2.0 * sqrt(max(l_across, 0.0)) * mu * h * per_rad;
+    let sv = lobe.x * h * per_rad;
+    let ss = lobe.y * h * per_rad;
     var col: vec3<f32>;
     if (max(sv, ss) < 0.5) {
         col = textureSampleLevel(reflect_map, scene_samp, uv, 0.0).rgb;
@@ -548,7 +557,27 @@ fn lane_shade(hit: rtreflect::ReflectHit, to_sun: vec3<f32>) -> vec3<f32> {
 // own position from this frame's fog volume as the fog composite fogs the mirror's pixels
 // (`froxelfog::fog_at`, the main view's volume at the world point), and handed back gamma, as the
 // water reads the mirror (`modern_in`).
-fn lane_reflection(surface: vec3<f32>, dir: vec3<f32>, sky: vec3<f32>) -> LaneReflection {
+fn lane_sample(origin: vec3<f32>, dir: vec3<f32>, sky: vec3<f32>, to_sun: vec3<f32>, reach: f32) -> LaneReflection {
+    let hit = rtreflect::trace(origin, dir, 0.0, reach, to_sun);
+    if (hit.kind == 0u) {
+        return LaneReflection(sky, 0.0);
+    }
+    let lit = colorspace::srgb_to_linear(lane_shade(hit, to_sun));
+    let fog = froxelfog::fog_at(modern_fog_volume, scene_samp, modern_block.fog, hit.position);
+    return LaneReflection(colorspace::linear_to_srgb(lit * fog.a + fog.rgb), 1.0);
+}
+
+// The rays a rough pixel spreads over its lobe: a Gaussian sampled at four radii
+// (`√(−2·ln(1 − (i + ½)/4))`) a golden angle apart.
+const LANE_ROUGH_RAYS: u32 = 4u;
+const LANE_GOLDEN_ANGLE: f32 = 2.39996323;
+
+// The reflection through the rough surface: where its lobe (`rough_lobe`, radians along and across
+// the view's bearing) spreads under half a pixel from the eye (`sharp`), the one ray along `dir`;
+// else `LANE_ROUGH_RAYS` rays over the lobe around it, averaged in the mirror read's value space as
+// the mirror's mips average it, the pattern turned per pixel (`px`) so neighbours fill each other's
+// gaps. Each ray folds back above the surface as the wave's own does.
+fn lane_reflection(surface: vec3<f32>, dir: vec3<f32>, sky: vec3<f32>, lobe: vec2<f32>, sharp: bool, px: vec2<f32>) -> LaneReflection {
     // The row is loaded before a component is picked.
     let lanes = modern_block.light_spare[12];
     if (lanes.y < 0.5) {
@@ -557,13 +586,29 @@ fn lane_reflection(surface: vec3<f32>, dir: vec3<f32>, sky: vec3<f32>) -> LaneRe
     let origin = surface + vec3<f32>(0.0, LANE_LIFT_YD, 0.0);
     let to_sun = -normalize(wow_light.light_sun.xyz);
     let reach = select(LANE_REACH_YD, wow_light.fog_params.w, wow_light.fog_params.w > 0.0);
-    let hit = rtreflect::trace(origin, dir, 0.0, reach, to_sun);
-    if (hit.kind == 0u) {
-        return LaneReflection(sky, 0.0);
+    if (sharp) {
+        return lane_sample(origin, dir, sky, to_sun, reach);
     }
-    let lit = colorspace::srgb_to_linear(lane_shade(hit, to_sun));
-    let fog = froxelfog::fog_at(modern_fog_volume, scene_samp, modern_block.fog, hit.position);
-    return LaneReflection(colorspace::linear_to_srgb(lit * fog.a + fog.rgb), 1.0);
+    // `dir`'s frame: `side` level and across the bearing, `up` along it in elevation.
+    let side_raw = cross(dir, vec3<f32>(0.0, 1.0, 0.0));
+    let side = select(vec3<f32>(1.0, 0.0, 0.0), normalize(side_raw), dot(side_raw, side_raw) > 1e-6);
+    let up = cross(side, dir);
+    // Interleaved gradient noise: the pattern's turn at this pixel.
+    let turn = 6.2831853 * fract(52.9829189 * fract(dot(px, vec2<f32>(0.06711056, 0.00583715))));
+    var rgb = vec3<f32>(0.0);
+    var fogged = 0.0;
+    for (var i = 0u; i < LANE_ROUGH_RAYS; i = i + 1u) {
+        let u = (f32(i) + 0.5) / f32(LANE_ROUGH_RAYS);
+        let r = sqrt(-2.0 * log(1.0 - u));
+        let a = turn + f32(i) * LANE_GOLDEN_ANGLE;
+        let off = r * vec2<f32>(cos(a) * lobe.x, sin(a) * lobe.y);
+        let ray = fold_above(normalize(dir + up * off.x + side * off.y));
+        let s = lane_sample(origin, ray, sky, to_sun, reach);
+        rgb = rgb + s.rgb;
+        fogged = fogged + s.fogged;
+    }
+    let n = f32(LANE_ROUGH_RAYS);
+    return LaneReflection(rgb / n, fogged / n);
 }
 #endif
 
@@ -1983,7 +2028,13 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
             }
             let to_seen = seen - view.world_position;
             let lane_dir = fold_above(normalize(vec3<f32>(to_seen.x, -to_seen.y, to_seen.z)));
-            let lane = lane_reflection(in.world_position.xyz, lane_dir, base);
+            // The rough surface spreads the ray as it spreads the mirror read; the lane runs at the
+            // experimental tier alone, where `lost_s` is the surface's.
+            let lobe = rough_lobe(lost_s, v);
+            let lane_h = MIRROR_HIT_YD / (MIRROR_HIT_YD + view_len);
+            let lane_per_rad = view.viewport.w * 0.5 * view.clip_from_view[1][1];
+            let lane_sharp = max(lobe.x, lobe.y) * lane_h * lane_per_rad < 0.5;
+            let lane = lane_reflection(in.world_position.xyz, lane_dir, base, lobe, lane_sharp, in.clip_position.xy);
             base = lane.rgb;
             lane_on = 1.0;
             lane_fogged = lane.fogged;
