@@ -369,13 +369,17 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     // Slices are quadratic in depth (d = far * s^2), so a slice is 2 * sqrt(far * d) / n deep.
     let along = normalize(p - f.camera.xyz) * max(0.5 * sqrt(f.grid.w * d) / n.z, 0.1);
 #ifdef RT_FROXEL
-    // fork: F — each tap is the cascade tap (the entities, and the static world where the cascades
-    // still draw it) times one ray to the sun through the scene; the volume's blur and its history
-    // filter the two taps as they did the two compares.
-    let sun_vis = 0.5 * cloud * (1.0 - under_sea(f, p)) * (
-        rtshadow::sun_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p - along, d, f.sun_dir.xyz)
-            + rtshadow::sun_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p + along, d, f.sun_dir.xyz)
-    );
+    // fork: F — the tap is the cascade tap (the entities, and the static world where the cascades
+    // still draw it) times one ray to the sun through the scene. One of the two taps a froxel and
+    // frame, the other the next frame and in each neighbour (a checkerboard turned every frame):
+    // the volume's blur and its history average them as they averaged the pair, at half the rays.
+    // No ray where nothing of the key reaches the froxel anyway.
+    let key = cloud * (1.0 - under_sea(f, p));
+    var sun_vis = 0.0;
+    if (key > 0.0) {
+        let side = select(-1.0, 1.0, ((id.x + id.y + id.z + u32(f.phase.w)) & 1u) == 1u);
+        sun_vis = key * rtshadow::sun_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p + along * side, d, f.sun_dir.xyz);
+    }
 #else
     let sun_vis = 0.5 * cloud * (1.0 - under_sea(f, p)) * (
         sunshadow::sun_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p - along, d)
