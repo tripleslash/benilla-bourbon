@@ -1162,17 +1162,28 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     }
     // fork: modern lighting (FORK.md, P2) — the modern sun's own cascades.
 #ifdef WOW_MODERN
-    if ((in.word & WORD_INTERIOR) == 0u && !modern_lite) {
+    // fork (perf): a WMO face turned from the sun takes none of its light: every term
+    // `modern_gx_rgb`'s WMO lane weighs the shadow by carries N·L, which is 0 there, so it skips
+    // the cascade, ray and cloud reads (as terrain's back slopes do). Doodads keep them: their
+    // wrap and back-lit terms reach past N·L. The shadow debug views keep the reads.
+    let sun_facing = dot(n_lit, -normalize(wow_light.light_sun.xyz)) > 0.0
+        || (in.word & WORD_WMO) == 0u
+        || modern_block.cascades.params.w > 0.5;
+    if ((in.word & WORD_INTERIOR) == 0u && !modern_lite && sun_facing) {
         let mview_z = (view.view_from_world * in.world_position).z;
-#ifdef RT_SHADOWS
-        // fork: F — the static world and the terrain by ray, the entities from the cascades.
-        world_shadow = rtshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, n_lit, -mview_z, modern_lite, -normalize(wow_light.light_sun.xyz));
-#else
-        world_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, n_lit, -mview_z, modern_lite);
-#endif
-        // fork: modern lighting (FORK.md, P4) — cloud shadows.
+        // fork: modern lighting (FORK.md, P4) — cloud shadows, read first: where
+        // a cloud takes the whole sun the shadow is 0 whatever the cascades and rays say.
         let cloud_ct = sunshadow::cloud_taps(modern_block.fog.cloud, in.world_position.xyz);
-        world_shadow = world_shadow * sunshadow::cloud_mix(cloud_ct, modern_block.cloud[cloud_ct.idx.x], modern_block.cloud[cloud_ct.idx.y], modern_block.cloud[cloud_ct.idx.z], modern_block.cloud[cloud_ct.idx.w]);
+        let cloud = sunshadow::cloud_mix(cloud_ct, modern_block.cloud[cloud_ct.idx.x], modern_block.cloud[cloud_ct.idx.y], modern_block.cloud[cloud_ct.idx.z], modern_block.cloud[cloud_ct.idx.w]);
+        world_shadow = 0.0;
+        if (cloud > 0.0) {
+#ifdef RT_SHADOWS
+            // fork: F — the static world and the terrain by ray, the entities from the cascades.
+            world_shadow = rtshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, n_lit, -mview_z, modern_lite, -normalize(wow_light.light_sun.xyz)) * cloud;
+#else
+            world_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, n_lit, -mview_z, modern_lite) * cloud;
+#endif
+        }
     }
 #endif
     // A colour-less batch takes a constant 1.0, not interpolated white: interpolating a constant

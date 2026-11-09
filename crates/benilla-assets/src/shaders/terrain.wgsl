@@ -596,15 +596,19 @@ fn fragment(in: TerrainVsOut) -> @location(0) vec4<f32> {
         // The shadow debug views keep the reads, so they still show what the cascades hold.
         world_shadow = 0.0;
         if (mndotl > 0.0 || modern_block.cascades.params.w > 0.5) {
-#ifdef RT_SHADOWS
-            // fork: F — the static world and the terrain by ray, the entities from the cascades.
-            world_shadow = rtshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, mn, -mview_z, lite, ml);
-#else
-            world_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, mn, -mview_z, lite);
-#endif
-            // fork: modern lighting (FORK.md, P4) — cloud shadows sweep over the ground.
+            // fork: modern lighting (FORK.md, P4) — cloud shadows sweep over the
+            // ground. Read first: where a cloud takes the whole sun the shadow is 0 whatever the
+            // cascades and rays say.
             let cloud_ct = sunshadow::cloud_taps(modern_block.fog.cloud, in.world_position.xyz);
-            world_shadow = world_shadow * sunshadow::cloud_mix(cloud_ct, modern_block.cloud[cloud_ct.idx.x], modern_block.cloud[cloud_ct.idx.y], modern_block.cloud[cloud_ct.idx.z], modern_block.cloud[cloud_ct.idx.w]);
+            let cloud = sunshadow::cloud_mix(cloud_ct, modern_block.cloud[cloud_ct.idx.x], modern_block.cloud[cloud_ct.idx.y], modern_block.cloud[cloud_ct.idx.z], modern_block.cloud[cloud_ct.idx.w]);
+            if (cloud > 0.0) {
+#ifdef RT_SHADOWS
+                // fork: F — the static world and the terrain by ray, the entities from the cascades.
+                world_shadow = rtshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, mn, -mview_z, lite, ml) * cloud;
+#else
+                world_shadow = sunshadow::sun_visibility(modern_shadow_map, modern_shadow_samp, modern_block.cascades, in.world_position.xyz, mn, -mview_z, lite) * cloud;
+#endif
+            }
         }
         // fork: modern lighting (FORK.md, P6) — the binned local-light grid
         // replaces the reference's three-nearest selection wherever it is live; Low has no grid and
