@@ -892,6 +892,22 @@ pub(super) fn register(app: &mut App) {
             .after(crate::schedule::WorldStage::Present)
             .before(sync_reflection_camera),
     );
+    #[cfg(target_arch = "wasm32")]
+    app.add_systems(Update, log_rt_tier_fallback);
+}
+
+/// fork: the web build traces nothing: `waterDetail` 4 renders as the experimental tier, by the
+/// mirror. One line each time the tier is chosen.
+#[cfg(target_arch = "wasm32")]
+fn log_rt_tier_fallback(detail: Res<WaterDetail>, mut logged: Local<bool>) {
+    let tier = detail.wants_ray_traced_reflection();
+    if tier && !*logged {
+        info!(
+            "liquid: waterDetail 4 (Experimental (RT)) needs ray tracing, which the web build cannot \
+             do; the water renders as the experimental tier, by the planar mirror"
+        );
+    }
+    *logged = tier;
 }
 
 #[cfg(test)]
@@ -1146,7 +1162,6 @@ mod tests {
             reflect: Handle::default(),
             reflect_blur: Handle::default(),
             size: UVec2::ONE,
-            depth_pyramid: false,
         });
         app.world_mut().spawn((
             WorldCamera,

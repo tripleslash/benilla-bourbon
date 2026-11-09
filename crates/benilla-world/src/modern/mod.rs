@@ -177,14 +177,16 @@ impl Default for LightingSettings {
 /// fork: native GPU — the `rayTracing` option: may the ray-traced lanes run? Written by
 /// `benilla-app`'s CVar callback, extracted to the render world every frame (native only), where
 /// `static_gx::rt_scene::update_rt_tier` turns it into the frame's `enabled` and `live` levels; a
-/// switch takes effect within a few frames, no restart. Default on, the registered default. Has no
-/// effect where the session cannot ray-trace, and none on the web build.
+/// switch takes effect within a few frames, no restart. Default on, the registered default;
+/// `$WOW_RAYTRACING=0` boots it off where no CVar host writes it (the worldview). Has no effect
+/// where the session cannot ray-trace, and none on the web build. The water's ray-traced tier
+/// (`waterDetail` 4) does not read it.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, ExtractResource)]
 pub struct RayTracingSetting(pub bool);
 
 impl Default for RayTracingSetting {
     fn default() -> Self {
-        Self(true)
+        Self(crate::launch_env::var("WOW_RAYTRACING").as_deref() != Some("0"))
     }
 }
 

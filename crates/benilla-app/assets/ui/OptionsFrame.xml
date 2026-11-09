@@ -649,6 +649,14 @@
             .. "Modern (SSR) skips the second, mirrored render of the world and reflects only what "
             .. "is already on screen: much cheaper, but reflections fade when you look down at the water.\n\n"
             .. "Modern water costs additional GPU time."
+        -- fork: native GPU — waterDetail 4, the experimental water reflecting by ray in place of
+        -- its mirror, whatever Ray Tracing says. Native only; offered in the dropdowns there.
+        if ( BENILLA_NATIVE ) then
+            BENILLA_TOOLTIP_WATER_DETAIL = BENILLA_TOOLTIP_WATER_DETAIL
+                .. "\n\nExperimental (RT) is Modern (Experimental) with the mirrored render replaced "
+                .. "by ray-traced reflections, independent of the Ray Tracing option. It needs a "
+                .. "graphics card that can ray trace; elsewhere it looks like Modern (Experimental)."
+        end
 
         -- fork: the modern lighting model (FORK.md). The MODEL and the TIER both
         -- apply on the frame Apply commits them, like every Graphics row.
@@ -2836,13 +2844,18 @@
                                                 -- the fork's stylised clear surface (the bed through
                                                 -- the water, a calm swell, a capped reflection) in
                                                 -- place of the reference's combine, under either
-                                                -- lighting model.
-                                                BenillaOptionsDropdownRow_Setup(this, {
+                                                -- lighting model. fork: "Experimental (RT)" is
+                                                -- tier 4, native only: tier 3 reflecting by ray.
+                                                local tiers = {
                                                     { text = "Modern", value = "2" },
                                                     { text = "Modern (Experimental)", value = "3" },
                                                     { text = "Modern (SSR)", value = "1" },
                                                     { text = "Classic", value = "0" },
-                                                })
+                                                }
+                                                if ( BENILLA_NATIVE ) then
+                                                    table.insert(tiers, 3, { text = "Experimental (RT)", value = "4" })
+                                                end
+                                                BenillaOptionsDropdownRow_Setup(this, tiers)
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <Frame name="$parentRowLightingModel" inherits="BenillaOptionsDropdownRowTemplate">
@@ -4293,12 +4306,17 @@
                 { text = "Vulkan", value = "vulkan" },
                 { text = "OpenGL", value = "opengl" },
             })
-            BenillaWaterDetailDropdown_Init = dropdown("waterDetail", {
+            local waterTiers = {
                 { text = "Modern", value = "2" },
                 { text = "Modern (Experimental)", value = "3" },
                 { text = "Modern (SSR)", value = "1" },
                 { text = "Classic", value = "0" },
-            })
+            }
+            -- fork: native GPU — tier 4, the experimental water reflecting by ray.
+            if ( BENILLA_NATIVE ) then
+                table.insert(waterTiers, 3, { text = "Experimental (RT)", value = "4" })
+            end
+            BenillaWaterDetailDropdown_Init = dropdown("waterDetail", waterTiers)
 
             -- ── Only rows that work here ──
             -- Deviation: Turtle's rows benilla cannot honour are cut, by the name Turtle keys them

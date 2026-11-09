@@ -85,7 +85,7 @@ pub fn local_shadow_layers(quality: LightingQuality) -> usize {
 }
 
 /// fork: F — **the ray-traced shadows' lane, this frame**: the ray tracing is live
-/// (`rt_scene::live()`: native, capable, the `rayTracing` option on and the scene ready) and the
+/// (`rt_scene::option_live()`: native, capable, the `rayTracing` option on and the scene ready) and the
 /// session may trace shadows ([`rt_shadows_capable`]). Then the sun's and the shadowed lamps'
 /// visibility through the static world and the terrain is a ray query in every receiver
 /// (`benilla_modern::rtshadow`), the cascades draw the entity casters alone (the sky map keeps its
@@ -96,7 +96,7 @@ pub fn local_shadow_layers(quality: LightingQuality) -> usize {
 pub fn rt_shadows() -> bool {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        crate::static_gx::rt_scene::live() && rt_shadows_capable()
+        crate::static_gx::rt_scene::option_live() && rt_shadows_capable()
     }
     #[cfg(target_arch = "wasm32")]
     {

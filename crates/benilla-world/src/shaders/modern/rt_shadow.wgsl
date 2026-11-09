@@ -40,6 +40,12 @@ const COVER_LIFT_YD: f32 = 0.25;
 // A per-receiver rotation in [0, TAU): the penumbra rays' pattern turns from one point to the next,
 // so four rays read as a dithered gradient and not as bands. `locallight::local_visibility`'s hash,
 // wrapped first for the same precision reason, so the lamps' noise and the sun's agree.
+// The scene is live and this group serves the shadow lane (`rt_scene::shadow_lane`): false where
+// the group is bound for the water's reflections alone, so the twins keep their raster originals.
+fn traced() -> bool {
+    return rt_scene::live() && rt_scene::shadow_lane();
+}
+
 fn spin(p: vec3<f32>) -> f32 {
     let wrapped = fract(p * 0.1);
     return fract(dot(wrapped, vec3<f32>(12.9898, 78.233, 37.719))) * TAU;
@@ -148,7 +154,7 @@ fn sun_visibility(
     lite: bool,
     to_sun: vec3<f32>,
 ) -> f32 {
-    if (!rt_scene::live()) {
+    if (!traced()) {
         return sunshadow::sun_visibility(map, samp, c, world_pos, normal, view_distance, lite);
     }
     // No cascades this frame is no modern shadow this frame, as `sunshadow` reads it.
@@ -180,7 +186,7 @@ fn sun_visibility_anywhere(
     world_pos: vec3<f32>,
     to_sun: vec3<f32>,
 ) -> f32 {
-    if (!rt_scene::live()) {
+    if (!traced()) {
         return sunshadow::sun_visibility_anywhere(map, samp, c, world_pos);
     }
     let count = u32(c.params.x);
@@ -212,7 +218,7 @@ fn sun_visibility_fast(
     view_distance: f32,
     to_sun: vec3<f32>,
 ) -> f32 {
-    if (!rt_scene::live()) {
+    if (!traced()) {
         return sunshadow::sun_visibility_fast(map, samp, c, world_pos, view_distance);
     }
     let count = u32(c.params.x);
@@ -243,7 +249,7 @@ fn sun_visibility_fast(
 // off the scene (the cascades then hold the static casters themselves). `world_pos` is already
 // lifted.
 fn sun_visibility_ray(c: sunshadow::ModernCascades, world_pos: vec3<f32>, to_sun: vec3<f32>) -> f32 {
-    if (!rt_scene::live() || u32(c.params.x) == 0u) {
+    if (!traced() || u32(c.params.x) == 0u) {
         return 1.0;
     }
     return sun_ray(world_pos, to_sun);
@@ -302,7 +308,7 @@ fn lamp_rays(
     emitter: f32,
     taps: u32,
 ) -> f32 {
-    if (!rt_scene::live()) {
+    if (!traced()) {
         return 1.0;
     }
     let to = light - p;
@@ -346,7 +352,7 @@ fn local_visibility(
     near: f32,
     fade: f32,
 ) -> f32 {
-    if (!rt_scene::live()) {
+    if (!traced()) {
         return locallight::local_visibility(map, samp, g, slot, anchor, world_pos, normal, near, fade);
     }
     if (slot >= locallight::MAX_SHADOWED || !locallight::atlas_live(g) || fade <= 0.0) {

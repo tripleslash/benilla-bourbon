@@ -149,7 +149,7 @@ pub struct FroxelTier {
     pub shafts: f32,
 }
 
-/// fork: F — **the froxel rays' lane, this frame**: the ray tracing is live (`rt_scene::live()`:
+/// fork: F — **the froxel rays' lane, this frame**: the ray tracing is live (`rt_scene::option_live()`:
 /// native, capable, the `rayTracing` option on and the scene ready) and the session may trace froxels
 /// ([`rt_froxel_capable`]). Then the scatter pass takes the sun's visibility per froxel as a ray
 /// query times the cascade tap, and each shadowed lamp's as a ray to it (`froxel_scatter.wgsl`
@@ -160,7 +160,7 @@ pub struct FroxelTier {
 pub fn rt_froxel() -> bool {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        crate::static_gx::rt_scene::live() && rt_froxel_capable()
+        crate::static_gx::rt_scene::option_live() && rt_froxel_capable()
     }
     #[cfg(target_arch = "wasm32")]
     {

@@ -127,24 +127,6 @@ pub(crate) struct LiquidScreenTargets {
     pub(crate) reflect_blur: Handle<Image>,
     /// The size `color`/`depth` were allocated at. A change here is what triggers the republish.
     pub(crate) size: UVec2,
-    /// fork: G — `depth` carries the reflection march's Hi-Z levels ([`depth_pyramid`]); a change
-    /// republishes the set as a resize does.
-    pub(crate) depth_pyramid: bool,
-}
-
-/// fork: G — does the depth copy carry a Hi-Z pyramid above its level 0 (`modern::rt_reflect`,
-/// native, where the water may reflect by ray and the march is on)? Read each frame: the lane's
-/// capability is known only once render startup ran.
-pub(crate) fn depth_pyramid() -> bool {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        crate::modern::rt_reflect::rt_reflections_capable()
-            && crate::modern::rt_reflect::ssr_enabled()
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        false
-    }
 }
 
 impl LiquidScreenTargets {
@@ -153,14 +135,6 @@ impl LiquidScreenTargets {
         let size = size.max(UVec2::ONE);
         let blur_size = (size >> UVec2::splat(BLUR_SHIFT)).max(UVec2::ONE);
         let reflect_size = (size >> UVec2::splat(REFLECT_SHIFT)).max(UVec2::ONE);
-        let depth_pyramid = depth_pyramid();
-        // fork: G — the depth copy with a full mip chain, each level the nearest depth of the one
-        // below (`gx_hiz.wgsl`, `HIZ_LINEAR`), written by compute as storage.
-        let mut depth = target_image("liquid_scene_depth", size, TextureFormat::R32Float);
-        if depth_pyramid {
-            depth.texture_descriptor.mip_level_count = 32 - size.max_element().leading_zeros();
-            depth.texture_descriptor.usage |= TextureUsages::STORAGE_BINDING;
-        }
         LiquidScreenTargets {
             color: images.add(target_image(
                 "liquid_scene_color",
@@ -172,7 +146,11 @@ impl LiquidScreenTargets {
                 blur_size,
                 TextureFormat::Rgba16Float,
             )),
-            depth: images.add(depth),
+            depth: images.add(target_image(
+                "liquid_scene_depth",
+                size,
+                TextureFormat::R32Float,
+            )),
             reflect: images.add(target_image(
                 "liquid_reflection",
                 reflect_size,
@@ -185,7 +163,6 @@ impl LiquidScreenTargets {
                 REFLECT_MIPS.min(reflect_size.max_element().ilog2() + 1),
             )),
             size,
-            depth_pyramid,
         }
     }
 }
@@ -295,12 +272,7 @@ pub(crate) fn resize_targets(
     else {
         return;
     };
-    if size.x == 0 || size.y == 0 {
-        return;
-    }
-    // fork: G — or when the depth copy's Hi-Z levels are wanted (once render startup decided the
-    // reflection lane can run) and it was allocated without them.
-    if size == targets.size && depth_pyramid() == targets.depth_pyramid {
+    if size.x == 0 || size.y == 0 || size == targets.size {
         return;
     }
     let retired = [
@@ -570,17 +542,6 @@ pub(crate) fn liquid_screen_pass(
                     })
                 })
                 .collect();
-        // fork: G — a depth copy carrying Hi-Z levels is drawn through its level 0 alone (a colour
-        // attachment takes one level); `modern::rt_reflect` reduces the levels above after this.
-        let depth_level0 = (depth_out.texture_descriptor.mip_level_count > 1).then(|| {
-            depth_out.texture.create_view(&TextureViewDescriptor {
-                label: Some("liquid_scene_depth_level0"),
-                base_mip_level: 0,
-                mip_level_count: Some(1),
-                ..Default::default()
-            })
-        });
-        let depth_target = depth_level0.as_ref().unwrap_or(&depth_out.texture_view);
         let bind_levels: Vec<BindGroup> = mirror_levels
             .iter()
             .take(mirror_levels.len().saturating_sub(1))
@@ -608,7 +569,7 @@ pub(crate) fn liquid_screen_pass(
                 "liquid_screen_depth",
                 linear_depth,
                 &bind_write_color,
-                depth_target,
+                &depth_out.texture_view,
             ),
             (
                 "liquid_reflection_blur",

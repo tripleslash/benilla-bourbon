@@ -52,14 +52,24 @@ pub(super) fn init_rt_shadows(mut commands: Commands) {
 
 /// Every frame: the scene's bind group while a lane that binds it here is live (these shadows, or
 /// the water's reflections, `super::rt_reflect`), else its stand-in, where the material lanes' draws
-/// bind it. Each lane's shader code asks its own row of the block (`light_spare[12]`) besides
-/// `rt_scene::live()`, and compiles only where its lane may run, so neither traces for the other.
+/// bind it. With the reflections alone live (the water's RT tier, the `rayTracing` option off) the
+/// group is `RtScene::water_bind`, whose lane row keeps every `rtshadow` twin on raster. The water's
+/// shader code also asks its own row of the block (`light_spare[12]`) besides `rt_scene::live()`,
+/// and each lane compiles only where it may run, so neither traces for the other.
 /// After `prepare_rt_scene` (`PrepareResources`), which builds both.
 fn bind_rt_shadows(scene: Option<Res<RtScene>>, extra: Option<ResMut<MaterialExtraBindGroup>>) {
     let (Some(scene), Some(mut extra)) = (scene, extra) else {
         return;
     };
-    let next = scene.lane_bind(super::shadow::rt_shadows() || super::rt_reflect::rt_reflections());
+    // The shadow lane's group serves the reflections too; the reflections alone take the scene
+    // with the shadow lane's row clear, so the receivers keep their raster shadows.
+    let next = if super::shadow::rt_shadows() {
+        scene.lane_bind(true)
+    } else if super::rt_reflect::rt_reflections() {
+        scene.water_bind()
+    } else {
+        scene.lane_bind(false)
+    };
     if extra.0.as_ref().map(|b| b.id()) != next.map(|b| b.id()) {
         extra.0 = next.cloned();
     }

@@ -30,6 +30,8 @@ enable wgpu_ray_query;
 @group(#{RT_GROUP}) @binding(6) var rt_textures: binding_array<texture_2d_array<f32>, 1024>;
 @group(#{RT_GROUP}) @binding(7) var rt_repeat: sampler;
 @group(#{RT_GROUP}) @binding(8) var rt_clamp: sampler;
+// The lanes this group may serve (`RtScene::water_bind`): x 1 where the shadow lane may trace.
+@group(#{RT_GROUP}) @binding(9) var<storage, read> rt_lanes: array<vec4<u32>>;
 
 // Instance kinds (row 0 x, low byte) and the TLAS instance mask bit each carries (1 << kind).
 const KIND_CELL: u32 = 0u;
@@ -56,6 +58,12 @@ const STUB_MARK: u32 = 0xffffffffu;
 // this is false, so the ray tracing switches at run time without a pipeline of its own.
 fn live() -> bool {
     return rt_instances[0].x != STUB_MARK;
+}
+
+// May the shadow lane trace through the bound group? False in the group bound for the water's
+// reflections alone and on the stand-in: `rtshadow`'s twins take their raster path there.
+fn shadow_lane() -> bool {
+    return rt_lanes[0].x != 0u;
 }
 
 // static_gx's vertex word bits (`static_gx/mod.rs` WORD_*).

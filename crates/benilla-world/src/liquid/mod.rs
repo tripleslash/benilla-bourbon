@@ -66,8 +66,9 @@ pub(crate) use surface::{
 /// implement. Leaving the gap rather than renumbering means a medium tier can land later without
 /// re-teaching the options page, the config files players already have, or this type.
 ///
-/// fork: `1` is taken since by the SSR-only cata tier ([`WATER_DETAIL_SSR`]) and `3` by the
-/// experimental modern combine ([`WATER_DETAIL_EXPERIMENTAL`]).
+/// fork: `1` is taken since by the SSR-only cata tier ([`WATER_DETAIL_SSR`]), `3` by the
+/// experimental modern combine ([`WATER_DETAIL_EXPERIMENTAL`]) and `4` by that combine reflecting by
+/// ray ([`WATER_DETAIL_RT`]).
 ///
 /// fork: Modern (Experimental) is the default. `$WOW_WATER_DETAIL` overrides for a session.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
@@ -91,6 +92,13 @@ pub const WATER_DETAIL_CATA: u8 = 2;
 /// after the reference's highest tier rather than one of its numbers, so `2` keeps meaning the
 /// reference's water.
 pub const WATER_DETAIL_EXPERIMENTAL: u8 = 3;
+/// fork: native GPU — the experimental tier with its planar mirror replaced by ray-traced
+/// reflections (`modern::rt_reflect`): the same combine, the reflected world found by one ray query
+/// per pixel against the ray-traced scene. "Experimental (RT)" on the options page. Independent of
+/// the `rayTracing` option: this tier alone asks for the scene for the water. Where the session
+/// cannot ray-trace (the web, no ray queries, `WOW_RT=0`, `WOW_RT_REFLECT=0`) it renders as
+/// [`WATER_DETAIL_EXPERIMENTAL`], mirror and all.
+pub const WATER_DETAIL_RT: u8 = 4;
 
 impl WaterDetail {
     /// Is this the Cataclysm renderer? Written as "not legacy" rather than "== 2" so that a medium
@@ -102,7 +110,7 @@ impl WaterDetail {
     /// Clamp an arbitrary cvar value onto a tier this build actually has. Anything that is not a
     /// known tier reads as cata, which is the default and the better-looking answer; a player who
     /// hand-edits `waterDetail 7` into their config gets water, not a black lake — and not the
-    /// experimental tier, which only a `3` asks for.
+    /// experimental tiers, which only a `3` or a `4` asks for.
     pub fn from_cvar(v: f32) -> Self {
         if v <= 0.0 {
             WaterDetail(WATER_DETAIL_LEGACY)
@@ -110,18 +118,28 @@ impl WaterDetail {
             WaterDetail(WATER_DETAIL_SSR)
         } else if (2.5..3.5).contains(&v) {
             WaterDetail(WATER_DETAIL_EXPERIMENTAL)
+        } else if (3.5..4.5).contains(&v) {
+            WaterDetail(WATER_DETAIL_RT)
         } else {
             WaterDetail(WATER_DETAIL_CATA)
         }
     }
 
-    /// Does the water run the Modern (Experimental) combine ([`WATER_DETAIL_EXPERIMENTAL`])?
+    /// Does the water run the Modern (Experimental) combine ([`WATER_DETAIL_EXPERIMENTAL`], and its
+    /// ray-traced twin [`WATER_DETAIL_RT`])?
     pub fn is_experimental(self) -> bool {
-        self.0 == WATER_DETAIL_EXPERIMENTAL
+        matches!(self.0, WATER_DETAIL_EXPERIMENTAL | WATER_DETAIL_RT)
+    }
+
+    /// fork: native GPU — does the water ask to reflect by ray ([`WATER_DETAIL_RT`])? Whether it
+    /// does this frame is `modern::rt_reflect`'s decision; where it cannot, the mirror stands in.
+    pub fn wants_ray_traced_reflection(self) -> bool {
+        self.0 == WATER_DETAIL_RT
     }
 
     /// Does the cata water get its planar mirror render? Only the full tiers do (cata and the
-    /// experimental tier above it); the SSR tier reflects through the screen-space trace alone.
+    /// experimental tiers above it); the SSR tier reflects through the screen-space trace alone.
+    /// At [`WATER_DETAIL_RT`] the ray-traced reflections stand the mirror down while they run.
     pub fn has_planar_reflection(self) -> bool {
         self.0 >= WATER_DETAIL_CATA
     }

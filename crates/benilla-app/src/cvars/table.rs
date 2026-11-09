@@ -1160,7 +1160,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // deliberately leaves the 1 slot EMPTY rather than renumbering to a dense 0/1 — a medium tier
     // is a real thing that could land later, and it should land on its own number instead of
     // shifting a value players already have in `config.toml`. (fork: 1 is since the SSR-only cata
-    // tier, and 3 the experimental modern combine — `liquid::WATER_DETAIL_EXPERIMENTAL`.)
+    // tier, 3 the experimental modern combine — `liquid::WATER_DETAIL_EXPERIMENTAL` — and 4 that
+    // combine reflecting by ray, native only — `liquid::WATER_DETAIL_RT`.)
     //
     // **Registered at 2**, so cata water is what the client looks like out of the box. That is a
     // benilla choice, not a reference default (1.12.1 has no such CVar at all: its water is the

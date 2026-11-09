@@ -14,16 +14,21 @@
 //!   (`bindless::enabled`), and `WOW_RT=0` did not turn it off. Decided once at render startup;
 //!   [`RtScene`] exists exactly where it holds, and every pipeline that can trace declares the
 //!   scene for the whole session, so nothing re-specializes on a switch.
-//! - **enabled** ([`enabled`]): capable, and the `rayTracing` option
-//!   ([`crate::modern::RayTracingSetting`], extracted every frame) is on. Read each frame. While it
-//!   holds, the scene is built and kept; when it drops, every BLAS, the TLAS, the arenas and the
-//!   scratch are freed ([`RtScene::free_all`]).
+//! - **enabled** ([`enabled`]): capable, and something asks for the scene this frame: the
+//!   `rayTracing` option ([`crate::modern::RayTracingSetting`]) or the water's ray-traced tier
+//!   ([`crate::modern::rt_reflect::RtWaterTier`], `waterDetail` 4, where the session may trace
+//!   reflections), both extracted every frame. Read each frame. While it holds, the scene is built
+//!   and kept; when it drops, every BLAS, the TLAS, the arenas and the scratch are freed
+//!   ([`RtScene::free_all`]).
 //! - **live** ([`live`]): enabled, and the scene is ready ([`RtScene::update_ready`]): every region
 //!   static_gx holds and every resident terrain cell has its BLAS, nothing the camera has not drawn
 //!   is still waiting to be assembled, and the TLAS holds them, for [`READY_FRAMES`] frames in a
 //!   row. Once live, streaming does not drop it: only an empty scene, or more entries waiting than
-//!   built, sends the lanes back to raster. The ray-traced lanes (`modern::gi::rt_gi`,
-//!   `modern::shadow::rt_shadows`, `modern::volumetrics::rt_froxel`) key on it, per frame.
+//!   built, sends the lanes back to raster. Who traces follows who asked: the option's lanes
+//!   (`modern::gi::rt_gi`, `modern::shadow::rt_shadows`, `modern::volumetrics::rt_froxel`) key on
+//!   [`option_live`] (live, and the option on), the water's (`modern::rt_reflect::rt_reflections`)
+//!   on [`water_live`] (live, and the water's tier asking), per frame. With only the water asking,
+//!   the shadows, the probe GI and the froxels stay on raster.
 //!
 //! The three are decided once a frame, in `PrepareAssets` ([`update_rt_tier`]), before anything
 //! reads them, so every pass of a frame agrees. A pass that declares the scene binds
@@ -73,6 +78,9 @@
 //! | 5 | the attribute arena, [`ATTRIBUTE_WORDS`] `u32` a vertex |
 //! | 6 | static_gx's texture classes, `binding_array<texture_2d_array<f32>, 1024>` |
 //! | 7, 8 | static_gx's repeat and clamp samplers |
+//! | 9 | the lanes this group may serve, one `vec4<u32>` row: `x` 1 where the shadow lane may trace
+//! through it (`rtshadow`'s twins ask `rt_scene::shadow_lane()`); 0 in the group bound for the
+//! water's reflections alone ([`RtScene::water_bind`]) and in the stand-in |
 //!
 //! Visible to the compute and fragment stages. The group index is the importer's
 //! ([`shader_defs`]).
@@ -138,8 +146,13 @@ const STUB_MARK: u32 = u32::MAX;
 /// The levels' decisions, for readers in any world ([`capable`], [`enabled`], [`live`]); written once
 /// a frame by [`update_rt_tier`] (and `CAPABLE` once at startup).
 static CAPABLE: AtomicBool = AtomicBool::new(false);
+/// Render startup has run, so [`capable`] is the session's answer.
+static DECIDED: AtomicBool = AtomicBool::new(false);
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static LIVE: AtomicBool = AtomicBool::new(false);
+/// Who asked for the scene this frame: the `rayTracing` option, the water's ray-traced tier.
+static OPTION: AtomicBool = AtomicBool::new(false);
+static WATER: AtomicBool = AtomicBool::new(false);
 /// Regions the camera has not drawn still waiting to be assembled, as [`assemble_unseen`] left
 /// them this frame: part of the scene's readiness.
 static UNSEEN_BACKLOG: AtomicU32 = AtomicU32::new(0);
@@ -150,15 +163,33 @@ pub(crate) fn capable() -> bool {
     CAPABLE.load(Ordering::Relaxed)
 }
 
-/// Capable, and the `rayTracing` option on this frame: the scene is (being) built.
+/// Has render startup decided [`capable`] yet?
+pub(crate) fn decided() -> bool {
+    DECIDED.load(Ordering::Relaxed)
+}
+
+/// Capable, and the `rayTracing` option or the water's ray-traced tier asks this frame: the scene
+/// is (being) built.
 pub(crate) fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
 
-/// Enabled, and the scene ready this frame: the ray-traced lanes trace. Per frame; outside the
+/// Enabled, and the scene ready this frame: whoever asked for it may trace. Per frame; outside the
 /// render world, the render world's latest decision.
 pub(crate) fn live() -> bool {
     LIVE.load(Ordering::Relaxed)
+}
+
+/// Live, and the `rayTracing` option on this frame: the option's lanes (shadows, probe GI,
+/// froxels) trace. False while only the water's tier holds the scene.
+pub(crate) fn option_live() -> bool {
+    live() && OPTION.load(Ordering::Relaxed)
+}
+
+/// Live, and the water's ray-traced tier asking this frame (`modern::rt_reflect`): the water may
+/// reflect by ray, whatever the `rayTracing` option says.
+pub(crate) fn water_live() -> bool {
+    live() && WATER.load(Ordering::Relaxed)
 }
 
 /// The device can (ray queries, and static_gx bindless, whose table and arena the scene reads),
@@ -177,6 +208,9 @@ pub(crate) struct RtTier {
     pub capable: bool,
     pub enabled: bool,
     pub live: bool,
+    /// Who asks for the scene this frame: the `rayTracing` option, the water's ray-traced tier.
+    pub option: bool,
+    pub water: bool,
     /// Render frames since startup: the switch lines' clock.
     pub frame: u32,
     /// When the lanes started waiting for a ready scene (the option came on, or a live scene fell
@@ -201,6 +235,7 @@ pub(crate) fn layout() -> BindGroupLayoutDescriptor {
                     .count(NonZero::new(GX_CLASS_SLOTS).unwrap()),
                 sampler(SamplerBindingType::Filtering),
                 sampler(SamplerBindingType::Filtering),
+                storage_buffer_read_only_sized(false, None),
             ),
         ),
     )
@@ -369,7 +404,12 @@ pub(crate) struct RtScene {
     frame: RtFrame,
     frame_no: u32,
     bind: Option<BindGroup>,
+    /// The same scene with its lane row clear: the shadow lane takes its raster path through it
+    /// ([`Self::water_bind`]).
+    bind_water: Option<BindGroup>,
     bound: Option<BindKey>,
+    /// Binding 9's two rows: every lane, and the reflections alone.
+    lane_rows: (Buffer, Buffer),
     /// Entries were waiting at the last frame's end: the settled line is due when none are.
     was_pending: bool,
     /// fork: F — the stand-in bind group ([`Self::lane_bind`]) over an empty TLAS, built
@@ -445,7 +485,20 @@ impl RtScene {
             frame: RtFrame::default(),
             frame_no: 0,
             bind: None,
+            bind_water: None,
             bound: None,
+            lane_rows: (
+                device.create_buffer_with_data(&BufferInitDescriptor {
+                    label: Some("rt_lanes_all"),
+                    contents: bytemuck::cast_slice(&[1u32, 0, 0, 0]),
+                    usage: BufferUsages::STORAGE,
+                }),
+                device.create_buffer_with_data(&BufferInitDescriptor {
+                    label: Some("rt_lanes_water"),
+                    contents: bytemuck::cast_slice(&[0u32; 4]),
+                    usage: BufferUsages::STORAGE,
+                }),
+            ),
             was_pending: false,
             stub: None,
             stub_parts: None,
@@ -474,6 +527,14 @@ impl RtScene {
         } else {
             self.stub.as_ref()
         }
+    }
+
+    /// The group the material draws bind (`MaterialExtraBindGroup`, `modern::rt_shadow`) when the
+    /// water's reflections are live and the shadow lane is not: the scene, with binding 9's lane row
+    /// clear, so every `rtshadow` twin in the terrain, the models and the water takes its raster
+    /// path while `rtreflect` traces. The stand-in until the scene's group exists.
+    pub(crate) fn water_bind(&self) -> Option<&BindGroup> {
+        self.bind_water.as_ref().or(self.stub.as_ref())
     }
 
     /// fork: F — build the stand-in once. Its TLAS is built here, empty, and submitted at once, so
@@ -523,6 +584,7 @@ impl RtScene {
                 &views[..],
                 &pipes.sampler,
                 &pipes.sampler_clamp,
+                self.lane_rows.1.as_entire_binding(),
             )),
         ));
         self.stub_parts = Some((tlas, rows));
@@ -555,6 +617,7 @@ impl RtScene {
         self.terrain_alloc = RangeAlloc::default();
         self.dirty_slots.clear();
         self.bind = None;
+        self.bind_water = None;
         self.bound = None;
         self.was_pending = false;
     }
@@ -1003,10 +1066,12 @@ impl RtScene {
             self.instance_buffer.as_ref(),
         ) else {
             self.bind = None;
+            self.bind_water = None;
             return;
         };
         if self.built == 0 {
             self.bind = None;
+            self.bind_water = None;
             return;
         }
         let white = pool.white(device, queue);
@@ -1030,21 +1095,26 @@ impl RtScene {
             })
             .collect();
         let layout = pipeline_cache.get_bind_group_layout(&self.layout);
-        self.bind = Some(device.create_bind_group(
-            "rt_scene",
-            &layout,
-            &BindGroupEntries::sequential((
-                self.tlas.as_binding(),
-                instances.as_entire_binding(),
-                table.as_entire_binding(),
-                arena.as_entire_binding(),
-                terrain.as_entire_binding(),
-                attributes.as_entire_binding(),
-                &views[..],
-                &pipes.sampler,
-                &pipes.sampler_clamp,
-            )),
-        ));
+        let group = |label: &str, lanes: &Buffer| {
+            device.create_bind_group(
+                label,
+                &layout,
+                &BindGroupEntries::sequential((
+                    self.tlas.as_binding(),
+                    instances.as_entire_binding(),
+                    table.as_entire_binding(),
+                    arena.as_entire_binding(),
+                    terrain.as_entire_binding(),
+                    attributes.as_entire_binding(),
+                    &views[..],
+                    &pipes.sampler,
+                    &pipes.sampler_clamp,
+                    lanes.as_entire_binding(),
+                )),
+            )
+        };
+        self.bind = Some(group("rt_scene", &self.lane_rows.0));
+        self.bind_water = Some(group("rt_scene_water", &self.lane_rows.1));
         self.bound = Some(key);
     }
 
@@ -1203,6 +1273,7 @@ pub(crate) fn init_rt_scene(
 ) {
     let capable = capable_on(caps.as_deref());
     CAPABLE.store(capable, Ordering::Relaxed);
+    DECIDED.store(true, Ordering::Relaxed);
     commands.insert_resource(RtTier {
         capable,
         ..default()
@@ -1241,12 +1312,14 @@ pub(crate) fn init_rt_scene(
     commands.insert_resource(RtScene::new(&device, repack_layout, repack, budget));
 }
 
-/// `PrepareAssets`, first thing each frame: decide [`RtTier::enabled`] (capable and the
-/// `rayTracing` option) and [`RtTier::live`] (enabled and the scene ready as the last frame left
-/// it), publish both for every world ([`enabled`], [`live`]), and log one line at each switch: the
+/// `PrepareAssets`, first thing each frame: decide [`RtTier::enabled`] (capable, and the
+/// `rayTracing` option or the water's ray-traced tier asking) and [`RtTier::live`] (enabled and the
+/// scene ready as the last frame left it), publish both and who asked for every world
+/// ([`enabled`], [`live`], [`option_live`], [`water_live`]), and log one line at each switch: the
 /// requested and the effective state, the frame, and at a going-live how long the scene took.
 fn update_rt_tier(
     setting: Option<Res<crate::modern::RayTracingSetting>>,
+    water: Option<Res<crate::modern::rt_reflect::RtWaterTier>>,
     tier: Option<ResMut<RtTier>>,
     scene: Option<Res<RtScene>>,
 ) {
@@ -1255,7 +1328,25 @@ fn update_rt_tier(
     };
     tier.frame = tier.frame.wrapping_add(1);
     let frame = tier.frame;
-    let requested = setting.is_none_or(|s| s.0);
+    let option = setting.is_none_or(|s| s.0);
+    let water =
+        water.is_some_and(|w| w.0) && crate::modern::rt_reflect::rt_reflections_capable();
+    if (option, water) != (tier.option, tier.water) && tier.capable {
+        info!(
+            "rt: at frame {frame} the scene is asked for by {}",
+            match (option, water) {
+                (true, true) => "the rayTracing option and the water's RT tier",
+                (true, false) => "the rayTracing option",
+                (false, true) => "the water's RT tier alone (shadows, GI and froxels on raster)",
+                (false, false) => "nothing",
+            }
+        );
+    }
+    tier.option = option;
+    tier.water = water;
+    OPTION.store(option, Ordering::Relaxed);
+    WATER.store(water, Ordering::Relaxed);
+    let requested = option || water;
     let enabled = tier.capable && requested;
     let scene = scene.as_deref();
     let live = enabled && scene.is_some_and(|s| s.ready);

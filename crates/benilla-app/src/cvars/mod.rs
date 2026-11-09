@@ -2330,6 +2330,13 @@ mod tests {
         apply(&mut app, "waterDetail", "3");
         assert!(res::<WaterDetail>(&app).is_experimental());
         assert!(res::<WaterDetail>(&app).has_planar_reflection());
+        assert!(!res::<WaterDetail>(&app).wants_ray_traced_reflection());
+        // `4` is the experimental combine reflecting by ray (native, RT-capable; the mirror stands
+        // in elsewhere, so the tier keeps its planar reflection).
+        apply(&mut app, "waterDetail", "4");
+        assert!(res::<WaterDetail>(&app).is_experimental());
+        assert!(res::<WaterDetail>(&app).wants_ray_traced_reflection());
+        assert!(res::<WaterDetail>(&app).has_planar_reflection());
         apply(&mut app, "waterDetail", "7");
         assert!(res::<WaterDetail>(&app).is_cata());
         assert!(!res::<WaterDetail>(&app).is_experimental());
