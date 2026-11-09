@@ -140,7 +140,7 @@ struct RtHit {
 }
 
 // The nearest blocking surface along the ray, shaded as far as the voxel path shades a voxel.
-fn cast(origin: vec3<f32>, dir: vec3<f32>, t_min: f32, reach: f32) -> RtHit {
+fn cast_ray(origin: vec3<f32>, dir: vec3<f32>, t_min: f32, reach: f32) -> RtHit {
     let hit = rt_scene::trace(origin, dir, t_min, reach, rt_scene::MASK_ALL);
     if (hit.kind == RAY_QUERY_INTERSECTION_NONE) {
         return RtHit(0.0, reach, vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), 0.0);
@@ -211,7 +211,7 @@ fn trace_rays(
     var hit_dist = 0.0;
     if (valid > 0.0) {
         // The same start offset the march takes, as the near end of the query.
-        let hit = cast(p, dir, trace.tune.z, max(trace.clip.info.w, trace.tune.z + 1.0));
+        let hit = cast_ray(p, dir, trace.tune.z, max(trace.clip.info.w, trace.tune.z + 1.0));
         hit_dist = hit.dist;
         if (hit.kind < 0.5) {
             radiance = probegi::miss_radiance(g, dir, interior_class);
