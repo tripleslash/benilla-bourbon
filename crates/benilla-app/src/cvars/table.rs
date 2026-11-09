@@ -659,8 +659,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
         )
         .latched()
     } else {
-        // Deviation: Vulkan by default, measured faster than DX12 at benilla's default modern
-        // Cinematic frame (release worldview, 1080p, RTX 3080 Laptop, p50 ms: Stormwind 11.0
+        // Deviation: Vulkan by default, because it measured faster than DX12 at benilla's default
+        // modern Cinematic frame (release worldview, 1080p, RTX 3080 Laptop, p50 ms: Stormwind 11.0
         // against 12.3, Booty Bay 12.4 against 14.8).
         deviates(
             "gxApi",
