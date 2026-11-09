@@ -231,6 +231,10 @@ fn sun_visibility_fast(
             break;
         }
     }
+    // An entity already shades the point wholly: the ray could only multiply 0.
+    if (ent <= 0.0) {
+        return 0.0;
+    }
     return ent * sun_ray(world_pos, to_sun);
 }
 
@@ -351,7 +355,11 @@ fn local_visibility(
     // Negative: the atlas's blocker search found nothing in front of the receiver (wholly lit).
     let raw = locallight::local_visibility_raw(map, samp, g, slot, anchor, world_pos, normal, near);
     let atlas = select(raw, 1.0, raw < 0.0);
-    let rays = lamp_rays(world_pos, normal, light, clear, near, g.soft.y, u32(g.soft.x));
+    // An entity already shades the point wholly from this lamp: the rays could only multiply 0.
+    var rays = 0.0;
+    if (atlas > 0.0) {
+        rays = lamp_rays(world_pos, normal, light, clear, near, g.soft.y, u32(g.soft.x));
+    }
     let shaded = mix(1.0 - g.soft.z, 1.0, atlas * rays);
     return mix(1.0, shaded, fade);
 }
