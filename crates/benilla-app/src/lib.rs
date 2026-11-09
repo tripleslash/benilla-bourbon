@@ -733,8 +733,8 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     // No `game://` source: the five UI shaders are compiled in by `crate::shaders`
     // (`embedded://benilla_app/shaders/…`), so no build-machine path reaches the binary.
 
-    // fork: dlss (FORK.md) — NGX's runtime path and Vulkan extensions, before `RenderPlugin`
-    // creates the device.
+    // fork: dlss (FORK.md) — NGX's runtime path and Vulkan extensions, and Streamline when
+    // DLSS frame generation is chosen, all before `RenderPlugin` creates the device.
     #[cfg(not(target_arch = "wasm32"))]
     video::install_dlss(&mut app);
 

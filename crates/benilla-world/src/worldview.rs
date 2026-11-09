@@ -105,6 +105,24 @@ pub fn run_with(build: BuildId, extra: impl FnOnce(&mut App)) -> AppExit {
         ),
     }
 
+    // fork: dlss (FORK.md) — DLSS's boot half, as the client's: NGX's runtime path and
+    // Streamline (Reflex, DLSS frame generation) from `$WOW_DLSS_PATH` or `benilla-config/dlss/`
+    // under the working folder, before `RenderPlugin` creates the device. `WOW_STREAMLINE=0`
+    // keeps Streamline out.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let state = std::env::current_dir().ok().map(|d| d.join("benilla-config"));
+        let backends = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::all());
+        let streamline =
+            !crate::launch_env::live_var("WOW_STREAMLINE").is_some_and(|v| v.trim() == "0");
+        crate::dlss::install_boot(
+            &mut app,
+            crate::dlss::DlssRuntime::resolve(state.as_deref()),
+            backends,
+            streamline,
+        );
+    }
+
     let background = crate::bgwin::background_run();
     app.add_plugins(boot::tuned_default_plugins(Window {
         title: "benilla worldview".into(),

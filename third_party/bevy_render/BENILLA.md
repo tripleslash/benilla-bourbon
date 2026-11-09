@@ -355,6 +355,13 @@ descriptor's `multiview_mask` (`None` for any id not in the map, as upstream). A
 re-queues the id and keeps the mask. Native only (`cfg(not(target_arch = "wasm32"))`): the field,
 the function and the lookup; wasm32 passes `None` as before.
 
+## The eighteenth delta: a frame-latency marker hook in `render_system`
+
+`renderer::present_hook::set(fn(Phase))` installs one callback that `render_system` runs before the
+render graph (`SubmitStart`), after the last submit (`SubmitEnd`) and around the window presents
+(`PresentStart`, `PresentEnd`). Streamline's PC Latency markers, which DLSS Frame Generation
+requires, are set there (`benilla-world/src/dlss/streamline.rs`). Unset, a `OnceLock` read per point.
+
 ## What this does NOT do
 
 It does not make the render app single-threaded, and it is not a general fix for "wgpu on a worker".

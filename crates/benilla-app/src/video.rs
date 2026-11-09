@@ -169,14 +169,21 @@ pub(crate) fn with_render_api(
 
 /// fork: dlss (FORK.md) — DLSS's boot half ([`benilla_world::dlss::install_boot`]): the
 /// runtime folder (`$WOW_DLSS_PATH`, else `benilla-config/dlss/`, `wow-data/dlss/` in the desktop
-/// build) and NGX's Vulkan extensions on a Vulkan boot. Every DLSS choice switches at run time.
+/// build), NGX's Vulkan extensions on a Vulkan boot, and Streamline on an NVIDIA adapter, which
+/// brings Reflex to either frame generation and DLSS Frame Generation where the card runs it.
+/// Streamline sits on the swap chain from device creation, so it loads here whatever the stored
+/// choices say, and every DLSS choice then switches at run time. `WOW_STREAMLINE=0` keeps it out.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn install_dlss(app: &mut App) {
+    let streamline = !benilla_world::launch_env::live_var("WOW_STREAMLINE")
+        .is_some_and(|v| v.trim() == "0")
+        && has_nvidia_gpu();
     let home = crate::local_state::home();
     benilla_world::dlss::install_boot(
         app,
         benilla_world::dlss::DlssRuntime::resolve(home.as_deref()),
         boot_render_backends(),
+        streamline,
     );
 }
 

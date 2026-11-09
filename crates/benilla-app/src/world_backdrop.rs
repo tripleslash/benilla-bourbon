@@ -21,9 +21,8 @@
 //! the scale at 1.0 ([`effective_scale`]).
 //!
 //! fork: dlss (FORK.md) — the `upscaler` CVar picks what fills that slot: DLSS 4.5 (the
-//! default, FSR where NGX reports no support), FSR, or neither; frame generation runs FSR's
-//! cadence either way, its frames made by DLSS-G where NGX runs it and by FSR's chain otherwise
-//! ([`resolve_upscaler`]).
+//! default, FSR where NGX reports no support), FSR, or neither; frame generation is DLSS's
+//! (Streamline) where it runs and FSR's otherwise ([`resolve_upscaler`]).
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
@@ -33,8 +32,10 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, T
 use bevy::window::PrimaryWindow;
 
 use crate::ui_pass::PlayerUiCamera;
-use benilla_world::dlss::{DlssFrameGeneration, DlssSupport, Upscaler, UpscalerChoice};
 use benilla_world::ffx_glow::FfxBackdrop;
+use benilla_world::dlss::{
+    DlssFrameGeneration, DlssSupport, DlssgFrames, Reflex, ReflexSetting, Upscaler, UpscalerChoice,
+};
 use benilla_world::fsr::{FgBlocked, FrameGeneration, FsrView, UpscalerKind};
 use benilla_world::view::WorldCamera;
 
@@ -125,9 +126,9 @@ fn fsr_active(effective: f32, frame_generation: bool, msaa: Msaa) -> bool {
 
 /// fork: dlss (FORK.md) — what the slot runs this frame, from the `upscaler` choice, the
 /// `frameGeneration` wish and what this machine supports: the upscaler (`None`: the bilinear
-/// stretch), and which generator makes the generated frames, DLSS-G or FSR's chain (at most one).
-/// DLSS falls back to FSR where NGX reports no support or refused a feature; DLSS-G where NGX
-/// reports none or refused it, to FSR's chain on whichever upscaler is in the slot.
+/// stretch), DLSS frame generation, and FSR frame generation. DLSS falls back to FSR where NGX
+/// reports no support or refused a feature; DLSS frame generation where Streamline does not run,
+/// to FSR's on whichever upscaler is in the slot.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Slot {
     pub(crate) upscaler: Option<UpscalerKind>,
@@ -139,7 +140,6 @@ pub(crate) fn resolve_upscaler(
     choice: Upscaler,
     support: DlssSupport,
     refused: bool,
-    fg_refused: bool,
     frame_generation: bool,
 ) -> Slot {
     match choice {
@@ -155,7 +155,7 @@ pub(crate) fn resolve_upscaler(
         },
         Upscaler::Dlss => {
             let sr = support.super_resolution && !refused;
-            let dlss_fg = frame_generation && support.frame_generation && !fg_refused;
+            let dlss_fg = frame_generation && support.frame_generation;
             Slot {
                 upscaler: Some(if sr {
                     UpscalerKind::Dlss
@@ -171,7 +171,10 @@ pub(crate) fn resolve_upscaler(
 
 /// fork: dlss (FORK.md) — frame generation of either kind is wanted, with an upscaler in the
 /// slot (`upscaler = off` runs neither).
-fn frame_generation_wanted(choice: Option<&UpscalerChoice>, fg: Option<&FrameGeneration>) -> bool {
+fn frame_generation_wanted(
+    choice: Option<&UpscalerChoice>,
+    fg: Option<&FrameGeneration>,
+) -> bool {
     fg.is_some_and(|f| f.0) && choice.is_none_or(|c| c.0 != Upscaler::Off)
 }
 
@@ -380,11 +383,11 @@ fn sync_fsr_view(
         choice.as_deref().map_or_else(Upscaler::default, |c| c.0),
         support.as_deref().copied().unwrap_or_default(),
         benilla_world::dlss::refused(),
-        benilla_world::dlss::frame_generation_refused(),
         fg.is_some_and(|f| f.0),
     );
+    // FSR's held-frame cadence stands down while DLSS frame generation paces the present.
     if let Some(mut blocked) = blocked {
-        let want = capture.is_some();
+        let want = capture.is_some() || slot.dlss_frame_generation;
         if blocked.0 != want {
             blocked.0 = want;
         }
@@ -393,8 +396,8 @@ fn sync_fsr_view(
         return;
     };
     let display = window_physical_size(window);
-    // FSR's cadence runs for either generator; `DlssFrameGeneration` picks DLSS-G.
-    let frame_generation = slot.fsr_frame_generation || slot.dlss_frame_generation;
+    let frame_generation = slot.fsr_frame_generation;
+    let any_frame_generation = slot.fsr_frame_generation || slot.dlss_frame_generation;
     let effective = backdrop.size.x as f32 / display.x as f32;
     let mut dlss_fg_on = false;
     for (entity, camera, msaa, view) in &mut cameras {
@@ -404,7 +407,7 @@ fn sync_fsr_view(
         let on = kind.is_some()
             && fsr_active(
                 effective,
-                frame_generation,
+                any_frame_generation,
                 msaa.copied().unwrap_or_default(),
             );
         let kind = kind.unwrap_or_default();
@@ -439,6 +442,82 @@ fn sync_fsr_view(
     if let Some(mut dlss_fg) = dlss_fg {
         if dlss_fg.0 != dlss_fg_on {
             dlss_fg.0 = dlss_fg_on;
+        }
+    }
+}
+
+/// fork: dlss (FORK.md) — the frame-generation multiplier that runs, from the one asked for
+/// (`frameGenerationMultiplier`), the slot and what this machine supports, and the reason it is
+/// what it is: DLSS-G reaches [`DlssSupport::frame_generation_max`], FSR's chain one generated
+/// frame (2x), and 1 is no frame generation.
+pub(crate) fn effective_multiplier(asked: u32, slot: Slot, support: DlssSupport) -> (u32, &'static str) {
+    let asked = asked.max(2);
+    if slot.dlss_frame_generation {
+        let max = support.frame_generation_max.max(2);
+        if asked > max {
+            (max, "DLSS frame generation reaches no further on this card")
+        } else {
+            (asked, "DLSS frame generation")
+        }
+    } else if slot.fsr_frame_generation {
+        let fsr = benilla_world::fsr::cadence::FgMultiplier::FSR_MAX;
+        if asked > fsr {
+            (
+                fsr,
+                "FSR frame generation makes one frame per rendered frame; more takes DLSS multi-frame generation (RTX 50)",
+            )
+        } else {
+            (fsr, "FSR frame generation")
+        }
+    } else {
+        (1, "frame generation off")
+    }
+}
+
+/// fork: dlss (FORK.md) — after [`sync_fsr_view`]: DLSS-G's generated frames per rendered
+/// frame ([`DlssgFrames`]) from the multiplier that runs, one log line when that moves, and
+/// Reflex's mode from `nvidiaReflex` ([`ReflexSetting::resolve`]): with `auto`, on while either
+/// frame generation runs.
+#[allow(clippy::too_many_arguments)]
+fn sync_frame_generation_extras(
+    fg: Option<Res<FrameGeneration>>,
+    choice: Option<Res<UpscalerChoice>>,
+    support: Option<Res<DlssSupport>>,
+    multiplier: Option<Res<benilla_world::fsr::cadence::FgMultiplier>>,
+    dlssg_frames: Option<ResMut<DlssgFrames>>,
+    setting: Option<Res<ReflexSetting>>,
+    reflex: Option<ResMut<Reflex>>,
+    mut last: Local<Option<(u32, &'static str)>>,
+) {
+    let support = support.as_deref().copied().unwrap_or_default();
+    let slot = resolve_upscaler(
+        choice.as_deref().map_or_else(Upscaler::default, |c| c.0),
+        support,
+        benilla_world::dlss::refused(),
+        fg.is_some_and(|f| f.0),
+    );
+    let asked = multiplier.map_or(2, |m| m.0);
+    let effective = effective_multiplier(asked, slot, support);
+    if *last != Some(effective) {
+        *last = Some(effective);
+        info!(
+            "frame generation: {}x (asked {asked}x): {}",
+            effective.0, effective.1
+        );
+    }
+    if let Some(mut frames) = dlssg_frames {
+        let want = DlssgFrames(effective.0.saturating_sub(1).max(1));
+        if *frames != want {
+            *frames = want;
+        }
+    }
+    if let Some(mut reflex) = reflex {
+        let want = setting.as_deref().copied().unwrap_or_default().resolve(
+            support.reflex,
+            slot.fsr_frame_generation || slot.dlss_frame_generation,
+        );
+        if *reflex != want {
+            *reflex = want;
         }
     }
 }
@@ -480,6 +559,27 @@ pub(crate) fn on_cvar(
     }
 }
 
+/// fork: dlss (FORK.md) — `frameGenerationMultiplier`'s callback, presented frames per
+/// rendered frame clamped to 2..=4 (what runs is [`effective_multiplier`]'s), and `nvidiaReflex`'s,
+/// `auto`, `0`, `1` or `2`. Both apply to the next frame.
+pub(crate) fn on_frame_generation_cvar(
+    ev: &crate::cvars::CvarChanged,
+    multiplier: Option<bevy::prelude::Mut<'_, benilla_world::fsr::cadence::FgMultiplier>>,
+    reflex: Option<bevy::prelude::Mut<'_, ReflexSetting>>,
+) {
+    if ev.is("frameGenerationMultiplier") {
+        if let Some(mut m) = multiplier {
+            let v = ev.num();
+            m.0 = if v.is_finite() { (v.round() as u32).clamp(2, 4) } else { 2 };
+        }
+    }
+    if ev.is("nvidiaReflex") {
+        if let Some(mut r) = reflex {
+            *r = ReflexSetting::from_cvar(&ev.new);
+        }
+    }
+}
+
 impl Plugin for WorldBackdropPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<RenderScale>()
@@ -489,6 +589,10 @@ impl Plugin for WorldBackdropPlugin {
             // fork: dlss (FORK.md) — the slot's knobs; `DlssPlugin` installs them too.
             .init_resource::<UpscalerChoice>()
             .init_resource::<DlssFrameGeneration>()
+            .init_resource::<benilla_world::fsr::cadence::FgMultiplier>()
+            .init_resource::<DlssgFrames>()
+            .init_resource::<ReflexSetting>()
+            .init_resource::<Reflex>()
             .add_systems(Startup, setup_backdrop)
             .add_systems(
                 Update,
@@ -497,6 +601,7 @@ impl Plugin for WorldBackdropPlugin {
                     retarget_world_camera,
                     claim_backdrop,
                     sync_fsr_view,
+                    sync_frame_generation_extras,
                 )
                     .chain()
                     // After the calls, whose `renderScale` callback writes the knob.
@@ -703,8 +808,32 @@ mod tests {
         assert!((fsr_mip_bias(1.0) - -1.0).abs() < 1e-6);
     }
 
-    /// fork: dlss (FORK.md) — DLSS where supported, FSR where not or when refused; DLSS-G
-    /// where NGX runs it, FSR's chain otherwise or when refused; `off` runs neither.
+    /// fork: dlss (FORK.md) — the multiplier that runs: DLSS-G up to the card's reach, FSR's
+    /// chain 2x whatever is asked, 1 with no frame generation.
+    #[test]
+    fn the_multiplier_clamps_to_what_generates() {
+        let rtx50 = DlssSupport {
+            super_resolution: true,
+            frame_generation: true,
+            frame_generation_max: 4,
+            ..default()
+        };
+        let rtx40 = DlssSupport {
+            frame_generation_max: 2,
+            ..rtx50
+        };
+        let dlss = resolve_upscaler(Upscaler::Dlss, rtx50, false, true);
+        assert_eq!(effective_multiplier(3, dlss, rtx50).0, 3);
+        assert_eq!(effective_multiplier(4, dlss, rtx50).0, 4);
+        assert_eq!(effective_multiplier(4, dlss, rtx40).0, 2);
+        let fsr = resolve_upscaler(Upscaler::Fsr, rtx50, false, true);
+        assert_eq!(effective_multiplier(4, fsr, rtx50).0, 2);
+        let off = resolve_upscaler(Upscaler::Dlss, rtx50, false, false);
+        assert_eq!(effective_multiplier(3, off, rtx50).0, 1);
+    }
+
+    /// fork: dlss (FORK.md) — DLSS where supported, FSR where not or when refused; DLSS
+    /// frame generation where Streamline runs, FSR's otherwise; `off` runs neither.
     #[test]
     fn the_slot_resolves_dlss_with_fsr_as_its_fallback() {
         let none = DlssSupport::default();
@@ -715,30 +844,23 @@ mod tests {
         let all = DlssSupport {
             super_resolution: true,
             frame_generation: true,
-            ray_reconstruction: false,
+            frame_generation_max: 2,
+            ..default()
         };
-        let s = resolve_upscaler(Upscaler::Dlss, all, false, false, true);
+        let s = resolve_upscaler(Upscaler::Dlss, all, false, true);
         assert_eq!(s.upscaler, Some(UpscalerKind::Dlss));
         assert!(s.dlss_frame_generation && !s.fsr_frame_generation);
-        let s = resolve_upscaler(Upscaler::Dlss, sr, false, false, true);
+        let s = resolve_upscaler(Upscaler::Dlss, sr, false, true);
         assert_eq!(s.upscaler, Some(UpscalerKind::Dlss));
-        assert!(
-            !s.dlss_frame_generation && s.fsr_frame_generation,
-            "RTX 20/30: FSR FG on DLSS"
-        );
-        let s = resolve_upscaler(Upscaler::Dlss, all, false, true, true);
-        assert!(
-            !s.dlss_frame_generation && s.fsr_frame_generation,
-            "DLSS-G refused: FSR's"
-        );
-        let s = resolve_upscaler(Upscaler::Dlss, none, false, false, true);
+        assert!(!s.dlss_frame_generation && s.fsr_frame_generation, "RTX 20/30: FSR FG on DLSS");
+        let s = resolve_upscaler(Upscaler::Dlss, none, false, true);
         assert_eq!(s.upscaler, Some(UpscalerKind::Fsr), "no NGX: FSR");
-        let s = resolve_upscaler(Upscaler::Dlss, all, true, false, false);
+        let s = resolve_upscaler(Upscaler::Dlss, all, true, false);
         assert_eq!(s.upscaler, Some(UpscalerKind::Fsr), "refused: FSR");
-        let s = resolve_upscaler(Upscaler::Fsr, all, false, false, true);
+        let s = resolve_upscaler(Upscaler::Fsr, all, false, true);
         assert_eq!(s.upscaler, Some(UpscalerKind::Fsr));
         assert!(!s.dlss_frame_generation && s.fsr_frame_generation);
-        let s = resolve_upscaler(Upscaler::Off, all, false, false, true);
+        let s = resolve_upscaler(Upscaler::Off, all, false, true);
         assert_eq!(s.upscaler, None);
         assert!(!s.dlss_frame_generation && !s.fsr_frame_generation);
     }

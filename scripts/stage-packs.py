@@ -77,6 +77,7 @@ def stage_dlss():
     """fork: dlss (FORK.md) — NVIDIA's DLSS runtime as `dlss/<dll>.partNN` plus
     `dlss/<dll>.parts.json` with its SHA-1, which the standalone exe fetches. The twin of the step in
     scripts/stage-desktop.sh."""
+    import glob
     import hashlib
     import shutil
 
@@ -85,6 +86,8 @@ def stage_dlss():
     os.makedirs(dest)
     rel = "third_party/nvidia-dlss/lib/Windows_x86_64/rel/"
     dlls = [rel + "nvngx_dlss.dll", rel + "nvngx_dlssg.dll"]
+    dlls += sorted(glob.glob("third_party/nvidia-dlss/streamline/bin/x64/sl.*.dll"))
+    dlls += ["third_party/nvidia-dlss/streamline/bin/x64/NvLowLatencyVk.dll"]
     for dll in dlls:
         if not os.path.isfile(dll):
             continue

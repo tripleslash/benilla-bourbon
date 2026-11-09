@@ -22,11 +22,6 @@
 //! written, and the chain reads those stored values back through a non-sRGB view, the SDK's SDR
 //! back-buffer case (`BackBufferTransferFunction == 0`).
 //!
-//! fork: dlss (FORK.md) — **The generator.** With DLSS Frame Generation on
-//! ([`crate::dlss::DlssFrameGeneration`]) the same cadence, the same `WorldFinal` pair and the same
-//! present run, and NGX's DLSS-G makes the generated frame instead of this chain (`dlss::fg`): the
-//! view then allocates none of the chain's working set (`Generator`) and this pass only composes.
-//!
 //! **Presentation.** On a rendered world frame the UI camera grounds on the generated frame between
 //! the last real frame and this one; on the held frame after it, on `WorldFinal[p]`, the real frame
 //! just rendered ([`FgPresent`]). So the pair is monotonic in time and costs one frame of latency,
@@ -172,18 +167,6 @@ struct Targets {
     display: UVec2,
     format: TextureFormat,
     finals: [WorldFinal; 2],
-    generator: Generator,
-}
-
-/// fork: dlss (FORK.md) — what makes the generated frame: FSR's chain and its working set,
-/// or DLSS-G's output alone (`dlss::fg`).
-enum Generator {
-    Fsr(Box<Chain>),
-    Dlss(TextureView),
-}
-
-/// FSR's interpolation chain's working set.
-struct Chain {
     interpolated_depth: Buffer,
     field_x: Buffer,
     field_y: Buffer,
@@ -195,14 +178,12 @@ struct Chain {
 }
 
 impl Targets {
-    /// `dlss`: DLSS-G's output in that format in place of the chain (fork: dlss).
     fn new(
         device: &RenderDevice,
         formats: Formats,
         render: UVec2,
         display: UVec2,
         format: TextureFormat,
-        dlss: Option<TextureFormat>,
     ) -> Self {
         let sampled_format = format.remove_srgb_suffix();
         let view_formats: &[TextureFormat] = if sampled_format == format {
@@ -259,39 +240,14 @@ impl Targets {
                 mapped_at_creation: false,
             })
         };
-        let finals = [
-            final_image("fsr_world_final_0"),
-            final_image("fsr_world_final_1"),
-        ];
-        // fork: dlss (FORK.md) — DLSS-G writes a storage image of the backbuffer's linear
-        // format; the sRGB twin as a view format keeps the two resources one format family.
-        if let Some(linear) = dlss {
-            let srgb = [format];
-            let output = device
-                .create_texture(&TextureDescriptor {
-                    label: Some("dlss_fg_output"),
-                    size: Extent3d {
-                        width: display.x,
-                        height: display.y,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: TextureDimension::D2,
-                    format: linear,
-                    usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
-                    view_formats: if format == linear { &[] } else { &srgb },
-                })
-                .create_view(&TextureViewDescriptor::default());
-            return Self {
-                render,
-                display,
-                format,
-                finals,
-                generator: Generator::Dlss(output),
-            };
-        }
-        let chain = Chain {
+        Self {
+            render,
+            display,
+            format,
+            finals: [
+                final_image("fsr_world_final_0"),
+                final_image("fsr_world_final_1"),
+            ],
             interpolated_depth: scatter("fsr_fg_interpolated_depth"),
             field_x: scatter("fsr_fg_vector_field_x"),
             field_y: scatter("fsr_fg_vector_field_y"),
@@ -305,25 +261,6 @@ impl Targets {
                 COLOR_PYRAMID_MAX_LEVELS,
             ),
             output: image("fsr_fg_output", IMAGE, display),
-        };
-        Self {
-            render,
-            display,
-            format,
-            finals,
-            generator: Generator::Fsr(Box::new(chain)),
-        }
-    }
-
-    fn dlss(&self) -> bool {
-        matches!(self.generator, Generator::Dlss(_))
-    }
-
-    /// The generated frame the present reads.
-    fn generated(&self) -> &TextureView {
-        match &self.generator {
-            Generator::Fsr(c) => &c.output,
-            Generator::Dlss(v) => v,
         }
     }
 }
@@ -361,41 +298,6 @@ impl FgState {
     /// This frame's finished image, where the compose writes.
     pub fn final_attachment(&self) -> &TextureView {
         &self.targets.finals[self.parity].attachment
-    }
-
-    /// fork: dlss (FORK.md) — DLSS-G's output, on a view DLSS-G generates for.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn dlss_output(&self) -> Option<&TextureView> {
-        match &self.targets.generator {
-            Generator::Dlss(v) => Some(v),
-            Generator::Fsr(_) => None,
-        }
-    }
-
-    /// fork: dlss (FORK.md) — this frame's finished image through its linear view, DLSS-G's
-    /// backbuffer.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn current_final(&self) -> &TextureView {
-        &self.targets.finals[self.parity].sampled
-    }
-
-    /// fork: dlss (FORK.md) — the compose wrote this world frame's image.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn composed(&self) -> bool {
-        self.composed.load(Ordering::Acquire)
-    }
-
-    /// fork: dlss (FORK.md) — rendered frames since the pair last reset, this one counted;
-    /// 1 on a reset frame.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn frame_index_since_reset(&self) -> u32 {
-        self.frame_index_since_reset
-    }
-
-    /// fork: dlss (FORK.md) — DLSS-G wrote this world frame's generated image.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn mark_generated(&self) {
-        self.generated.store(true, Ordering::Release);
     }
 }
 
@@ -676,7 +578,7 @@ pub(super) fn init_pipelines(
 /// frame advances nothing and presents the real frame the last world frame composed; so does a
 /// world frame no held frame follows ([`FgSolo`]), with the one it composes itself.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub(crate) fn prepare_framegen(
+pub(super) fn prepare_framegen(
     mut commands: Commands,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
@@ -695,8 +597,6 @@ pub(crate) fn prepare_framegen(
         Option<&mut FgState>,
     )>,
     backdrops: Query<(&FfxBackdrop, &ViewTarget, &Msaa)>,
-    // fork: dlss (FORK.md) — DLSS-G in place of the chain.
-    dlss_fg: Option<Res<crate::dlss::DlssFrameGeneration>>,
 ) {
     let (Some(shaders), Some(present)) = (shaders, present) else {
         return;
@@ -716,24 +616,17 @@ pub(crate) fn prepare_framegen(
             continue;
         };
         let (render, display) = (fsr_state.render_size(), fsr_state.display_size());
-        // fork: dlss (FORK.md) — DLSS-G generates where it is on and can write this format.
-        let dlss = dlss_fg
-            .as_deref()
-            .is_some_and(|d| d.0)
-            .then(|| crate::dlss::fg_output_format(format, device.features()))
-            .flatten();
         let keep = fg.as_ref().is_some_and(|s| {
             s.targets.render == render
                 && s.targets.display == display
                 && s.targets.format == format
                 && s.decode == decode
-                && s.targets.dlss() == dlss.is_some()
         });
         let mut created = None;
         let state: &mut FgState = match fg {
             Some(s) if keep => s.into_inner(),
             _ => created.insert(FgState {
-                targets: Targets::new(&device, shaders.formats, render, display, format, dlss),
+                targets: Targets::new(&device, shaders.formats, render, display, format),
                 params: device.create_buffer(&BufferDescriptor {
                     label: Some("fsr_fg_params"),
                     size: PARAMS_SIZE,
@@ -760,14 +653,6 @@ pub(crate) fn prepare_framegen(
             state.composed = Arc::new(AtomicBool::new(false));
             state.generated = Arc::new(AtomicBool::new(false));
             let (factors, tan_half_fov) = depth_factors(view.clip_from_view);
-            // fork: dlss (FORK.md) — no pyramids under DLSS-G; the present reads none.
-            let mips = match &state.targets.generator {
-                Generator::Fsr(c) => (
-                    c.mv_pyramid.sizes.len() as f32,
-                    c.color_pyramid.sizes.len() as f32,
-                ),
-                Generator::Dlss(_) => (0.0, 0.0),
-            };
             let (r, d) = (render.as_vec2(), display.as_vec2());
             let params = FgParams {
                 render_size: r.to_array(),
@@ -778,8 +663,8 @@ pub(crate) fn prepare_framegen(
                 tan_half_fov,
                 frame_index_since_reset: state.frame_index_since_reset as f32,
                 srgb_output: if format.is_srgb() { 1.0 } else { 0.0 },
-                mv_pyramid_mips: mips.0,
-                color_pyramid_mips: mips.1,
+                mv_pyramid_mips: state.targets.mv_pyramid.sizes.len() as f32,
+                color_pyramid_mips: state.targets.color_pyramid.sizes.len() as f32,
                 _pad: [0.0; 3],
             };
             queue.write_buffer(&state.params, 0, bytemuck::bytes_of(&params));
@@ -794,7 +679,7 @@ pub(crate) fn prepare_framegen(
                 state.composed.clone(),
             )
         } else {
-            (state.targets.generated(), state.generated.clone())
+            (&state.targets.output, state.generated.clone())
         };
         let bind = device.create_bind_group(
             "fsr_fg_present",
@@ -818,7 +703,7 @@ pub(crate) fn prepare_framegen(
 /// (the FFXGlow combine of the upscaled world, `ffx_glow::compose_world_final`), then run the
 /// chain from `WorldFinal[1 − p]` and `WorldFinal[p]` to the generated frame. A solo world frame
 /// ([`FgSolo`]) composes and stops: nothing presents a generated frame.
-pub(crate) fn fsr_framegen_pass(
+pub(super) fn fsr_framegen_pass(
     world: &World,
     view: ViewQuery<(&FgState, &FsrState)>,
     held: Res<FsrHeld>,
@@ -837,19 +722,6 @@ pub(crate) fn fsr_framegen_pass(
     let (state, fsr) = view.into_inner();
     let Some(upscaled) = fsr.output() else {
         return; // the upscaler did not run: nothing to compose
-    };
-    // fork: dlss (FORK.md) — DLSS-G generates (`dlss::fg::dlss_framegen_pass`): compose only.
-    let Generator::Fsr(c) = &state.targets.generator else {
-        if crate::ffx_glow::compose_world_final(
-            world,
-            entity,
-            upscaled,
-            state.final_attachment(),
-            &mut render_context,
-        ) {
-            state.composed.store(true, Ordering::Release);
-        }
-        return;
     };
     let get = |id| pipeline_cache.get_compute_pipeline(id);
     let (
@@ -907,7 +779,7 @@ pub(crate) fn fsr_framegen_pass(
             params.clone(),
             dilated_mv,
             depths,
-            c.interpolated_depth.as_entire_binding(),
+            t.interpolated_depth.as_entire_binding(),
         )),
     );
     let g_field = device.create_bind_group(
@@ -920,8 +792,8 @@ pub(crate) fn fsr_framegen_pass(
             prev_final,
             cur_final,
             smp,
-            c.field_x.as_entire_binding(),
-            c.field_y.as_entire_binding(),
+            t.field_x.as_entire_binding(),
+            t.field_y.as_entire_binding(),
         )),
     );
     let g_mv_seed = device.create_bind_group(
@@ -929,9 +801,9 @@ pub(crate) fn fsr_framegen_pass(
         &layout(&l.mv_pyramid_seed),
         &BindGroupEntries::sequential((
             params.clone(),
-            c.field_x.as_entire_binding(),
-            c.field_y.as_entire_binding(),
-            &c.mv_pyramid.levels[0],
+            t.field_x.as_entire_binding(),
+            t.field_y.as_entire_binding(),
+            &t.mv_pyramid.levels[0],
         )),
     );
     let g_disocclusion = device.create_bind_group(
@@ -940,12 +812,12 @@ pub(crate) fn fsr_framegen_pass(
         &BindGroupEntries::sequential((
             params.clone(),
             depths,
-            c.interpolated_depth.as_entire_binding(),
+            t.interpolated_depth.as_entire_binding(),
             prev_depth.as_entire_binding(),
-            c.field_x.as_entire_binding(),
-            c.field_y.as_entire_binding(),
-            &c.mv_pyramid.sampled,
-            &c.disocclusion,
+            t.field_x.as_entire_binding(),
+            t.field_y.as_entire_binding(),
+            &t.mv_pyramid.sampled,
+            &t.disocclusion,
         )),
     );
     let g_interpolate = device.create_bind_group(
@@ -955,27 +827,27 @@ pub(crate) fn fsr_framegen_pass(
             params.clone(),
             prev_final,
             cur_final,
-            &c.disocclusion,
-            c.field_x.as_entire_binding(),
-            c.field_y.as_entire_binding(),
-            &c.mv_pyramid.sampled,
+            &t.disocclusion,
+            t.field_x.as_entire_binding(),
+            t.field_y.as_entire_binding(),
+            &t.mv_pyramid.sampled,
             smp,
-            &c.interp,
+            &t.interp,
         )),
     );
     let g_color_seed = device.create_bind_group(
         "fsr_fg_color_pyramid_seed",
         &layout(&l.color_pyramid_seed),
-        &BindGroupEntries::sequential((params.clone(), &c.interp, &c.color_pyramid.levels[0])),
+        &BindGroupEntries::sequential((params.clone(), &t.interp, &t.color_pyramid.levels[0])),
     );
     let g_inpaint = device.create_bind_group(
         "fsr_fg_inpaint",
         &layout(&l.inpaint),
         &BindGroupEntries::sequential((
             params.clone(),
-            &c.interp,
-            &c.color_pyramid.sampled,
-            &c.output,
+            &t.interp,
+            &t.color_pyramid.sampled,
+            &t.output,
         )),
     );
     let reduce_groups = |pyramid: &Pyramid| -> Vec<BindGroup> {
@@ -994,8 +866,8 @@ pub(crate) fn fsr_framegen_pass(
             .collect()
     };
     let (mv_reduce_groups, color_reduce_groups) = (
-        reduce_groups(&c.mv_pyramid),
-        reduce_groups(&c.color_pyramid),
+        reduce_groups(&t.mv_pyramid),
+        reduce_groups(&t.color_pyramid),
     );
     // The params block records whether this frame interpolates; a reset frame (index 0) skips the
     // preparation passes and the interpolation copies the current frame (`bExecutePreparationPasses`).
@@ -1005,9 +877,9 @@ pub(crate) fn fsr_framegen_pass(
     let diagnostics = diagnostics.as_deref();
     let encoder = render_context.command_encoder();
     // All three scatter targets accumulate from "nothing here".
-    encoder.clear_buffer(&c.interpolated_depth, 0, None);
-    encoder.clear_buffer(&c.field_x, 0, None);
-    encoder.clear_buffer(&c.field_y, 0, None);
+    encoder.clear_buffer(&t.interpolated_depth, 0, None);
+    encoder.clear_buffer(&t.field_x, 0, None);
+    encoder.clear_buffer(&t.field_y, 0, None);
     {
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("fsr_framegen"),
@@ -1023,16 +895,16 @@ pub(crate) fn fsr_framegen_pass(
         if prepare {
             dispatch(reconstruct_depth, &g_reconstruct, t.render);
             dispatch(game_vector_field, &g_field, t.render);
-            dispatch(mv_seed, &g_mv_seed, c.mv_pyramid.sizes[0]);
+            dispatch(mv_seed, &g_mv_seed, t.mv_pyramid.sizes[0]);
             for (i, group) in mv_reduce_groups.iter().enumerate() {
-                dispatch(mv_reduce, group, c.mv_pyramid.sizes[i + 1]);
+                dispatch(mv_reduce, group, t.mv_pyramid.sizes[i + 1]);
             }
             dispatch(disocclusion, &g_disocclusion, t.render);
         }
         dispatch(interpolate, &g_interpolate, t.display);
-        dispatch(color_seed, &g_color_seed, c.color_pyramid.sizes[0]);
+        dispatch(color_seed, &g_color_seed, t.color_pyramid.sizes[0]);
         for (i, group) in color_reduce_groups.iter().enumerate() {
-            dispatch(color_reduce, group, c.color_pyramid.sizes[i + 1]);
+            dispatch(color_reduce, group, t.color_pyramid.sizes[i + 1]);
         }
         dispatch(inpaint, &g_inpaint, t.display);
         span.end(&mut pass);

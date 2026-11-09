@@ -1421,8 +1421,12 @@ impl crate::Surface for Surface {
                     }
                     SurfaceTarget::WndHandle(hwnd) => {
                         profiling::scope!("IDXGIFactory2::CreateSwapChainForHwnd");
+                        // BENILLA: a present interposer creates the swap chain through its proxy
+                        // factory, so the swap chain wgpu presents is the interposer's.
+                        let factory = interposer::upgraded(&*self.factory)
+                            .unwrap_or_else(|| (*self.factory).clone());
                         unsafe {
-                            self.factory.CreateSwapChainForHwnd(
+                            factory.CreateSwapChainForHwnd(
                                 &device.present_queue,
                                 hwnd,
                                 &desc,
@@ -1714,4 +1718,44 @@ pub enum ShaderModel {
     _6_7,
     _6_8,
     _6_9,
+}
+
+/// BENILLA: a present interposer, NVIDIA Streamline in manual-hooking mode
+/// (`ProgrammingGuideManualHooking.md` 4.1). The host loads `sl.interposer.dll`, calls `slInit`,
+/// and hands its `slUpgradeInterface` here before the device opens. wgpu then creates its direct
+/// queue through the interposer's proxy device (hook `eID3D12Device_CreateCommandQueue`) and its
+/// HWND swap chain through the proxy factory (`eIDXGIFactory_CreateSwapChainForHwnd`), so every
+/// swap-chain call (`Present`, `GetBuffer`, `ResizeBuffers`, …) reaches the interposer. Unset, wgpu
+/// is unchanged. The composition targets are not routed.
+pub mod interposer {
+    use core::ffi::c_void;
+    use std::sync::OnceLock;
+    use windows_core::Interface;
+
+    /// `sl::Result slUpgradeInterface(void** baseInterface)`; `0` is `eOk`.
+    pub type UpgradeInterface = unsafe extern "C" fn(*mut *mut c_void) -> i32;
+
+    static UPGRADE: OnceLock<UpgradeInterface> = OnceLock::new();
+
+    /// Install the interposer, once, before the adapter opens. `false` if one was already set.
+    pub fn set_upgrade_interface(upgrade: UpgradeInterface) -> bool {
+        UPGRADE.set(upgrade).is_ok()
+    }
+
+    /// Whether an interposer is installed.
+    pub fn active() -> bool {
+        UPGRADE.get().is_some()
+    }
+
+    /// The interposer's proxy for `native`, or `None` without one or on its refusal. The proxy is
+    /// handed a reference of its own (a clone's), and the returned interface owns the proxy's.
+    pub(crate) fn upgraded<I: Interface + Clone>(native: &I) -> Option<I> {
+        let upgrade = UPGRADE.get()?;
+        let mut raw = native.clone().into_raw();
+        // SAFETY: `raw` is a live COM pointer we own one reference to; the interposer replaces it
+        // with its proxy (or leaves it) and the result is ours to release.
+        let ok = unsafe { upgrade(&mut raw) } == 0;
+        let iface = unsafe { I::from_raw(raw) };
+        ok.then_some(iface)
+    }
 }

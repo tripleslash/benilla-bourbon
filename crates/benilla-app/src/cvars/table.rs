@@ -1056,6 +1056,26 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "1",
         "benilla's own — 1.12 presents every frame it draws and no frame it did not",
     ),
+    // `frameGenerationMultiplier` — presented frames per rendered frame while frame generation
+    // runs, 2 to 4. FSR's runs 2 whatever is asked; DLSS's reaches what the card does (2 on an
+    // RTX 40, 4 on an RTX 50, `world_backdrop::effective_multiplier`). The knob is
+    // `benilla_world::fsr::cadence::FgMultiplier`, its default 2 (welded below). Applies to the
+    // next frame.
+    ours(
+        "frameGenerationMultiplier",
+        "2",
+        "benilla's own — 1.12 presents every frame it draws and no frame it did not",
+    ),
+    // `nvidiaReflex` — NVIDIA Reflex low latency through Streamline: `auto` (the default: on while
+    // either frame generation runs, where its held frames cost latency worth buying back, and off
+    // otherwise, where it only trades frame rate), `0` off, `1` on, `2` on with boost. Off on a
+    // machine without it; DLSS frame generation forces it on. The knob is
+    // `benilla_world::dlss::ReflexSetting`. Applies to the next frame.
+    ours(
+        "nvidiaReflex",
+        "auto",
+        "benilla's own — 1.12 has no latency control",
+    ),
     // `rcasSharpness` — FSR 3.1's RCAS sharpening on the SDK's 0..1 dial, `2 − 2·x` stops; the
     // knob is `benilla_world::fsr::RcasSharpness`, its default `RCAS_SHARPNESS_DEFAULT` (welded
     // below). Applies to the next frame.
@@ -1068,8 +1088,8 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // ── fork-owned block: dlss (FORK.md) ──
     // fork: dlss (FORK.md)
     // `upscaler` — what fills the temporal upscaler's slot below 1:1 or under frame generation:
-    // `dlss` (NVIDIA DLSS 4.5 Super Resolution and Frame Generation through NGX; FSR's wherever NGX
-    // reports no support), `fsr` (FSR 3.1.5) or `off` (the
+    // `dlss` (NVIDIA DLSS 4.5 Super Resolution, and DLSS Frame Generation through Streamline where
+    // it runs; FSR wherever NGX or Streamline reports no support), `fsr` (FSR 3.1.5) or `off` (the
     // bilinear stretch, no frame generation). The knob is `benilla_world::dlss::UpscalerChoice`,
     // its default `Upscaler::DEFAULT` (welded below): `dlss` natively, `fsr` on the web build,
     // which has no NGX. Applies to the next frame.

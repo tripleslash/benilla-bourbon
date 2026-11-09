@@ -75,28 +75,27 @@ pub(super) fn init_sdk(app: &mut App) {
         )),
         Some(_) => DlssSdk::new(project_id(), device).map_err(|e| e.to_string()),
     };
+    // Streamline's half (frame generation, its multiplier, Reflex), set just before.
+    let prior = app
+        .world()
+        .get_resource::<DlssSupport>()
+        .copied()
+        .unwrap_or_default();
+    let fg = prior.frame_generation;
     match outcome {
         Ok(sdk) => {
-            let (backend, rr, fg) = {
+            let (backend, rr) = {
                 let locked = sdk.lock().unwrap();
-                (
-                    locked.backend(),
-                    locked.ray_reconstruction_available(),
-                    locked.frame_generation_available(),
-                )
+                (locked.backend(), locked.ray_reconstruction_available())
             };
             info!(
-                "dlss: DLSS 4.5 super resolution on {backend:?}, frame generation {}",
-                if fg {
-                    "too"
-                } else {
-                    "not supported here (FSR's stands in)"
-                }
+                "dlss: DLSS 4.5 super resolution on {backend:?}{}",
+                if fg { ", frame generation through Streamline" } else { "" }
             );
             let support = DlssSupport {
                 super_resolution: true,
-                frame_generation: fg,
                 ray_reconstruction: rr,
+                ..prior
             };
             app.insert_resource(support);
             let render_app = app.sub_app_mut(RenderApp);
@@ -178,9 +177,7 @@ pub(crate) fn prepare_dlss(
                         view_formats: &[],
                     });
                     let exposure_view = exposure.create_view(&TextureViewDescriptor::default());
-                    // `display` would name `tracing::field::display` inside the macro.
-                    let out = display;
-                    info!("dlss: {mode:?} at {render} → {out}, HDR {hdr}");
+                    info!("dlss: {mode:?} at {render} → {display}, HDR {hdr}");
                     state.dlss = Some(super::DlssViewState::new(ViewDlss {
                         context,
                         render,

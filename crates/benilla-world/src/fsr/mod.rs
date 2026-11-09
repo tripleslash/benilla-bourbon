@@ -93,7 +93,7 @@ pub fn bevy_offset(fsr_jitter: Vec2) -> Vec2 {
     FsrVelocityTarget,
     FgState,
     FgPresent,
-    crate::dlss::DlssFgView
+    crate::dlss::HudlessCompose
 ))]
 pub struct FsrView {
     /// The display resolution the chain reconstructs, in physical px.
@@ -408,6 +408,8 @@ impl Plugin for FsrPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FsrHeld>()
             .init_resource::<FgSolo>()
+            .init_resource::<cadence::FgHolds>()
+            .init_resource::<cadence::FgMultiplier>()
             .init_resource::<RcasSharpness>()
             .init_resource::<velocity::FsrMotionParts>()
             .add_plugins((
@@ -415,6 +417,7 @@ impl Plugin for FsrPlugin {
                 ExtractComponentPlugin::<PresentsHeldFrames>::default(),
                 ExtractResourcePlugin::<FsrHeld>::default(),
                 ExtractResourcePlugin::<FgSolo>::default(),
+                ExtractResourcePlugin::<cadence::FgHolds>::default(),
                 ExtractResourcePlugin::<RcasSharpness>::default(),
                 ExtractResourcePlugin::<velocity::FsrMotionParts>::default(),
             ))
@@ -426,6 +429,7 @@ impl Plugin for FsrPlugin {
         };
         render_app
             .add_schedule(Schedule::new(cadence::HeldFrame))
+            .init_resource::<cadence::FgHolds>()
             .init_resource::<velocity::RigPalettePrev>()
             .init_resource::<velocity::VelocityFrame>()
             .init_resource::<velocity::EffectVelocityDraws>()
@@ -457,6 +461,15 @@ impl Plugin for FsrPlugin {
                         .in_set(RenderSystems::Render)
                         .before(render_system),
                 ),
+            )
+            // Native: the present count and the world frame's start, first in `Render`, and the
+            // held frames after it, in a schedule of their own after `Render`
+            // (`cadence::run_held_frames`).
+            .add_systems(
+                Render,
+                cadence::mark_render
+                    .in_set(RenderSystems::ExtractCommands)
+                    .run_if(|| cfg!(not(target_arch = "wasm32"))),
             )
             .add_systems(
                 Render,
@@ -500,6 +513,16 @@ impl Plugin for FsrPlugin {
     /// replaces the main app's update schedule, which only `finish` may.
     fn finish(&self, app: &mut App) {
         cadence::install(app);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+            let mut held = Schedule::new(cadence::FgHeldRender);
+            held.add_systems(cadence::run_held_frames);
+            render_app.add_schedule(held);
+            render_app
+                .world_mut()
+                .resource_mut::<bevy::render::RenderScheduleOrder>()
+                .insert_after(Render, cadence::FgHeldRender);
+        }
         let world = app.world();
         let (Some(device), Some(adapter)) = (
             world.get_resource::<RenderDevice>(),

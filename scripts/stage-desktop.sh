@@ -30,13 +30,14 @@ clear_parts "${SITE}" "${NAME}"
 
 # fork: dlss (FORK.md) — NVIDIA's DLSS runtime, which the standalone exe fetches into
 # wow-data/dlss/ (`crates/benilla-desktop/src/dlss.rs`): each DLL as `dlss/<dll>.partNN` plus
-# `dlss/<dll>.parts.json` carrying its SHA-1, from the vendored SDK (`third_party/nvidia-dlss`).
-# Staged with or without the exe.
+# `dlss/<dll>.parts.json` carrying its SHA-1, from the vendored SDK (`third_party/nvidia-dlss`) and
+# Streamline's runtime where it is vendored. Staged with or without the exe.
 DLSS_DEPLOY="${SITE}/dlss"
 rm -rf "${DLSS_DEPLOY}"
 mkdir -p "${DLSS_DEPLOY}"
 for dll in third_party/nvidia-dlss/lib/Windows_x86_64/rel/nvngx_dlss.dll \
-           third_party/nvidia-dlss/lib/Windows_x86_64/rel/nvngx_dlssg.dll; do
+           third_party/nvidia-dlss/lib/Windows_x86_64/rel/nvngx_dlssg.dll \
+           third_party/nvidia-dlss/streamline/bin/x64/sl.*.dll \n           third_party/nvidia-dlss/streamline/bin/x64/NvLowLatencyVk.dll; do
   [ -f "${dll}" ] || continue
   if command -v sha1sum >/dev/null 2>&1; then
     dll_sha1=$(sha1sum "${dll}" | cut -d' ' -f1)

@@ -194,6 +194,30 @@ fn new_vm<E: std::fmt::Display>(
     if let Err(e) = script.lua().globals().set("BENILLA_NATIVE", 1) {
         warn!("ui_script: BENILLA_NATIVE not set: {e}");
     }
+    // fork: dlss (FORK.md) — what the frame-generation rows may offer: `BENILLA_FG_MAX`, the
+    // most presented frames per drawn frame (DLSS-G's reach, else FSR's 2), and `BENILLA_REFLEX`,
+    // 1 where Reflex runs (nil elsewhere).
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let support = world
+            .get_resource::<benilla_world::dlss::DlssSupport>()
+            .copied()
+            .unwrap_or_default();
+        let fg_max = if support.frame_generation {
+            support.frame_generation_max.max(2)
+        } else {
+            benilla_world::fsr::cadence::FgMultiplier::FSR_MAX
+        };
+        let globals = script.lua().globals();
+        if let Err(e) = globals.set("BENILLA_FG_MAX", fg_max) {
+            warn!("ui_script: BENILLA_FG_MAX not set: {e}");
+        }
+        if support.reflex {
+            if let Err(e) = globals.set("BENILLA_REFLEX", 1) {
+                warn!("ui_script: BENILLA_REFLEX not set: {e}");
+            }
+        }
+    }
     script.set_european_numbers(european_numbers);
     // `[0xc0e080]`, which start-up sets once from `Wow.ini`, so every VM answers `GetLocale` alike.
     script.set_locale(super::client_locale().index());

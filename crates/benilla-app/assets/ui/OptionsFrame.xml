@@ -516,6 +516,59 @@
                 .. "Apply."
         end
 
+        -- fork: dlss (FORK.md) — 1.12 has neither. The Frame Generation Multiplier and
+        -- NVIDIA Reflex rows, a native client's only. `BENILLA_FG_MAX` (the most presented frames
+        -- per drawn frame this machine reaches: 4 on an RTX 50, 2 elsewhere) and `BENILLA_REFLEX`
+        -- (1 where Reflex runs) are set by the host before the layer loads; an entry the card
+        -- cannot run is greyed and says why.
+        if ( BENILLA_NATIVE ) then
+            local fgMax = BENILLA_FG_MAX or 2
+            local fgWhy = "Your graphics card shows at most " .. fgMax .. " frames for every frame "
+                .. "the game draws. More takes NVIDIA DLSS Multi Frame Generation, on a GeForce "
+                .. "RTX 50 card with the DLSS upscaler."
+            BENILLA_TOOLTIP_FG_MULTIPLIER =
+                "How many frames you see for every frame the game draws while frame generation "
+                .. "is on: 2x shows one generated frame between two drawn ones, 3x and 4x two and "
+                .. "three. Each step adds smoothness, not responsiveness. Applies at once."
+            if ( fgMax < 4 ) then
+                BENILLA_TOOLTIP_FG_MULTIPLIER = BENILLA_TOOLTIP_FG_MULTIPLIER .. "\n\n" .. fgWhy
+            end
+            BENILLA_FG_MULTIPLIER_ENTRIES = {}
+            for m = 2, 4 do
+                local entry = { text = m .. "x", value = tostring(m) }
+                if ( m > fgMax ) then
+                    entry.text = m .. "x (not on this card)"
+                    entry.disabled = 1
+                    entry.tooltipTitle = m .. "x"
+                    entry.tooltipText = fgWhy
+                end
+                table.insert(BENILLA_FG_MULTIPLIER_ENTRIES, entry)
+            end
+            local reflexWhy = "NVIDIA Reflex needs an NVIDIA GeForce card and the DLSS runtime."
+            BENILLA_TOOLTIP_REFLEX =
+                "NVIDIA Reflex keeps the game from drawing frames ahead of your graphics card, so "
+                .. "what you do reaches the screen sooner. Auto turns it on while frame generation "
+                .. "is on, where it wins back the latency the generated frames add; Boost also "
+                .. "keeps the card's clocks up, for a little less latency at more power. DLSS "
+                .. "Frame Generation always runs with it on. Applies at once."
+            if ( not BENILLA_REFLEX ) then
+                BENILLA_TOOLTIP_REFLEX = BENILLA_TOOLTIP_REFLEX .. "\n\n" .. reflexWhy
+            end
+            BENILLA_REFLEX_ENTRIES = {
+                { text = "Auto", value = "auto" },
+                { text = "Off", value = "0" },
+                { text = "On", value = "1" },
+                { text = "On + Boost", value = "2" },
+            }
+            if ( not BENILLA_REFLEX ) then
+                for _, entry in ipairs(BENILLA_REFLEX_ENTRIES) do
+                    entry.disabled = 1
+                    entry.tooltipTitle = entry.text
+                    entry.tooltipText = reflexWhy
+                end
+            end
+        end
+
         -- fork: dlss (FORK.md) — 1.12 has no upscaler to choose. The Upscaler dropdown's
         -- entries, which both windows read: DLSS only on a native client, the web build having
         -- no NGX.
@@ -803,6 +856,14 @@
                     table.insert(graphics, i + 2, "RowResolution")
                     table.insert(graphics, i + 3, "RowMultisample")
                     table.insert(graphics, i + 4, "RowGraphicsApi")
+                    break
+                end
+            end
+            -- fork: dlss (FORK.md) — the multiplier and Reflex under Frame Generation.
+            for i, rkey in ipairs(graphics) do
+                if ( rkey == "RowFrameGeneration" ) then
+                    table.insert(graphics, i + 1, "RowFrameGenerationMultiplier")
+                    table.insert(graphics, i + 2, "RowNvidiaReflex")
                     break
                 end
             end
@@ -1134,6 +1195,10 @@
                 info.text = e.text
                 info.value = e.value
                 info.func = BenillaOptionsDropdownEntry_OnClick
+                -- fork: an entry this machine cannot run, greyed, with the reason.
+                info.disabled = e.disabled
+                info.tooltipTitle = e.tooltipTitle
+                info.tooltipText = e.tooltipText
                 UIDropDownMenu_AddButton(info)
             end
         end
@@ -1489,6 +1554,12 @@
                             "RowRayTracingVolumetrics"} do
                         BenillaOptionsRow_SetEnabled(getglobal(base .. rkey), on)
                     end
+                    -- fork: dlss (FORK.md) — the multiplier while Frame Generation is
+                    -- on, Reflex where it runs.
+                    local fg = BenillaOptionsRow_Shown(getglobal(base .. "RowFrameGeneration")) ~= "0"
+                    BenillaOptionsRow_SetEnabled(getglobal(base .. "RowFrameGenerationMultiplier"), fg)
+                    BenillaOptionsRow_SetEnabled(getglobal(base .. "RowNvidiaReflex"),
+                        BENILLA_REFLEX ~= nil)
                 end
                 return
             end
@@ -2614,6 +2685,35 @@
                                                 this.deferred = 1
                                             </OnLoad></Scripts>
                                         </Frame>
+                                        <!-- fork: dlss (FORK.md) — the multiplier under
+                                             the box, and Reflex; a native client's only. -->
+                                        <Frame name="$parentRowFrameGenerationMultiplier" inherits="BenillaOptionsDropdownRowTemplate" hidden="true">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowFrameGeneration" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowFrameGeneration" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "frameGenerationMultiplier", "Frame Generation Multiplier",
+                                                    "BENILLA_TOOLTIP_FG_MULTIPLIER", 1)
+                                                BenillaOptionsDropdownRow_Setup(this,
+                                                    BENILLA_FG_MULTIPLIER_ENTRIES or {})
+                                                this.parentRow = "RowFrameGeneration"
+                                                if ( BENILLA_NATIVE ) then this:Show() end
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowNvidiaReflex" inherits="BenillaOptionsDropdownRowTemplate" hidden="true">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowFrameGenerationMultiplier" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowFrameGenerationMultiplier" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "nvidiaReflex", "NVIDIA Reflex",
+                                                    "BENILLA_TOOLTIP_REFLEX")
+                                                BenillaOptionsDropdownRow_Setup(this,
+                                                    BENILLA_REFLEX_ENTRIES or {})
+                                                if ( BENILLA_NATIVE ) then this:Show() end
+                                            </OnLoad></Scripts>
+                                        </Frame>
                                         <Frame name="$parentRowVerticalSync" inherits="BenillaOptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowFrameGeneration" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
@@ -2625,6 +2725,14 @@
                                                 -- live despite its gxRestart = 1.
                                                 BenillaOptionsRow_OnLoad(this, "gxVSync", "Vertical Sync",
                                                     "OPTION_TOOLTIP_VERTICAL_SYNC")
+                                                -- fork: dlss (FORK.md) — under the Reflex
+                                                -- row where it shows.
+                                                if ( BENILLA_NATIVE ) then
+                                                    local above = this:GetParent():GetName() .. "RowNvidiaReflex"
+                                                    this:ClearAllPoints()
+                                                    this:SetPoint("TOPLEFT", above, "BOTTOMLEFT", 0, -9)
+                                                    this:SetPoint("TOPRIGHT", above, "BOTTOMRIGHT", 0, -9)
+                                                end
                                             </OnLoad></Scripts>
                                         </Frame>
                                         <!-- Deviation: benilla's own level control, beside
@@ -4282,6 +4390,10 @@
             BENILLA_RENDER_SCALE = "Render Scale"
             -- fork: dlss (FORK.md)
             BENILLA_UPSCALER = "Upscaler"
+            if ( BENILLA_NATIVE ) then
+                BENILLA_FG_MULTIPLIER = "Frame Generation Multiplier"
+                BENILLA_REFLEX = "NVIDIA Reflex"
+            end
             -- fork: fsr (FORK.md)
             BENILLA_FRAME_GENERATION = "Use Frame Generation"
             BENILLA_RCAS_SHARPNESS = "RCAS Sharpening"
@@ -4329,6 +4441,9 @@
                         info.text = entry.text
                         info.value = entry.value
                         info.func = OptionsFrameDropdown_OnValueChanged
+                        info.disabled = entry.disabled
+                        info.tooltipTitle = entry.tooltipTitle
+                        info.tooltipText = entry.tooltipText
                         UIDropDownMenu_AddButton(info)
                     end
                     UIDropDownMenu_SetSelectedValue(menu, GetCVar(cvar))
@@ -4337,6 +4452,11 @@
             -- The entries our own rows offer, in their order.
             -- fork: dlss (FORK.md)
             BenillaUpscalerDropdown_Init = dropdown("upscaler", BENILLA_UPSCALER_ENTRIES)
+            if ( BENILLA_NATIVE ) then
+                BenillaFgMultiplierDropdown_Init = dropdown("frameGenerationMultiplier",
+                    BENILLA_FG_MULTIPLIER_ENTRIES)
+                BenillaReflexDropdown_Init = dropdown("nvidiaReflex", BENILLA_REFLEX_ENTRIES)
+            end
             BenillaLightingModelDropdown_Init = dropdown("lightingModel", {
                 { text = "Classic", value = "0" },
                 { text = "Modern", value = "1" },
@@ -4596,6 +4716,14 @@
                     name = "BENILLA_RAY_TRACING_VOLUMETRICS",
                     desc = BENILLA_TOOLTIP_RAY_TRACING_VOLUMETRICS,
                     type = "checkbutton", cvar = "rayTracingVolumetrics" } })
+                -- fork: dlss (FORK.md) -- the multiplier and Reflex under Frame Generation.
+                tinsert(rows, { category = DISPLAY, row = {
+                    name = "BENILLA_FG_MULTIPLIER", desc = BENILLA_TOOLTIP_FG_MULTIPLIER,
+                    type = "dropdown", identifier = "BenillaFgMultiplier",
+                    cvar = "frameGenerationMultiplier" } })
+                tinsert(rows, { category = DISPLAY, row = {
+                    name = "BENILLA_REFLEX", desc = BENILLA_TOOLTIP_REFLEX,
+                    type = "dropdown", identifier = "BenillaReflex", cvar = "nvidiaReflex" } })
             end
             -- A row placed by its neighbour: the category holding the Turtle row of that name.
             local function placeBeside(entry)
@@ -4649,7 +4777,7 @@
                 { name = "Display", from = DISPLAY, rows = {
                     "BENILLA_GRAPHICS_PRESET", "UI_SCALE", "BENILLA_RENDER_SCALE",
                     "BENILLA_UPSCALER", "BENILLA_RCAS_SHARPNESS", "BENILLA_FRAME_GENERATION",
-                    "BENILLA_BRIGHTNESS",
+                    "BENILLA_FG_MULTIPLIER", "BENILLA_REFLEX", "BENILLA_BRIGHTNESS",
                     "GAMMA", "BENILLA_MULTISAMPLE", "BENILLA_GRAPHICS_API" } },
                 { name = "World Detail", from = WORLD_APPEARANCE, rows = {
                     "FARCLIP", "BENILLA_GROUND_CLUTTER_DISTANCE", "BENILLA_GROUND_CLUTTER_DENSITY",

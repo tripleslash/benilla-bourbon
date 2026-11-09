@@ -1602,3 +1602,30 @@ where
 /// - Callback must not change anything to what the instance does not support.
 pub type CreateInstanceCallback<'this> =
     dyn for<'arg, 'pnext> FnOnce(CreateInstanceCallbackArgs<'arg, 'pnext, 'this>) + 'this;
+
+/// BENILLA: a present interposer, NVIDIA Streamline (`ProgrammingGuideManualHooking.md` 1.1, 4.2):
+/// its `sl.interposer.dll` loaded in place of `vulkan-1.dll`, so the instance's
+/// `vkGetInstanceProcAddr` and `vkGetDeviceProcAddr` are the interposer's. They answer the
+/// driver's functions for the whole API except the few it intercepts (instance and device creation,
+/// which add what its features need, and the swap-chain and present calls). Set before the
+/// instance is created; unset, wgpu loads the system loader as before.
+pub mod interposer {
+    use std::path::{Path, PathBuf};
+    use std::sync::OnceLock;
+
+    static LOADER: OnceLock<PathBuf> = OnceLock::new();
+
+    /// Load Vulkan from `path`, once, before the instance exists. `false` if already set.
+    pub fn set_loader(path: PathBuf) -> bool {
+        LOADER.set(path).is_ok()
+    }
+
+    pub(crate) fn loader() -> Option<&'static Path> {
+        LOADER.get().map(PathBuf::as_path)
+    }
+
+    /// Whether an interposer is installed.
+    pub fn active() -> bool {
+        LOADER.get().is_some()
+    }
+}

@@ -36,6 +36,8 @@ use bevy::ecs::system::SystemState;
 use bevy::prelude::*;
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::extract_component::ExtractComponent;
+use bevy::render::extract_resource::ExtractResource;
+use bevy::render::Render;
 use bevy::window::PrimaryWindow;
 
 use super::{FgSolo, FsrHeld, FsrView};
@@ -121,6 +123,8 @@ pub struct FgCadence {
     window: UVec2,
     /// The FSR epoch at the last world frame.
     epoch: u32,
+    /// Native: the held frames the render thread presents after the last world frame.
+    follow: u32,
 }
 
 /// What the cadence sees each frame.
@@ -186,8 +190,36 @@ impl FgCadence {
         }
     }
 
-    /// Frames presented per main-world update: two while a pair is held, else one.
+    /// Native: decide how many held frames the render thread presents after this world frame,
+    /// `generated` (the multiplier less one) once the history it interpolates from is valid, none
+    /// on a reset, a capture or out of the world. Every update is a world frame here: the held
+    /// frames never take a main-world update ([`run_held_frames`]).
+    pub fn next_native(&mut self, i: FgInputs, generated: u32) -> u32 {
+        let reset = i.window != self.window || i.epoch != self.epoch || !i.wanted || !i.in_world;
+        if reset {
+            self.since_reset = 0;
+        }
+        self.since_reset = self.since_reset.saturating_add(1);
+        self.window = i.window;
+        self.epoch = i.epoch;
+        self.held = false;
+        self.after_held = false;
+        // The SDK interpolates only from the second rendered frame of a history on.
+        self.follow = if reset || i.blocked || self.since_reset < 2 {
+            0
+        } else {
+            generated
+        };
+        self.ran_solo = self.follow == 0;
+        self.follow
+    }
+
+    /// Frames presented per main-world update: two while a pair is held, else one; natively, the
+    /// world frame and the held frames that follow it.
     pub fn presents_per_update(&self) -> u32 {
+        if self.follow > 0 {
+            return self.follow + 1;
+        }
         if self.held || self.after_held {
             2
         } else {
@@ -291,6 +323,10 @@ fn fg_main(
         .map(|at| now.duration_since(at).as_secs_f32())
         .filter(|_| cfg!(target_arch = "wasm32"));
     let wanted = world.resource::<FrameGeneration>().0;
+    if cfg!(not(target_arch = "wasm32")) {
+        fg_main_native(world, lookups, wanted);
+        return;
+    }
     let verdict = if wanted {
         let (window, in_world, epoch) = {
             let (windows, views) = lookups.get(world).expect("two queries validate");
@@ -339,6 +375,52 @@ fn fg_main(
     if !held && !ran_ahead {
         world.run_schedule(Main);
     }
+}
+
+/// Native `FgMain`: every update runs `Main` and is a world frame; the cadence only says how many
+/// held frames the render thread presents after it ([`FgHolds`], [`run_held_frames`]). So the
+/// main world simulates the next frame while the render thread renders this one and its held
+/// frames, and a held frame never costs a main-world update.
+fn fg_main_native(world: &mut World, lookups: &mut SystemState<FgLookups>, wanted: bool) {
+    let inputs = if wanted {
+        let (windows, views) = lookups.get(world).expect("two queries validate");
+        let window = windows.iter().next().map_or(UVec2::ZERO, |w| {
+            UVec2::new(w.physical_width(), w.physical_height())
+        });
+        let (in_world, epoch) = views.iter().next().map_or((false, 0), |f| (true, f.epoch));
+        FgInputs {
+            wanted,
+            in_world,
+            blocked: world.resource::<FgBlocked>().0,
+            window,
+            epoch,
+            interval: None,
+        }
+    } else {
+        FgInputs {
+            wanted,
+            in_world: false,
+            blocked: false,
+            window: UVec2::ZERO,
+            epoch: 0,
+            interval: None,
+        }
+    };
+    let generated = world.resource::<FgMultiplier>().generated();
+    let holds = world
+        .resource_mut::<FgCadence>()
+        .next_native(inputs, generated);
+    if world.resource::<FgHolds>().0 != holds {
+        world.resource_mut::<FgHolds>().0 = holds;
+    }
+    let solo = holds == 0;
+    if solo && inputs.in_world {
+        SOLO.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    if world.resource::<FgSolo>().0 != solo {
+        world.resource_mut::<FgSolo>().0 = solo;
+    }
+    world.run_schedule(Main);
 }
 
 /// fork: the browser's render worker (`bevy::render::render_worker`). Every page update is still
@@ -402,59 +484,157 @@ pub fn take_cadence() -> Option<(f64, f64, f64)> {
     })
 }
 
-/// The world frames' present times, for [`pace_held_frames`].
-#[derive(Resource, Default)]
-pub(super) struct FgPacing {
-    #[cfg(not(target_arch = "wasm32"))]
-    last_world: Option<std::time::Instant>,
-    /// The smoothed world-to-world interval, in seconds.
-    #[cfg(not(target_arch = "wasm32"))]
-    interval: f32,
+/// The held frames the render thread presents after the world frame just extracted: the frame
+/// generation multiplier less one once the cadence holds ([`FgCadence::next_native`]), else 0.
+/// Native only; the web holds whole updates instead.
+#[derive(Resource, Clone, Copy, Default, Debug, PartialEq, Eq, ExtractResource)]
+pub struct FgHolds(pub u32);
+
+/// The frame generation multiplier asked for (`frameGenerationMultiplier`): presented frames per
+/// rendered frame, 2 to 4. FSR's chain interpolates only the midpoint, so FSR frame generation
+/// runs it at 2 whatever is asked ([`Self::generated`]); DLSS-G's multi-frame mode reads it whole.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FgMultiplier(pub u32);
+
+impl Default for FgMultiplier {
+    fn default() -> Self {
+        Self(2)
+    }
 }
 
-/// Native, just before `render_system`: a held frame presents half a world interval after the
-/// world frame before it, so the generated and the real frame split the interval evenly (the SDK's
-/// pacer does the same on its present thread). The web presents on rAF, which paces it.
-pub(super) fn pace_held_frames(
+impl FgMultiplier {
+    /// FSR's own limit: one generated frame per rendered frame (`ffxFrameInterpolationDispatch`
+    /// interpolates the midpoint only).
+    pub const FSR_MAX: u32 = 2;
+
+    /// The generated frames FSR's cadence presents per rendered frame: one.
+    pub fn generated(self) -> u32 {
+        self.0.clamp(2, Self::FSR_MAX) - 1
+    }
+}
+
+/// The render thread's frame timings, for [`run_held_frames`]'s pacing.
+#[derive(Resource, Default)]
+pub(super) struct FgPacing {
+    /// When this world frame's `Render` began.
+    world_start: Option<bevy::platform::time::Instant>,
+    /// World-frame `Render` start to start, smoothed, seconds: the rendered interval.
+    interval: f32,
+    /// One world frame's `Render`, smoothed, seconds.
+    world_cost: f32,
+    /// One held frame's `Render`, smoothed, seconds.
+    held_cost: f32,
+}
+
+fn ease(old: f32, new: f32) -> f32 {
+    if old == 0.0 {
+        new
+    } else {
+        old * 0.9 + new * 0.1
+    }
+}
+
+/// The spacing between the presents of one rendered interval with `held` held frames: an even
+/// split of the interval, but never wider than the render thread's slack (the interval less the
+/// world frame's render), with a margin so that a render-bound thread, whose slack is only its
+/// own held frames and waits, sees the spacing shrink to back to back rather than stretch the
+/// interval it is measured from. Never narrower than a held frame's own render.
+pub fn held_spacing(interval: f32, world_cost: f32, held_cost: f32, held: u32) -> f32 {
+    if held == 0 {
+        return 0.0;
+    }
+    let even = interval / (held + 1) as f32;
+    let room = 0.95 * (interval - world_cost).max(0.0) / held as f32;
+    even.min(room).max(held_cost)
+}
+
+/// Render world, first in `Render`: count the present, and on a world frame book the interval
+/// since the last one.
+pub(super) fn mark_render(
     held: Res<FsrHeld>,
-    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))] mut pacing: ResMut<FgPacing>,
+    mut pacing: ResMut<FgPacing>,
     mut last_present: Local<Option<bevy::platform::time::Instant>>,
 ) {
     PRESENTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // After this system's own wait: the instant the frame goes to the graph, as near its present
-    // as this thread sees.
     let _cadence = CadenceMark(&mut last_present);
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let now = std::time::Instant::now();
-        if !held.0 {
-            if let Some(last) = pacing.last_world {
-                let dt = now.duration_since(last).as_secs_f32().min(0.25);
-                // A frame with no hold before it (a reset, frame generation off) is not a pair.
-                pacing.interval = if pacing.interval == 0.0 {
-                    dt
-                } else {
-                    pacing.interval * 0.9 + dt * 0.1
-                };
-            }
-            pacing.last_world = Some(now);
-            return;
-        }
-        if let Some(last) = pacing.last_world {
-            let due = last + std::time::Duration::from_secs_f32(pacing.interval * 0.5);
-            if due > now {
-                std::thread::sleep(due - now);
-            }
-        }
+    if held.0 {
+        return;
     }
+    let now = bevy::platform::time::Instant::now();
+    if let Some(last) = pacing.world_start {
+        let dt = now.duration_since(last).as_secs_f32().min(0.25);
+        pacing.interval = ease(pacing.interval, dt);
+    }
+    pacing.world_start = Some(now);
+}
+
+/// Native, the schedule after `Render` ([`FgHeldRender`]): the held frames after this world
+/// frame, each a `Render` with [`FsrHeld`] set, so only the cameras that present draw, over the
+/// real frame. They run here on the render thread, not as main-world updates: the main world is
+/// already simulating the next frame, and a held frame costs only its own render. Each is paced
+/// to [`held_spacing`] after the world frame's present.
+pub(super) fn run_held_frames(world: &mut World) {
+    let now = bevy::platform::time::Instant::now();
+    let held = world.resource::<FgHolds>().0;
+    let (spacing, held_cost) = {
+        let mut pacing = world.resource_mut::<FgPacing>();
+        let Some(start) = pacing.world_start else {
+            return;
+        };
+        pacing.world_cost = ease(pacing.world_cost, now.duration_since(start).as_secs_f32());
+        (
+            held_spacing(pacing.interval, pacing.world_cost, pacing.held_cost, held),
+            pacing.held_cost,
+        )
+    };
+    for i in 1..=held {
+        let due = now + std::time::Duration::from_secs_f32((spacing * i as f32 - held_cost).max(0.0));
+        let at = bevy::platform::time::Instant::now();
+        if due > at {
+            std::thread::sleep(due - at);
+        }
+        world.resource_mut::<FsrHeld>().0 = true;
+        let begun = bevy::platform::time::Instant::now();
+        RENDERING_HELD.store(true, std::sync::atomic::Ordering::Release);
+        world.run_schedule(Render);
+        RENDERING_HELD.store(false, std::sync::atomic::Ordering::Release);
+        let cost = begun.elapsed().as_secs_f32();
+        let mut pacing = world.resource_mut::<FgPacing>();
+        pacing.held_cost = ease(pacing.held_cost, cost);
+    }
+    if world.resource::<FsrHeld>().0 {
+        world.resource_mut::<FsrHeld>().0 = false;
+    }
+}
+
+/// Set while [`run_held_frames`] renders a held frame: the latency markers around submit and
+/// present (`dlss::streamline`) belong to the world frame, and a held frame marks nothing.
+pub static RENDERING_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The render-world schedule after `Render` that presents the held frames ([`run_held_frames`]).
+#[derive(ScheduleLabel, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FgHeldRender;
+
+/// Native, just before `render_system`: nothing to wait for, the held frames pace themselves in
+/// [`run_held_frames`]. The web presents on rAF, which paces it; this only counts its presents.
+pub(super) fn pace_held_frames(
+    #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))] mut last_present: Local<
+        Option<bevy::platform::time::Instant>,
+    >,
+) {
     #[cfg(target_arch = "wasm32")]
-    let _ = (held, pacing);
+    {
+        PRESENTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _cadence = CadenceMark(&mut last_present);
+    }
 }
 
 /// Install the cadence: the main app's update schedule becomes [`FgMain`].
 pub(super) fn install(app: &mut App) {
     app.init_resource::<FgCadence>()
         .init_resource::<FrameGeneration>()
+        .init_resource::<FgMultiplier>()
+        .init_resource::<FgHolds>()
         .init_resource::<FgBlocked>()
         .init_resource::<FgAhead>()
         .insert_resource(bevy::winit::AfterUpdate(run_ahead));
@@ -718,5 +898,56 @@ mod tests {
         assert!(!c.solo);
         let mut n = FgCadence::default();
         assert!((0..400).all(|_| !n.next(on(w)).solo));
+    }
+
+    /// Natively every update is a world frame; once the history is valid each is followed by the
+    /// held frames asked for, and a reset or a capture follows it with none.
+    #[test]
+    fn native_world_frames_are_followed_by_held_frames() {
+        let mut c = FgCadence::default();
+        let w = UVec2::new(1600, 900);
+        let seq: Vec<u32> = (0..5).map(|_| c.next_native(on(w), 1)).collect();
+        assert_eq!(seq, [0, 1, 1, 1, 1]);
+        assert_eq!(c.presents_per_update(), 2);
+        assert_eq!(c.next_native(on(UVec2::new(1280, 720)), 3), 0);
+        assert_eq!(c.next_native(on(UVec2::new(1280, 720)), 3), 3);
+        assert_eq!(c.presents_per_update(), 4);
+        let blocked = FgInputs {
+            blocked: true,
+            ..on(UVec2::new(1280, 720))
+        };
+        assert_eq!(c.next_native(blocked, 1), 0);
+        assert_eq!(c.presents_per_update(), 1);
+    }
+
+    /// FSR's chain makes one generated frame whatever multiplier is asked.
+    #[test]
+    fn fsr_generates_one_frame_at_any_multiplier() {
+        for m in 0..6 {
+            assert_eq!(FgMultiplier(m).generated(), 1);
+        }
+    }
+
+    /// The presents split the interval evenly where the render thread has the room; a thread
+    /// with no slack presents back to back; the spacing never sleeps past the slack it is given.
+    #[test]
+    fn held_spacing_stays_inside_the_slack() {
+        // Main-bound: 16 ms frames, 5 ms of render: the even half.
+        assert!((held_spacing(0.016, 0.005, 0.001, 1) - 0.008).abs() < 1e-6);
+        // Three held frames, even quarters.
+        assert!((held_spacing(0.016, 0.002, 0.001, 3) - 0.004).abs() < 1e-6);
+        // Render-bound: no slack but the held frame itself: back to back.
+        assert_eq!(held_spacing(0.011, 0.010, 0.001, 1), 0.001);
+        // Iterated against an interval its own sleep lengthens, the spacing decays, never grows.
+        let (render, held) = (0.010_f32, 0.001_f32);
+        let mut s = held_spacing(0.022, render, held, 1);
+        for _ in 0..200 {
+            let interval = render + s.max(held);
+            let next = held_spacing(interval, render, held, 1);
+            assert!(next <= s + 1e-6);
+            s = next;
+        }
+        assert!(s < 0.0012, "{s}");
+        assert_eq!(held_spacing(0.016, 0.005, 0.001, 0), 0.0);
     }
 }

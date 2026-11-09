@@ -347,15 +347,9 @@ impl FsrState {
     }
 
     /// fork: dlss (FORK.md) — the motion adapter's vectors (uv, previous − current,
-    /// jitter-free, render size), which DLSS-G reads.
+    /// jitter-free, render size), which DLSS-G is tagged with.
     pub fn motion_vectors(&self) -> &TextureView {
         &self.targets.mv
-    }
-
-    /// fork: dlss (FORK.md) — this frame's jitter, in render pixels.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn jitter(&self) -> Vec2 {
-        self.jitter
     }
 
     /// fork: dlss (FORK.md) — the upscaler this view's targets were allocated for.
@@ -945,10 +939,9 @@ pub(super) fn fsr_upscale_pass(
                 reset: state.reset_pending || state.frame_index == 0,
             };
             let state = &mut *state;
-            state
-                .dlss
-                .as_mut()
-                .is_some_and(|d| crate::dlss::sr::encode(d, &adapter, &mut render_context, inputs))
+            state.dlss.as_mut().is_some_and(|d| {
+                crate::dlss::sr::encode(d, &adapter, &mut render_context, inputs)
+            })
         };
         #[cfg(target_arch = "wasm32")]
         let ok = {

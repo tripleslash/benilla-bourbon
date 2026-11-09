@@ -1347,6 +1347,8 @@ pub(crate) const GRAPHICS_CVARS: &[&str] = &[
     "rcasSharpness",
     // fork: dlss (FORK.md)
     "upscaler",
+    "frameGenerationMultiplier",
+    "nvidiaReflex",
     // fork: the Everwood port (FORK.md)
     "foliageWind",
     "foliageWindStrength",
@@ -2088,6 +2090,16 @@ mod tests {
             d["frameGeneration"] != 0.0,
             benilla_world::fsr::FrameGeneration::default().0
         );
+        // fork: dlss (FORK.md) — the multiplier boots at the engine's knob (2x) and Reflex
+        // at `auto`.
+        assert_eq!(
+            d["frameGenerationMultiplier"],
+            benilla_world::fsr::cadence::FgMultiplier::default().0 as f32
+        );
+        assert_eq!(
+            crate::cvars::registered_default("nvidiaReflex", 0),
+            Some(benilla_world::dlss::ReflexSetting::default().as_cvar())
+        );
         // fork: dlss (FORK.md) — the upscaler boots at the engine's default, DLSS natively
         // (FSR on the web build).
         assert_eq!(
@@ -2370,6 +2382,21 @@ mod tests {
         assert!(res::<benilla_world::fsr::FrameGeneration>(&app).0);
         apply(&mut app, "framegeneration", "0");
         assert!(!res::<benilla_world::fsr::FrameGeneration>(&app).0);
+        // fork: dlss (FORK.md)
+        apply(&mut app, "frameGenerationMultiplier", "3");
+        assert_eq!(res::<benilla_world::fsr::cadence::FgMultiplier>(&app).0, 3);
+        apply(&mut app, "frameGenerationMultiplier", "9");
+        assert_eq!(res::<benilla_world::fsr::cadence::FgMultiplier>(&app).0, 4);
+        apply(&mut app, "nvidiaReflex", "2");
+        assert_eq!(
+            *res::<benilla_world::dlss::ReflexSetting>(&app),
+            benilla_world::dlss::ReflexSetting::Boost
+        );
+        apply(&mut app, "nvidiaReflex", "auto");
+        assert_eq!(
+            *res::<benilla_world::dlss::ReflexSetting>(&app),
+            benilla_world::dlss::ReflexSetting::Auto
+        );
         apply(&mut app, "serverTimeOffset", "-5");
         assert_eq!(res::<crate::net::TimeOffset>(&app).0, -5);
         apply(&mut app, "servertimeoffset", "30");
@@ -3672,6 +3699,8 @@ mod tests {
             .init_resource::<benilla_world::fsr::RcasSharpness>()
             // fork: dlss (FORK.md)
             .init_resource::<benilla_world::dlss::UpscalerChoice>()
+            .init_resource::<benilla_world::fsr::cadence::FgMultiplier>()
+            .init_resource::<benilla_world::dlss::ReflexSetting>()
             .init_resource::<crate::net::TimeOffset>()
             // Literal for the same reason: LightingSettings::default() reads $WOW_LIGHTING /
             // $WOW_LIGHTING_QUALITY, IndirectLighting::default() $WOW_SSAO / $WOW_SSGI, and
@@ -4051,8 +4080,10 @@ mod tests {
                 "graphicsQuality",
                 "gxApi",
                 "gxResolution",
+                "nvidiaReflex",
                 "realmList",
-                "realmName"
+                "realmName",
+                "upscaler"
             ]
         );
         let default_of = |name: &str| {

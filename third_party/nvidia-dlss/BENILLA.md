@@ -12,6 +12,13 @@ Source: [`NVIDIA/DLSS`](https://github.com/NVIDIA/DLSS) at commit `9981c63`, DLS
   `wow-data/dlss/` (`crates/benilla-desktop/src/dlss.rs`); a dev build reads them from
   `benilla-config/dlss/` or `$WOW_DLSS_PATH`.
 
+- `streamline/`: NVIDIA Streamline 2.14.16 (`NVIDIA-RTX/Streamline`, release `v2.14.16`,
+  `streamline-sdk-v2.14.16.zip`), MIT (`streamline/license.txt`): the production `bin/x64/`
+  `sl.interposer.dll`, `sl.common.dll`, `sl.dlss_g.dll`, `sl.reflex.dll`, `sl.pcl.dll` and
+  `NvLowLatencyVk.dll` (Reflex's Vulkan library, under `reflex.license.txt`), the `include/`
+  headers `benilla-world/src/dlss/streamline.rs` restates, and the Markdown guides in `docs/`. The
+  site serves the DLLs beside NGX's (`scripts/stage-desktop.sh`).
+
 Left out: `nvngx_dlssd.dll` (Ray Reconstruction, a hook only), the development DLLs, the Linux
 libraries, samples and docs.
 

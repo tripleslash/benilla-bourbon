@@ -240,6 +240,11 @@ $dlls = @(
     (Resolve-Repo 'third_party/nvidia-dlss/lib/Windows_x86_64/rel/nvngx_dlss.dll'),
     (Resolve-Repo 'third_party/nvidia-dlss/lib/Windows_x86_64/rel/nvngx_dlssg.dll')
 )
+$slDir = Resolve-Repo 'third_party/nvidia-dlss/streamline/bin/x64'
+if ([IO.Directory]::Exists($slDir)) {
+    $dlls += @(Get-ChildItem -LiteralPath $slDir -Filter 'sl.*.dll' -File | Sort-Object Name | ForEach-Object { $_.FullName })
+    $dlls += @([IO.Path]::Combine($slDir, 'NvLowLatencyVk.dll'))
+}
 foreach ($dll in $dlls) {
     if (-not [IO.File]::Exists($dll)) { continue }
     $dllSha1 = (Get-FileHash -LiteralPath $dll -Algorithm SHA1).Hash.ToLowerInvariant()

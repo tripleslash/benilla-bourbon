@@ -1,5 +1,7 @@
 //! fork: fsr (FORK.md) — FSR in the engine binary. `WOW_RENDER_SCALE=<s>` renders the world
-//! at `window × s` and `WOW_FRAME_GENERATION=1` turns frame generation on. Either one moves the
+//! at `window × s` and `WOW_FRAME_GENERATION=1` turns frame generation on (`=<n>`, 2 to 4: its
+//! multiplier, which FSR's runs at 2). `WOW_REFLEX=auto|0|1|2` is the `nvidiaReflex` setting where
+//! Streamline runs (NVIDIA). Either one moves the
 //! world camera onto a size-carrier image and adds a backdrop camera that grounds on it through the
 //! FFXGlow combine, the shape of the client's player-UI camera (`benilla-app`'s
 //! `world_backdrop.rs`). So the upscaler and frame generation run here with no login. `WOW_FSR=0`
@@ -22,6 +24,8 @@ use crate::view::WorldCamera;
 struct FsrViewConfig {
     scale: f32,
     frame_generation: bool,
+    /// `WOW_FRAME_GENERATION=<n>`: presented frames per rendered frame asked for.
+    multiplier: u32,
     /// `WOW_FSR=0`: the bilinear stretch alone.
     no_fsr: bool,
 }
@@ -32,8 +36,14 @@ impl FsrViewConfig {
         let scale = crate::launch_env::live_var("WOW_RENDER_SCALE")
             .and_then(|v| v.trim().parse::<f32>().ok())
             .filter(|v| v.is_finite());
-        let frame_generation =
-            crate::launch_env::live_var("WOW_FRAME_GENERATION").is_some_and(|v| v.trim() != "0");
+        let fg_var = crate::launch_env::live_var("WOW_FRAME_GENERATION");
+        let frame_generation = fg_var.as_deref().is_some_and(|v| v.trim() != "0");
+        let multiplier = fg_var
+            .as_deref()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|n| *n >= 2)
+            .unwrap_or(2)
+            .min(4);
         if scale.is_none() && !frame_generation {
             return None;
         }
@@ -43,6 +53,7 @@ impl FsrViewConfig {
             // Frame generation caps the scale at 1:1, as the client does.
             scale,
             frame_generation: frame_generation && !no_fsr,
+            multiplier,
             no_fsr,
         })
     }
@@ -85,9 +96,11 @@ fn spawn_backdrop(
     mut commands: Commands,
     config: Res<FsrViewConfig>,
     mut fg: ResMut<FrameGeneration>,
+    mut multiplier: ResMut<crate::fsr::cadence::FgMultiplier>,
     world: Query<Entity, With<WorldCamera>>,
 ) {
     fg.0 = config.frame_generation;
+    multiplier.0 = config.multiplier;
     let source = world.iter().next();
     commands.spawn((
         Name::new("worldview FSR backdrop"),
@@ -201,7 +214,27 @@ fn log_frames(time: Res<Time<bevy::time::Real>>, mut acc: Local<(f32, u32)>) {
             presented as f32 / acc.0,
             solo as f32 / acc.0
         );
+        // fork: dlss (FORK.md) — Reflex's own latency reports, where it runs.
+        if let Some((total, tail, n)) = crate::dlss::reflex_latency() {
+            info!("REFLEX_LATENCY sim_to_gpu_end_ms={total:.2} present_to_gpu_end_ms={tail:.2} reports={n}");
+        }
         *acc = (0.0, 0);
+    }
+}
+
+/// fork: dlss (FORK.md) — `WOW_REFLEX` resolved as the client resolves `nvidiaReflex`:
+/// `auto` on while frame generation runs, where Streamline's Reflex runs at all.
+fn sync_reflex(
+    config: Res<FsrViewConfig>,
+    support: Res<crate::dlss::DlssSupport>,
+    mut reflex: ResMut<crate::dlss::Reflex>,
+) {
+    let setting = crate::dlss::ReflexSetting::from_cvar(
+        &crate::launch_env::live_var("WOW_REFLEX").unwrap_or_default(),
+    );
+    let want = setting.resolve(support.reflex, config.frame_generation);
+    if *reflex != want {
+        *reflex = want;
     }
 }
 
@@ -212,6 +245,6 @@ pub(super) fn plugin(app: &mut App) {
     };
     app.insert_resource(config)
         .add_systems(Startup, spawn_backdrop.after(super::spawn_view_camera))
-        .add_systems(Update, track)
+        .add_systems(Update, (track, sync_reflex))
         .add_systems(Last, log_frames);
 }
