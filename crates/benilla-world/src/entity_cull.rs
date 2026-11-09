@@ -20,16 +20,14 @@
 //! `NoFrustumCulling` mesh — dress, equipment, particles, the player-shadow proxy, whose boxes are
 //! a bind pose or absent — is never occluded (`third_party/bevy_pbr/BENILLA.md`).
 //!
-//! On by default on native (never on wasm32); `$WOW_ENTITY_GPU_CULL=0` puts every camera back on
-//! direct draws with no prepass. Measured (release worldview, 1080p modern Cinematic, RTX 3080
-//! laptop, p50 wall ms, off → on): Stormwind 13.9 → 13.3 Vulkan, 15.4 → 15.4 DX12; Booty Bay
-//! 19.0 → 16.0 Vulkan, 18.7 → 18.4 DX12: neutral to a win, so it ships on. Where it was first
-//! turned on (DX12, Northshire from 160 yd, `WOW_ASYNC_COMPUTE=0`) it was a net loss: GPU +0.5 ms
-//! a frame (prepass, late preprocessing and bin unpacking over a 0.17 ms main-pass saving) and the
-//! render thread about +7 ms (wgpu submit tracking of the doubled opaque draws, the per-frame
-//! binned instance and indirect-metadata writes). Off, nothing here runs and no pipeline changes:
-//! the prepass twins compile only into prepass pipelines, and the shader cuts are inert without
-//! `PREPASS_PIPELINE` and `DEPTH_PREPASS`.
+//! Off by default — every camera on direct draws, no prepass — and `$WOW_ENTITY_GPU_CULL=1` turns
+//! it on (never on wasm32). Measured a net loss where it was first turned on (DX12, RTX 3080 laptop,
+//! Northshire from 160 yd, `WOW_ASYNC_COMPUTE=0`): GPU +0.5 ms a frame (prepass, late
+//! preprocessing and bin unpacking over a 0.17 ms main-pass saving) and the render thread about
+//! +7 ms (wgpu submit tracking of the doubled opaque draws, the per-frame binned instance and
+//! indirect-metadata writes). Off, nothing here runs and no pipeline changes: the prepass twins
+//! compile only into prepass pipelines, and the shader cuts are inert without `PREPASS_PIPELINE`
+//! and `DEPTH_PREPASS`.
 //!
 //! The prepass is not optional under this scheme: Bevy 0.19's two phases ARE prepass draws, and the
 //! late test reads this frame's prepass depth. Culling against last frame's pyramid alone would pop
@@ -60,9 +58,9 @@ pub fn enabled() -> bool {
     })
 }
 
-/// The gate: on unless `$WOW_ENTITY_GPU_CULL` is `0`, and never on wasm32.
+/// The gate: off unless `$WOW_ENTITY_GPU_CULL` is `1`, and never on wasm32.
 fn decide(lever: Option<&str>) -> bool {
-    !cfg!(target_arch = "wasm32") && lever != Some("0")
+    !cfg!(target_arch = "wasm32") && lever == Some("1")
 }
 
 /// Where, in the world camera's render schedule, a depth writer that is not one of Bevy's binned
@@ -151,12 +149,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_gate_is_on_unless_the_lever_says_zero() {
-        let native = !cfg!(target_arch = "wasm32");
-        assert_eq!(decide(None), native);
-        assert_eq!(decide(Some("")), native);
-        assert_eq!(decide(Some("1")), native);
+    fn the_gate_is_off_unless_the_lever_says_one() {
+        assert!(!decide(None));
+        assert!(!decide(Some("")));
         assert!(!decide(Some("0")));
+        assert_eq!(decide(Some("1")), !cfg!(target_arch = "wasm32"));
     }
 
     /// The world camera leaves its spawn command on the GPU lane, with no `NoIndirectDrawing`
