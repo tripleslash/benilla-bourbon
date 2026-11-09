@@ -659,7 +659,16 @@ pub(crate) const REGISTERED: &[Registered] = &[
         )
         .latched()
     } else {
-        same("gxApi", "direct3d").latched()
+        // Deviation: Vulkan by default, measured faster than DX12 at benilla's default modern
+        // Cinematic frame (release worldview, 1080p, RTX 3080 Laptop, p50 ms: Stormwind 11.0
+        // against 12.3, Booty Bay 12.4 against 14.8).
+        deviates(
+            "gxApi",
+            "vulkan",
+            "direct3d",
+            "Vulkan draws benilla's default frame 1.3 to 2.4 ms faster than Direct3D 12",
+        )
+        .latched()
     },
     // `gxVSync` (`0x63a859`, "1", flags 3), `OptionsFrame.lua:9`. The knob is
     // [`crate::video::VideoConfig::vsync`], which the window's present mode follows at the

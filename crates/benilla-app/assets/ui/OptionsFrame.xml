@@ -466,8 +466,8 @@
             .. "a cost in frame rate. Values your graphics card does not offer are lowered to the "
             .. "highest it does. Takes effect the next time the world loads."
         BENILLA_TOOLTIP_GRAPHICS_API =
-            "The graphics interface the game draws through. DirectX 12 is the default; Vulkan and "
-            .. "OpenGL can help with a driver that misbehaves. One your system does not offer falls "
+            "The graphics interface the game draws through. Vulkan is the default, the fastest "
+            .. "here; DirectX 12 and OpenGL can help with a driver that misbehaves. One your system does not offer falls "
             .. "back to the best it does. Takes effect the next time the game starts."
         -- fork: native GPU — `rayTracing`; 1.12 has no such box, and the web build, which has no
         -- hardware ray tracing, defines none of it.

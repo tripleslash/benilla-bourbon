@@ -1863,6 +1863,8 @@ mod tests {
                 // fork: 16x anisotropic filtering by default (c6b9efa9).
                 "anisotropic",
                 "frillDensity",
+                // fork: desktop — Vulkan, the faster backend at the default frame.
+                "gxApi",
                 "gxColorBits",
                 "gxDepthBits",
                 // fork: desktop — borderless over the monitor by default.
@@ -4030,8 +4032,8 @@ mod tests {
 
     /// The string-valued rows, a closed list, each default checked on its own terms: `realmName`
     /// and `accountName` (the reference's registered `""`, `0x882748`) are empty until the login
-    /// screen writes them; `gxApi` is the reference's "direct3d" (fork: desktop, a selector the
-    /// renderer is created on); `gxResolution` and `realmList` pass their
+    /// screen writes them; `gxApi` is "vulkan" where the reference's is "direct3d" (fork: desktop, a
+    /// selector the renderer is created on); `gxResolution` and `realmList` pass their
     /// callbacks' parsers ([`crate::video::parse_resolution`], [`crate::realmlist::normalize`]);
     /// fork: `graphicsQuality` is a rung's name, checked by [`presets`]' own tests.
     #[test]
@@ -4062,7 +4064,8 @@ mod tests {
         };
         assert_eq!(default_of("realmName"), "");
         assert_eq!(default_of("accountName"), "");
-        assert_eq!(default_of("gxApi"), "direct3d");
+        // fork: desktop — Vulkan by default (its `Deviates` row).
+        assert_eq!(default_of("gxApi"), "vulkan");
         assert_eq!(
             crate::video::parse_resolution(default_of("gxResolution")),
             Some(crate::video::DEFAULT_WINDOWED)

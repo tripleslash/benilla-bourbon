@@ -228,7 +228,7 @@ fn resolve_render_backends() -> wgpu::Backends {
 }
 
 /// `gxApi` as wgpu backends, compared case-blind as the reference's `0x63a3c4` does; any other
-/// value is the default, Direct3D.
+/// value ("direct3d" among them) is Direct3D 12.
 #[cfg(not(target_arch = "wasm32"))]
 fn api_backends(api: &str) -> wgpu::Backends {
     if api.eq_ignore_ascii_case("vulkan") {
@@ -1190,8 +1190,8 @@ const GX_RESOLUTION: &str = "gxResolution";
 mod tests {
     use super::*;
 
-    /// `gxApi`'s three values pick their backend; the registered default and anything unknown are
-    /// Direct3D 12.
+    /// `gxApi`'s three values pick their backend; anything unknown is Direct3D 12, and the
+    /// registered default (fork: desktop, its `Deviates` row) is Vulkan.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn the_graphics_api_row_names_its_backend() {
@@ -1201,7 +1201,7 @@ mod tests {
         assert_eq!(api_backends(""), wgpu::Backends::DX12);
         assert_eq!(
             api_backends(crate::cvars::registered_default("gxApi", 0).expect("registered")),
-            wgpu::Backends::DX12
+            wgpu::Backends::VULKAN
         );
     }
 
