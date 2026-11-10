@@ -1,6 +1,6 @@
 # benilla's `bevy_winit` fork — what differs from upstream, and how to check
 
-Upstream: `bevy_winit 0.19.1` (crates.io), MIT OR Apache-2.0. Wired in through `[patch.crates-io]`
+Upstream: `bevy_winit 0.20.1` (crates.io), MIT OR Apache-2.0. Wired in through `[patch.crates-io]`
 in the workspace root.
 
 ## The one delta: the runner keeps its per-frame query and system states
@@ -88,7 +88,7 @@ Search for `benilla fork` to find every hunk.
 ## Verifying diff
 
 ```
-diff -ru <crates.io bevy_winit-0.19.1> third_party/bevy_winit
+diff -ru <crates.io bevy_winit-0.20.1> third_party/bevy_winit
 ```
 
 The diff shows only the `src/state.rs` hunks above, `AfterUpdate`, the finish hook, `wake_event_loop`, `set_may_update` and `set_lend_world` in `src/lib.rs`, plus this file.

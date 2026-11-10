@@ -11,9 +11,9 @@ use bevy_ecs::{
 };
 use bevy_input::keyboard::{Key, KeyCode, KeyboardFocusLost, KeyboardInput};
 use bevy_window::{
-    ClosingWindow, CursorOptions, Monitor, OnMonitor, PrimaryMonitor, RawHandleWrapper, VideoMode,
-    Window, WindowClosed, WindowClosing, WindowCreated, WindowEvent, WindowFocused, WindowMode,
-    WindowResized, WindowScaleFactorChanged, WindowWrapper,
+    ClosingWindow, CursorOptions, HasWindows, Monitor, OnMonitor, PrimaryMonitor, RawHandleWrapper,
+    VideoMode, Window, WindowClosed, WindowClosing, WindowCreated, WindowEvent, WindowFocused,
+    WindowMode, WindowResized, WindowScaleFactorChanged, WindowWrapper,
 };
 use tracing::{error, info, warn};
 
@@ -28,7 +28,7 @@ use crate::{
         convert_enabled_buttons, convert_resize_direction, convert_window_level,
         convert_window_theme, convert_winit_theme,
     },
-    get_selected_videomode, select_monitor,
+    resolve_exclusive_fullscreen, select_monitor,
     state::react_to_resize,
     winit_monitors::WinitMonitors,
     CreateMonitorParams, CreateWindowParams, WINIT_WINDOWS,
@@ -119,6 +119,14 @@ pub fn create_windows(
                         winit_window.recognize_pan_gesture(true, min, max);
                     } else {
                         winit_window.recognize_pan_gesture(false, 0, 0);
+                    }
+                }
+
+                #[cfg(target_os = "macos")]
+                {
+                    // Request app activation via `focus_window()` if the window should start focused.
+                    if window.focused {
+                        winit_window.focus_window();
                     }
                 }
 
@@ -229,7 +237,14 @@ pub fn create_monitors(
             true
         } else {
             info!("Monitor removed {}", entity);
-            commands.entity(*entity).despawn();
+
+            commands
+                .entity(*entity)
+                // Remove the monitor's linked windows before despawning
+                //  it to prevent those windows from being despawned too.
+                .remove::<HasWindows>()
+                .despawn();
+
             idx += 1;
             false
         }
@@ -335,26 +350,17 @@ pub(crate) fn changed_windows(
                         ))))
                     }
                     WindowMode::Fullscreen(monitor_selection, video_mode_selection) => {
-                        let monitor = &select_monitor(
+                        let monitor = select_monitor(
                             &monitors,
                             winit_window.primary_monitor(),
                             winit_window.current_monitor(),
                             &monitor_selection,
-                        )
-                        .unwrap_or_else(|| {
-                            panic!("Could not find monitor for {monitor_selection:?}")
-                        });
-
-                        if let Some(video_mode) = get_selected_videomode(monitor, &video_mode_selection)
-                        {
-                            Some(Some(winit::window::Fullscreen::Exclusive(video_mode)))
-                        } else {
-                            warn!(
-                                "Could not find valid fullscreen video mode for {:?} {:?}",
-                                monitor_selection, video_mode_selection
-                            );
-                            None
-                        }
+                        );
+                        Some(Some(resolve_exclusive_fullscreen(
+                            monitor,
+                            monitor_selection,
+                            video_mode_selection,
+                        )))
                     }
                     WindowMode::Windowed => Some(None),
                 };
