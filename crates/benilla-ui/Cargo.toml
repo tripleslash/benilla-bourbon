@@ -30,7 +30,7 @@ libc = "0.2"
 # `civil`'s browser zone: the page's JS `Date`.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3.99"
-wasm-bindgen = "=0.2.126"
+wasm-bindgen = "=0.2.127"
 
 [dev-dependencies]
 # The synthetic movie the movie frame's tests open.

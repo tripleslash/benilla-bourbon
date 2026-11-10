@@ -175,8 +175,8 @@ def main():
         home = os.path.expanduser("~")
         local = env_or("LOCALAPPDATA", home + "/AppData/Local")
         candidates = [
-            local + "/trunkrs/trunk/cache/wasm-bindgen-0.2.126/wasm-bindgen.exe",
-            home + "/.cache/trunk/wasm-bindgen-0.2.126/wasm-bindgen",
+            local + "/trunkrs/trunk/cache/wasm-bindgen-0.2.127/wasm-bindgen.exe",
+            home + "/.cache/trunk/wasm-bindgen-0.2.127/wasm-bindgen",
             shutil.which("wasm-bindgen") or "",
         ]
         wbg = ""
@@ -185,7 +185,7 @@ def main():
                 wbg = cand
                 break
         if not wbg:
-            err("   no wasm-bindgen 0.2.126 found (Trunk caches one; or cargo install wasm-bindgen-cli)")
+            err("   no wasm-bindgen 0.2.127 found (Trunk caches one; or cargo install wasm-bindgen-cli)")
             return 1
         rc, _ = run([wbg, "--target", "web", "--out-dir", "web/dist", "--out-name", "wow", "--no-demangle", artifact])
         if rc:

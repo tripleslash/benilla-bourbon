@@ -21,9 +21,9 @@ crate-type = ["cdylib"]
 # second decoder that drifted from `benilla_formats::webpack`'s would corrupt silently rather than
 # fail, since both sides would still "work" on the packs that happened to agree.
 benilla-pack = { path = "../benilla-pack" }
-# Pinned exact for the `wow` shim's reason — a newer crate against the 0.2.126 CLI Trunk
+# Pinned exact for the `wow` shim's reason — a newer crate against the 0.2.127 CLI Trunk
 # downloads emits broken glue.
-wasm-bindgen = "=0.2.126"
+wasm-bindgen = "=0.2.127"
 # A panic inside ruzstd would otherwise reach the page as "unreachable executed" with no message,
 # and a worker has no other way to say what went wrong.
 console_error_panic_hook = "0.1"

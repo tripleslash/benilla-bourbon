@@ -21,7 +21,7 @@ anyhow = "1.0.102"
 # bevy's default features spelled out without `audio`: `2d`, `3d` and `ui` each pull `bevy_audio`
 # and `vorbis`, and the client mixes through kira. Add a feature by name, never `2d`/`3d`/`ui`; a
 # plugin that takes bevy with its default features brings the audio stack back too.
-bevy = { version = "0.19.1", default-features = false, features = [
+bevy = { version = "0.20.1", default-features = false, features = [
     "default_app",
     "default_platform",
     "2d_bevy_render",
@@ -39,7 +39,7 @@ bevy = { version = "0.19.1", default-features = false, features = [
 ] }
 # For the `WOW_GPU_MS` meter's query set, which bevy does not wrap; must match bevy's wgpu, which
 # resolves to the vendored copy (`third_party/wgpu`, below).
-wgpu = "29"
+wgpu = "30"
 clap = { version = "4.6.1", features = ["derive"] }
 sha1 = "0.10.6"
 

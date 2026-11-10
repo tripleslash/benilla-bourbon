@@ -37,7 +37,7 @@ anyhow.workspace = true
 benilla-ui = { path = "../benilla-ui" }
 bevy.workspace = true
 wgpu.workspace = true
-bevy_egui = { version = "0.42", optional = true }
+bevy_egui = { version = "0.43.1", optional = true }
 bytemuck = { version = "1", features = ["derive"] }
 # `f16` decode for the `WOW_BOOTH_DUMP` dump of the `Rgba16Float` booth targets.
 half = "2"
@@ -69,7 +69,7 @@ benilla-world = { path = "../benilla-world", default-features = false }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 # Collision for our kinematic character controller; 0.6 targets Bevy 0.18, 0.7 moves to 0.19.
-avian3d = "0.7"
+avian3d = "0.8"
 # Shapes and rasterizes `FontString` text standalone (`ui_text`), at bevy_text's own 0.16.
 cosmic-text = "0.16"
 # The smooth scan converter `ui_text` rasterizes anti-aliased glyphs with; `swash`'s own version.
@@ -178,10 +178,10 @@ objc2-foundation = { version = "0.2", features = ["NSArray", "NSData", "NSGeomet
 # loop, and the write half is pumped by a Bevy system instead of a sibling thread. `crate::webenv`
 # (the wasm32 half — reading the page's own query string) and `boot.rs`'s canvas binding use the
 # `web-sys` window/location. wasm-bindgen is pinned exact per the plan: a newer wasm-bindgen crate
-# + the 0.2.126 CLI emits broken glue — verified, so this must track the CLI to the digit. That
+# + the 0.2.127 CLI emits broken glue — verified, so this must track the CLI to the digit. That
 # CLI is now Trunk's (`Trunk.toml`'s `[tools] wasm_bindgen`), not one installed by a script.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "=0.2.126"
+wasm-bindgen = "=0.2.127"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 # `OfflineAudioContext` + `AudioBuffer` (and the `BaseAudioContext` that carries
@@ -229,7 +229,7 @@ windows-sys = { version = "0.59", features = [
 # The shader translation test writes the backend this platform renders with, through the naga
 # bevy already builds (`shaders.rs`): Bevy 0.19's wgpu 29 builds naga 29.
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-naga = { version = "29.0.4", features = ["msl-out"] }
+naga = { version = "30", features = ["msl-out"] }
 
 [target.'cfg(not(target_os = "macos"))'.dev-dependencies]
-naga = { version = "29.0.4", features = ["spv-out"] }
+naga = { version = "30", features = ["spv-out"] }

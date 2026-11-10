@@ -10,7 +10,7 @@
 #
 # The wasm-bindgen-cli install this used to do is GONE. Trunk owns that version now (Trunk.toml's
 # `[tools] wasm_bindgen`), which removes the failure this script existed to prevent: a CLI a version
-# off from the `wasm-bindgen = "=0.2.126"` crate emits glue that does not match, and the symptom is
+# off from the `wasm-bindgen = "=0.2.127"` crate emits glue that does not match, and the symptom is
 # a page that loads and then does nothing. Keep the two numbers equal if either moves.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."

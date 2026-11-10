@@ -113,14 +113,14 @@ if ($env:BENILLA_KEEP_NAMES -eq '1') {
     # The wasm-bindgen Trunk downloaded, whose version MUST match the crate pin (Trunk.toml).
     $localAppData = Default-Env 'LOCALAPPDATA' (Join-Path $HOME 'AppData\Local')
     $cands = @(
-        (Join-Path $localAppData 'trunkrs\trunk\cache\wasm-bindgen-0.2.126\wasm-bindgen.exe'),
-        (Join-Path $HOME '.cache\trunk\wasm-bindgen-0.2.126\wasm-bindgen')
+        (Join-Path $localAppData 'trunkrs\trunk\cache\wasm-bindgen-0.2.127\wasm-bindgen.exe'),
+        (Join-Path $HOME '.cache\trunk\wasm-bindgen-0.2.127\wasm-bindgen')
     )
     $onPath = Get-Command wasm-bindgen -ErrorAction SilentlyContinue
     if ($onPath) { $cands += $onPath.Source }
     $wbg = $cands | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -First 1
     if (-not $wbg) {
-        [Console]::Error.WriteLine('   no wasm-bindgen 0.2.126 found (Trunk caches one; or cargo install wasm-bindgen-cli)')
+        [Console]::Error.WriteLine('   no wasm-bindgen 0.2.127 found (Trunk caches one; or cargo install wasm-bindgen-cli)')
         exit 1
     }
     & $wbg --target web --out-dir web/dist --out-name wow --no-demangle $artifact
