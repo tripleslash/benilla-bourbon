@@ -1,7 +1,7 @@
 # benilla's `wgpu-hal` fork — what differs from upstream, and how to check
 
 Upstream: [`gfx-rs/wgpu`](https://github.com/gfx-rs/wgpu) (`wgpu-hal`), MIT OR Apache-2.0, version
-`29.0.4`, the version the workspace lock resolves to (Bevy 0.19.1's wgpu 29). Wired in through
+`30.0.1`, the version the workspace lock resolves to (Bevy 0.20.1's wgpu 30). Wired in through
 `[patch.crates-io]` in the workspace root. The crate is copied from the cargo registry as published
 (`src/`, `build.rs`, `Cargo.toml`, `README.md`, the two licence files), except that the three
 `[[example]]` targets are dropped from `Cargo.toml` and `examples/` is not copied. Every hunk is
@@ -44,10 +44,10 @@ which answers at once by design). Past the budget the result is what upstream re
   already acquired and its fence has a signal operation submitted, so waiting is the only
   correct move; the spec lets a wait be repeated and returns `VK_TIMEOUT` only when the fence is
   not yet signalled.
-- **The wait on the previous submission, before the acquire, times out:** upstream drops
-  `wait_for_fence`'s `Ok(false)` and acquires with a semaphore the GPU may still hold, which the
-  spec forbids ("unsignaled, with no signal or wait operations pending"). The wait is issued
-  again under the same budget; past it the acquire goes on as upstream's does.
+- **The wait on the previous submission, before the acquire, times out:** wgpu-hal 30 answers it
+  with `SurfaceError::Timeout` rather than acquiring with a semaphore the GPU may still hold
+  (gfx-rs/wgpu#9405). The wait is issued again under the same budget; past it, upstream's
+  `Timeout`.
 - **Logging:** each retry logs at `error!` with the time stalled, so a stall shows in the log. A
   result that is not retried is logged raw (`{:?}` of the `vk::Result`) before it is mapped to
   `DeviceError::Unexpected` or `SurfaceError::Timeout`; the ordinary resize results (`NOT_READY`,
@@ -86,13 +86,13 @@ compute can run beside the raster passes. Every hunk is marked `BENILLA: async c
 
 | file | hunk |
 |---|---|
-| `src/lib.rs` | `Device::create_async_compute_queue(&self) -> Option<Queue>` (default `None`; GL, Metal and noop keep it) and `Queue::wait_for_fence(&self, fence: &Fence, value: FenceValue) -> Result<(), DeviceError>` (default `Err(Unexpected)`): later submissions on the queue wait on the GPU until another queue's `fence` reaches `value`. `ASYNC_COMPUTE_BUFFER_MARK` / `ASYNC_COMPUTE_TEXTURE_MARK`: bit 15 of `wgt::BufferUses` / `wgt::TextureUses`, which wgpu-types 29 leaves unnamed (a `const` assertion fails the build if a bump names it), set by wgpu-core on a use the async queue left. |
+| `src/lib.rs` | `Device::create_async_compute_queue(&self) -> Option<Queue>` (default `None`; GL, Metal and noop keep it) and `Queue::wait_for_fence(&self, fence: &Fence, value: FenceValue) -> Result<(), DeviceError>` (default `Err(Unexpected)`): later submissions on the queue wait on the GPU until another queue's `fence` reaches `value`. `ASYNC_COMPUTE_BUFFER_MARK` / `ASYNC_COMPUTE_TEXTURE_MARK`, set by wgpu-core on a use the async queue left: bit 15 of `wgt::TextureUses`, which wgpu-types 30 leaves unnamed (a `const` assertion fails the build if a bump names it), and of `wgt::BufferUses`, which wgpu-types 30 fills with `RAY_TRACING_PIPELINE_SHADER_DATA`. The buffer mark shares that bit: a read-only use like the states it marks, which wgpu-core 30 never records (it has no ray-tracing pipelines); asserted in `lib.rs`. |
 | `src/dynamic/device.rs`, `src/dynamic/queue.rs` | the two methods on `DynDevice` / `DynQueue`. |
 | `src/dx12/device.rs` | `create_async_compute_queue`: `CreateCommandQueue` with `D3D12_COMMAND_LIST_TYPE_COMPUTE`. `create_command_encoder` makes its allocator, and so its lists, of the queue's type. |
-| `src/dx12/mod.rs`, `src/dx12/adapter.rs` | `Queue` and `CommandEncoder` carry their `D3D12_COMMAND_LIST_TYPE`; `Queue::wait_for_fence` is `ID3D12CommandQueue::Wait`. |
+| `src/dx12/mod.rs`, `src/dx12/adapter.rs` | `Queue` and `CommandEncoder` carry their `D3D12_COMMAND_LIST_TYPE`; `Queue::wait_for_fence` stages an `ID3D12CommandQueue::Wait` through upstream's `Queue::add_wait_fence` (wgpu-hal 30), issued before the next submit's `ExecuteCommandLists`; wgpu-core calls it right before that submit. The second queue gets 30's idle fence and staged-wait lists. |
 | `src/dx12/command.rs`, `src/dx12/conv.rs` | `transition_buffers` / `transition_textures` map a use through `compute_queue_state`: on a compute list, or for a marked use, without `PIXEL_SHADER_RESOURCE`, the one graphics-only state a compute-queue use maps to (the runtime fails `Close` on a compute list that names it: measured, `E_INVALIDARG`). The UAV-barrier test ignores the mark. |
 | `src/vulkan/adapter.rs` | `open_with_callback` asks for a second queue: the first queue of a compute-only family where there is one, else queue 1 of the graphics family; none without timeline semaphores (the cross-queue wait is one). `device_from_raw` keeps its signature and forwards to `device_from_raw_with_async_queue`, which records the slot. |
-| `src/vulkan/device.rs`, `src/vulkan/mod.rs` | `create_async_compute_queue` hands that queue out once, with its own relay semaphores. `Queue::wait_for_fence` queues a timeline wait (`ALL_COMMANDS`) that the next `submit` takes. Buffers, images and the buffers behind acceleration structures (`create_acceleration_structure`: a ray query on the async queue reads a TLAS the main queue built) are `VK_SHARING_MODE_CONCURRENT` over both families when the async queue is of another family (`DeviceShared::concurrent_families`). An encoder of the compute family masks its barriers' stages and accesses to what such a family supports (`conv::compute_queue_barrier`); the mark is stripped before layouts and stages are derived. |
+| `src/vulkan/device.rs`, `src/vulkan/mod.rs` | `create_async_compute_queue` hands that queue out once, with its own relay semaphores. `Queue::wait_for_fence` is upstream's `Queue::add_wait_semaphore` (wgpu-hal 30) with the timeline value, at `ALL_COMMANDS`: the next `submit` takes it; the fork's own wait list and submit hunk are gone. Buffers, images and the buffers behind acceleration structures (`create_acceleration_structure`: a ray query on the async queue reads a TLAS the main queue built) are `VK_SHARING_MODE_CONCURRENT` over both families when the async queue is of another family (`DeviceShared::concurrent_families`). An encoder of the compute family masks its barriers' stages and accesses to what such a family supports (`conv::compute_queue_barrier`); the mark is stripped before layouts and stages are derived. |
 
 **Why these resource rules.** DX12: wgpu-core records every transition *into* an async submission
 on the main (direct) queue, which may name any state, and marks what the async lists write or
@@ -166,7 +166,7 @@ at instance or swap-chain creation and nothing else.
 
 ## How to check
 
-`diff -u <registry>/wgpu-hal-29.0.4/src/vulkan/swapchain/native.rs third_party/wgpu-hal/src/vulkan/swapchain/native.rs`
+`diff -u <registry>/wgpu-hal-30.0.1/src/vulkan/swapchain/native.rs third_party/wgpu-hal/src/vulkan/swapchain/native.rs`
 shows the first patch and nothing else, and the same for `src/dx12/command.rs` shows the second,
 third and fourth patches' hunks there, each marked `BENILLA:`; `diff -r` of the two trees shows only
 the files the four patches name, the dropped
@@ -179,7 +179,7 @@ this path, at the lock's version, with the hunks present.
 
 When wgpu-hal handles the timeout itself ([gfx-rs/wgpu#9029](https://github.com/gfx-rs/wgpu/issues/9029))
 and wgpu fixes [gfx-rs/wgpu#7974](https://github.com/gfx-rs/wgpu/issues/7974), or when wgpu
-leaves 29: delete this directory and the `wgpu-hal` line under `[patch.crates-io]`. Drop the
+leaves 30: delete this directory and the `wgpu-hal` line under `[patch.crates-io]`. Drop the
 second patch only together with `third_party/wgpu-core`'s.
 The fourth patch goes when an upstream DX12 adapter exposes `PIPELINE_STATISTICS_QUERY` itself;
 without it, `WOW_GPU_STATS` reads nothing on DX12 (the device lacks the feature, and the instrument

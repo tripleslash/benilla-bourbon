@@ -12,7 +12,7 @@ pub trait DynQueue: DynResource {
         &self,
         command_buffers: &[&dyn DynCommandBuffer],
         surface_textures: &[&dyn DynSurfaceTexture],
-        signal_fence: (&mut dyn DynFence, FenceValue),
+        signal_fence: (&dyn DynFence, FenceValue),
     ) -> Result<(), DeviceError>;
     unsafe fn present(
         &self,
@@ -26,6 +26,7 @@ pub trait DynQueue: DynResource {
         fence: &dyn DynFence,
         value: FenceValue,
     ) -> Result<(), DeviceError>;
+    unsafe fn wait_for_idle(&self) -> Result<(), DeviceError>;
 }
 
 impl<Q: Queue + DynResource> DynQueue for Q {
@@ -33,7 +34,7 @@ impl<Q: Queue + DynResource> DynQueue for Q {
         &self,
         command_buffers: &[&dyn DynCommandBuffer],
         surface_textures: &[&dyn DynSurfaceTexture],
-        signal_fence: (&mut dyn DynFence, FenceValue),
+        signal_fence: (&dyn DynFence, FenceValue),
     ) -> Result<(), DeviceError> {
         let command_buffers = command_buffers
             .iter()
@@ -43,7 +44,7 @@ impl<Q: Queue + DynResource> DynQueue for Q {
             .iter()
             .map(|surface| (*surface).expect_downcast_ref())
             .collect::<Vec<_>>();
-        let signal_fence = (signal_fence.0.expect_downcast_mut(), signal_fence.1);
+        let signal_fence = (signal_fence.0.expect_downcast_ref(), signal_fence.1);
         unsafe { Q::submit(self, &command_buffers, &surface_textures, signal_fence) }
     }
 
@@ -67,5 +68,9 @@ impl<Q: Queue + DynResource> DynQueue for Q {
     ) -> Result<(), DeviceError> {
         let fence = fence.expect_downcast_ref();
         unsafe { Q::wait_for_fence(self, fence, value) }
+    }
+
+    unsafe fn wait_for_idle(&self) -> Result<(), DeviceError> {
+        unsafe { Q::wait_for_idle(self) }
     }
 }
