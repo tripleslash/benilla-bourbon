@@ -47,7 +47,7 @@ sha1 = "0.10.6"
 # kira 0.12.4, patched to compute spatial gains and the volume tween per output chunk and
 # interpolate them, not per sample frame (`third_party/kira/BENILLA.md`).
 kira = { path = "third_party/kira" }
-# bevy_tasks 0.19.1, forked so the browser build can have threads at all. Upstream gates its
+# bevy_tasks 0.20.1, forked so the browser build can have threads at all. Upstream gates its
 # `multi_threaded` alias on `target_arch` rather than `target_feature`, which makes "wasm" and "has
 # no threads" the same statement — they stopped being the same statement when the browser got shared
 # memory. The fork also supplies the threads themselves (`std::thread::spawn` is the `unsupported`
@@ -55,11 +55,11 @@ kira = { path = "third_party/kira" }
 # there rather than erroring. One patch entry covers the graph: every bevy crate depends on this one.
 # `third_party/bevy_tasks/BENILLA.md` has the hunk list and the verifying diff.
 bevy_tasks = { path = "third_party/bevy_tasks" }
-# bevy_platform 0.19.1, forked for one thing: on `wasm32 + atomics` its `Mutex` and `RwLock` spin
+# bevy_platform 0.20.1, forked for one thing: on `wasm32 + atomics` its `Mutex` and `RwLock` spin
 # (its own no-std implementation) instead of parking, because a parked page traps and the render
 # worker shares bevy's locks with the page. `third_party/bevy_platform/BENILLA.md`.
 bevy_platform = { path = "third_party/bevy_platform" }
-# bevy_ecs 0.19.1, forked for the same reason and in the same shape: 13 threading gates in
+# bevy_ecs 0.20.1, forked for the same reason and in the same shape: 13 threading gates in
 # `query/par_iter.rs` and `query/state.rs` that ask `target_arch == "wasm32"` when they mean
 # "has no threads", plus one logic change: a query's archetype update tests only the new archetypes
 # when they are fewer than its rarest component's set. Left alone: `ExecutorKind`'s wasm default, which stays SingleThreaded on
@@ -74,13 +74,13 @@ bevy_ecs = { path = "third_party/bevy_ecs" }
 # `par_iter_mut`. The fork swaps them for spin equivalents on that target alone.
 # `third_party/async-executor/BENILLA.md` has the argument and the verifying diff.
 async-executor = { path = "third_party/async-executor" }
-# bevy_render 0.19.1, forked for TWO `ComputeTaskPool::scope` call sites. `WgpuWrapper` is a
+# bevy_render 0.20.1, forked for TWO `ComputeTaskPool::scope` call sites. `WgpuWrapper` is a
 # `SendWrapper` under wasm+atomics and panics if dereferenced off its creating thread; upstream
 # guards `renderer/mod.rs` for exactly that and misses `batching::gpu_preprocessing`, which hands
 # `&RenderDevice`/`&RenderQueue` into `scope.spawn`. The fork reroutes those two through a serial
 # scope on that target alone. `third_party/bevy_render/BENILLA.md` has the diff.
 bevy_render = { path = "third_party/bevy_render" }
-# bevy_pbr 0.19.1, patched for ONE condition in `mesh_preprocess.wgsl`: GPU occlusion culling never
+# bevy_pbr 0.20.1, patched for ONE condition in `mesh_preprocess.wesl`: GPU occlusion culling never
 # culls a `NoFrustumCulling` mesh. Upstream tests every mesh's AABB against the depth pyramid, and a
 # `NoFrustumCulling` mesh's box is the infinite stand-in (NaN corners) or a box its draw leaves (a
 # skinned rig's bind pose), so dress, gear and particles could vanish behind nothing.
@@ -90,13 +90,13 @@ bevy_pbr = { path = "third_party/bevy_pbr" }
 # script may take the release archive from a local copy instead of GitHub, checked against the same
 # pinned SHA-256. `third_party/mach-dxcompiler-rs/BENILLA.md` has the hunk and where the copy goes.
 mach-dxcompiler-rs = { path = "third_party/mach-dxcompiler-rs" }
-# bevy_winit 0.19.1, forked for three pieces of per-frame state its runner rebuilt on every call: a
+# bevy_winit 0.20.1, forked for three pieces of per-frame state its runner rebuilt on every call: a
 # `world.query` on each window event (`RedrawRequested` is one a frame), the focus `SystemState` in
 # `redraw_requested`, and the monitor `SystemState` in `about_to_wait`. A fresh query state scans every
 # archetype in the world, and this world has thousands: measured at ~4% of the browser's frame
 # thread. `third_party/bevy_winit/BENILLA.md` has the diff.
 bevy_winit = { path = "third_party/bevy_winit" }
-# wgpu 29.0.4, forked for two WebGPU feature mappings the browser backend lacks: `"subgroups"` and
+# wgpu 30.0.1, forked for two WebGPU feature mappings the browser backend lacks: `"subgroups"` and
 # `"texture-formats-tier1"`, the second so the FSR 3.1.5 upscaler gets FidelityFX's one- and
 # two-channel storage formats in the browser. Two table rows and the two binding names they need;
 # `third_party/wgpu/PATCH.md` has the diff and the removal condition.
@@ -122,11 +122,11 @@ parking = { path = "third_party/parking" }
 # waiter instead of its owner: "closure invoked recursively or after being dropped", and the real
 # task never ran again. `third_party/web-task/BENILLA.md` has the diff.
 web-task = { path = "third_party/web-task" }
-# wgpu-hal 29.0.4, patched so a presentation stall past wgpu-core's 1 s frame timeout is waited out
+# wgpu-hal 30.0.1, patched so a presentation stall past wgpu-core's 1 s frame timeout is waited out
 # and not turned into a lost device, and so DX12 count draws execute with the pipeline layout's
 # per-draw special-constants signature (`third_party/wgpu-hal/BENILLA.md`).
 wgpu-hal = { path = "third_party/wgpu-hal" }
-# wgpu-core 29.0.4, patched so DX12 multi-draw-indirect-count draws give each draw its own
+# wgpu-core 30.0.1, patched so DX12 multi-draw-indirect-count draws give each draw its own
 # `first_instance` and `base_vertex`: its arguments go through the indirect-draw rewrite that
 # carries them to the shader, which upstream runs for plain multi-draw only, and that rewrite
 # runs on DX12 whatever `VALIDATION_INDIRECT_CALL` says (gfx-rs/wgpu#7974,
