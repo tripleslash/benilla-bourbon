@@ -1,7 +1,7 @@
 # benilla's `wgpu-core` fork — what differs from upstream, and how to check
 
 Upstream: [`gfx-rs/wgpu`](https://github.com/gfx-rs/wgpu) (`wgpu-core`), MIT OR Apache-2.0, version
-`29.0.4`, the version the workspace lock resolves to (Bevy 0.19.1's wgpu 29). Wired in through
+`30.0.1`, the version the workspace lock resolves to (Bevy 0.20.1's wgpu 30). Wired in through
 `[patch.crates-io]` in the workspace root. The crate is copied from the cargo registry as published
 (`src/`, `build.rs`, `Cargo.toml`, the two licence files). Every hunk is marked `BENILLA:`. Its
 partner is `third_party/wgpu-hal` (the DX12 half, "The second patch" there), and the change that
@@ -14,7 +14,7 @@ consumes both is `third_party/bevy_render` (the thirteenth delta).
 `@builtin(instance_index)` starting at 0 and `@builtin(vertex_index)` without its
 `first_vertex` / `base_vertex`. Upstream's own repro (a comment on the issue): two indexed draws
 with `first_instance` 0 and 1 both draw as instance 0 on DX12 (WARP and AMD), correct on Vulkan.
-Bevy 0.19.1 works around it by not using count draws on DX12 at all.
+Bevy 0.20.1 still works around it by not using count draws on DX12 at all.
 
 **The mechanism.** HLSL before Shader Model 6.8 has no `SV_StartInstanceLocation` /
 `SV_StartVertexLocation`: `SV_InstanceID` and `SV_VertexID` start at 0 whatever the draw's start
@@ -145,25 +145,25 @@ queues.
 |---|---|
 | `src/device/async_queue.rs` | new: the queue, its submit, the conflict test, `schedule_destruction`, `Queue::wait_for_async`. |
 | `src/device/resource.rs` | `Device::async_queue`, `async_command_allocator`, `get_async_queue`, `create_async_compute_queue`; `maintain` waits for and retires the async queue; `set_buffer_data` waits for it. |
-| `src/device/queue.rs` | `Queue::submit` refuses async command buffers and waits where it conflicts; `TempResource::Shared`; `QueueSubmitError::{WrongQueue, AsyncComputeSurfaceTexture}`; `validate_command_buffer`, `PendingWrites::pre_submit`, `dst_textures` and two `EncoderInFlight` fields `pub(crate)`. |
+| `src/device/queue.rs` | `Queue::submit` refuses async command buffers, and `submit_pending_submission` (wgpu 30's shared submit path) waits where its executions, pending writes included, conflict; `TempResource::Shared`; `QueueSubmitError::{WrongQueue, AsyncComputeSurfaceTexture}`; `validate_command_buffer`, `PendingWrites::pre_submit`, `dst_textures` and two `EncoderInFlight` fields `pub(crate)`. |
 | `src/device/life.rs` | `map_if_used`, `take_ready_to_map`, `newest_matching`. |
 | `src/device/global.rs`, `src/device/mod.rs` | the `Global` entry points; the module. |
 | `src/resource.rs` | `map_async` and both `destroy`s route through the async queue. |
 | `src/command/mod.rs` | `InnerCommandEncoder::async_compute` (which allocator its encoder returns to), `CommandBufferMutable::async_compute`, `CommandEncoder::new_for_queue`, the render-pass refusal in `encode_commands`, `CommandEncoderError::AsyncComputeOnly`. |
 | `src/track/buffer.rs`, `src/track/texture.rs`, `src/track/mod.rs` | `transitioned`, `read_only_state`, `mark_for_async_queue`. |
-| `src/lock/rank.rs` | `ASYNC_QUEUE_FENCE` after `DEVICE_FENCE`; `ASYNC_QUEUE_LIFE_TRACKER` after the main queue's pending writes and life tracker. |
+| `src/lock/rank.rs` | `ASYNC_QUEUE_LIFE_TRACKER` wherever the main queue's life tracker may be taken, after it, and followed by what it may be; `ASYNC_QUEUE_FENCE` a leaf (wgpu 30 holds the device's own fence unlocked, so `command_indices`, held across both submits, orders the async submit against the main queue's). |
 
 ## How to check
 
 ```sh
-diff -ru ~/.cargo/registry/src/index.crates.io-*/wgpu-core-29.0.4 third_party/wgpu-core
+diff -ru ~/.cargo/registry/src/index.crates.io-*/wgpu-core-30.0.1 third_party/wgpu-core
 ```
 
 shows exactly the hunks above (every one marked `BENILLA:`; `src/device/async_queue.rs` is new), this
 file, and `Only
 in` the registry copy for cargo's packaging files (`.cargo-ok`, `.cargo_vcs_info.json`,
 `Cargo.lock`, `Cargo.toml.orig`). If the registry copy is absent, fetch
-`https://static.crates.io/crates/wgpu-core/wgpu-core-29.0.4.crate`.
+`https://static.crates.io/crates/wgpu-core/wgpu-core-30.0.1.crate`.
 
 On a DX12 machine: `WOW_STATIC_GX_MDI=0` against `=1` (plain multi-draw), and Bevy's indirect lane
 (`WOW_ENTITY_GPU_CULL=1`, which now uses count draws on DX12), each pictured against Vulkan
@@ -172,6 +172,6 @@ On a DX12 machine: `WOW_STATIC_GX_MDI=0` against `=1` (plain multi-draw), and Be
 ## When to drop it
 
 When wgpu fixes [gfx-rs/wgpu#7974](https://github.com/gfx-rs/wgpu/issues/7974), or when the
-workspace leaves wgpu 29: delete this directory and the `wgpu-core` line under
+workspace leaves wgpu 30: delete this directory and the `wgpu-core` line under
 `[patch.crates-io]`, and check `third_party/wgpu-hal` and `third_party/bevy_render` (the
 thirteenth delta) against the release.

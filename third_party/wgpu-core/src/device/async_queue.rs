@@ -175,8 +175,8 @@ impl AsyncComputeQueue {
     /// submission already waits for the main queue's newest submission before it; this is for a
     /// caller that wants it stated.
     pub fn wait_for_main(&self, index: SubmissionIndex) -> Result<(), DeviceError> {
-        let fence = self.device.fence.read();
-        unsafe { self.raw().wait_for_fence(fence.as_ref(), index) }
+        let fence = self.device.fence.as_ref();
+        unsafe { self.raw().wait_for_fence(fence, index) }
             .map_err(|e| self.device.handle_hal_error(e))
     }
 
@@ -229,7 +229,8 @@ impl AsyncComputeQueue {
         };
 
         let snatch_guard = device.snatchable_lock.read();
-        let mut main_fence = device.fence.write();
+        // wgpu 30 holds the device's fence unlocked; `command_indices`, held until both submits are
+        // made, is what orders them against the main queue's own.
         let mut async_fence = self.fence.write();
         let mut indices = device.command_indices.write();
         indices.active_submission_index += 1;
@@ -415,7 +416,7 @@ impl AsyncComputeQueue {
                 .collect::<Vec<_>>();
             let main_surfaces = main_surface_owned
                 .values()
-                .map(|texture| match texture.inner.get(&snatch_guard) {
+                .map(|texture| match texture.inner.get(&snatch_guard).maybe_valid() {
                     Some(TextureInner::Surface { raw, .. }) => raw.as_ref(),
                     _ => unreachable!(),
                 })
@@ -424,7 +425,7 @@ impl AsyncComputeQueue {
                 main.raw().submit(
                     &main_buffers,
                     &main_surfaces,
-                    (main_fence.as_mut(), transit_index),
+                    (device.fence.as_ref(), transit_index),
                 )
             } {
                 break 'error Err(device.handle_hal_error(e).into());
@@ -439,7 +440,7 @@ impl AsyncComputeQueue {
             // The async submission, after the transit.
             if let Err(e) = unsafe {
                 self.raw()
-                    .wait_for_fence(main_fence.as_ref(), transit_index)
+                    .wait_for_fence(device.fence.as_ref(), transit_index)
             } {
                 break 'error Err(device.handle_hal_error(e).into());
             }
@@ -449,7 +450,7 @@ impl AsyncComputeQueue {
                 .collect::<Vec<_>>();
             if let Err(e) = unsafe {
                 self.raw()
-                    .submit(&async_buffers, &[], (async_fence.as_mut(), submit_index))
+                    .submit(&async_buffers, &[], (async_fence.as_ref(), submit_index))
             } {
                 break 'error Err(device.handle_hal_error(e).into());
             }
@@ -460,7 +461,6 @@ impl AsyncComputeQueue {
         };
         drop(indices);
         drop(async_fence);
-        drop(main_fence);
         drop(snatch_guard);
 
         match res {
