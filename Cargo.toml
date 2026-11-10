@@ -122,9 +122,6 @@ parking = { path = "third_party/parking" }
 # waiter instead of its owner: "closure invoked recursively or after being dropped", and the real
 # task never ran again. `third_party/web-task/BENILLA.md` has the diff.
 web-task = { path = "third_party/web-task" }
-# A lock-only stand-in: bevy_audio's unbuilt cpal 0.15 would otherwise hold `alsa-sys` 0.3 against
-# cpal 0.17's 0.4, and a lock holds one `links = "alsa"` (`third_party/alsa-0.9/BENILLA.md`).
-alsa = { path = "third_party/alsa-0.9" }
 # wgpu-hal 29.0.4, patched so a presentation stall past wgpu-core's 1 s frame timeout is waited out
 # and not turned into a lost device, and so DX12 count draws execute with the pipeline layout's
 # per-draw special-constants signature (`third_party/wgpu-hal/BENILLA.md`).
