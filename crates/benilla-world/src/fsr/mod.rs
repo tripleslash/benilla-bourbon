@@ -429,6 +429,9 @@ impl Plugin for FsrPlugin {
         };
         render_app
             .add_schedule(Schedule::new(cadence::HeldFrame))
+            // Present before the first extract: `cadence::mark_render` reads it from the first
+            // `Render`, and the extraction only overwrites it.
+            .init_resource::<FsrHeld>()
             .init_resource::<cadence::FgHolds>()
             .init_resource::<velocity::RigPalettePrev>()
             .init_resource::<velocity::VelocityFrame>()
