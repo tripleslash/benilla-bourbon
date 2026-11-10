@@ -71,6 +71,14 @@ pub(crate) fn modern_libraries(app: &mut App) {
         // under `RT_REFLECT`, which only the water's pipelines carry where the lane may run.
         bevy::shader::load_shader_library!(app, "shaders/modern/rt_reflect.wgsl");
     }
+    // fork: the browser's empty `rtshadow` and `rtreflect`. The shader cache composes every
+    // `#import` whatever the defs, and an unregistered one holds the pipeline queued, silently: the
+    // receivers that name them under an RT def (every M2, the terrain, the water) never drew.
+    #[cfg(target_arch = "wasm32")]
+    {
+        bevy::shader::load_shader_library!(app, "shaders/modern/rt_shadow_web.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/modern/rt_reflect_web.wgsl");
+    }
     bevy::asset::embedded_asset!(app, "shaders/modern/froxel_scatter.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/modern/froxel_integrate.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/modern/fog_composite.wgsl");

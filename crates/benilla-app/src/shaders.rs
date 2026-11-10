@@ -167,10 +167,23 @@ mod tests {
         }
     }
 
-    /// A `ShaderCache` that composes for `features` over every embedded shader library plus the
-    /// cata water (`benilla_assets`'s `liquid_cata.wgsl`), and the water's id in it.
+    /// Which shader libraries a [`cata_water_cache`] holds.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Libraries {
+        /// Every library this platform's client registers.
+        Here,
+        /// The browser's set: the ray-query libraries out (`benilla_world::shaders`' native-only
+        /// block), the empty `rtshadow` and `rtreflect` it registers in their place in.
+        Web,
+        /// The browser's set without those two stand-ins, as it stood before them.
+        WebWithoutStandIns,
+    }
+
+    /// A `ShaderCache` that composes for `features` over `libraries` plus the cata water
+    /// (`benilla_assets`'s `liquid_cata.wgsl`), and the water's id in it.
     fn cata_water_cache(
         features: bevy::render::render_resource::WgpuFeatures,
+        libraries: Libraries,
     ) -> (
         bevy::shader::ShaderCache<naga::Module, ()>,
         AssetId<bevy::shader::Shader>,
@@ -181,6 +194,20 @@ mod tests {
         let source = server.get_source(AssetSourceId::from("embedded")).unwrap();
         let mut files = Vec::new();
         embedded_shaders(source, std::path::Path::new(""), &mut files);
+        if libraries != Libraries::Here {
+            // The web registers no library that needs ray queries.
+            files.retain(|(_, text)| !text.contains("enable wgpu_ray_query;"));
+        }
+        if libraries == Libraries::Web {
+            files.push((
+                "benilla_world/shaders/modern/rt_shadow_web.wgsl".into(),
+                include_str!("../../benilla-world/src/shaders/modern/rt_shadow_web.wgsl").into(),
+            ));
+            files.push((
+                "benilla_world/shaders/modern/rt_reflect_web.wgsl".into(),
+                include_str!("../../benilla-world/src/shaders/modern/rt_reflect_web.wgsl").into(),
+            ));
+        }
 
         let mut cache: ShaderCache<naga::Module, ()> = ShaderCache::new(
             (),
@@ -245,8 +272,10 @@ mod tests {
     /// and a frame; this one needs neither.
     #[test]
     fn the_cata_water_shader_composes_and_translates() {
-        let (mut cache, water) =
-            cata_water_cache(bevy::render::render_resource::WgpuFeatures::empty());
+        let (mut cache, water) = cata_water_cache(
+            bevy::render::render_resource::WgpuFeatures::empty(),
+            Libraries::Here,
+        );
         for colors in [false, true] {
             let defs = cata_water_defs(colors);
             let module = cache.get(0, water, &defs).unwrap_or_else(|e| {
@@ -281,6 +310,42 @@ mod tests {
         }
     }
 
+    /// The cata water composes over the browser's libraries, where `rtshadow` and `rtreflect`
+    /// are the empty stand-ins: it names both under `RT_SHADOWS` / `RT_REFLECT`, which the web
+    /// never sets, and the shader cache composes every `#import` whatever the defs. Without the
+    /// stand-ins the cache answers "import not yet available", which the pipeline cache retries
+    /// for ever: every M2, terrain and water pipeline on the web stayed queued and drew nothing.
+    #[test]
+    fn the_cata_water_shader_composes_over_the_web_libraries() {
+        let features = bevy::render::render_resource::WgpuFeatures::empty();
+        let (mut cache, water) = cata_water_cache(features, Libraries::WebWithoutStandIns);
+        let unstood = cache.get(0, water, &cata_water_defs(false));
+        assert!(
+            matches!(
+                unstood,
+                Err(bevy::shader::ShaderCacheError::ShaderImportNotYetAvailable)
+            ),
+            "without the stand-ins the web's water should wait on its RT import, got {:?}",
+            unstood.map(|_| ())
+        );
+        let (mut cache, water) = cata_water_cache(features, Libraries::Web);
+        for colors in [false, true] {
+            let module = cache
+                .get(0, water, &cata_water_defs(colors))
+                .unwrap_or_else(|e| {
+                    panic!("colors {colors}: liquid_cata.wgsl does not compose on the web: {e:?}")
+                });
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::default(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| {
+                panic!("colors {colors}: liquid_cata.wgsl does not validate on the web: {e:?}")
+            });
+        }
+    }
+
     /// fork: F and G — the cata water's native ray-traced variant, as `benilla_assets`'
     /// `push_rt_water` builds its colour pipeline where both lanes may run: `RT_SHADOWS` and
     /// `RT_REFLECT`, the scene at `RT_GROUP` 4 (the group after the material's), composed with
@@ -298,6 +363,7 @@ mod tests {
             WgpuFeatures::EXPERIMENTAL_RAY_QUERY
                 | WgpuFeatures::TEXTURE_BINDING_ARRAY
                 | WgpuFeatures::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
+            Libraries::Here,
         );
         // What `wgpu_naga_bridge::features_to_naga_capabilities` makes of those features and of
         // `DownlevelFlags::all()`, which the composer validates against.
