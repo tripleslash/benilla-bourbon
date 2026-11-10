@@ -916,9 +916,43 @@ mod tests {
     use super::testkit::{batch, batch_of, object, tri};
     use super::*;
 
+    /// `src` without its `#ifdef WOW_MODERN` blocks, `#else` branches kept, nesting followed.
+    fn classic_only(src: &str) -> String {
+        // Per open `#if…`: whether it is a `WOW_MODERN` block, and whether its branch is skipped.
+        let mut open: Vec<(bool, bool)> = Vec::new();
+        let mut out = String::new();
+        for line in src.lines() {
+            let d = line.trim_start();
+            let outer_skip = open.iter().any(|&(_, skip)| skip);
+            if d.starts_with("#if") {
+                let modern = d.starts_with("#ifdef WOW_MODERN");
+                open.push((modern, modern));
+                continue;
+            }
+            if d.starts_with("#else") {
+                if let Some((modern, skip)) = open.last_mut() {
+                    if *modern {
+                        *skip = !*skip;
+                    }
+                }
+                continue;
+            }
+            if d.starts_with("#endif") {
+                open.pop();
+                continue;
+            }
+            if !outer_skip {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out
+    }
+
     /// The static pass lights as the entity pass does, per vertex: `vertex_light` holds every
     /// lane, the vertex stage writes its clamped colour to the interpolated `primary`, and the
-    /// fragment only modulates the texel by it.
+    /// fragment only modulates the texel by it. The modern lane lights per pixel by design, so its
+    /// `#ifdef WOW_MODERN` blocks are left out of the fragment this reads.
     #[test]
     fn the_static_light_is_evaluated_per_vertex() {
         let src = include_str!("../shaders/static_gx.wgsl");
@@ -928,7 +962,7 @@ mod tests {
         };
         let light = &src[at("fn vertex_light(")..at("// ---- the pass ----")];
         let vertex = &src[at("@vertex")..at("@fragment")];
-        let fragment = &src[at("@fragment")..];
+        let fragment = classic_only(&src[at("@fragment")..]);
         for (lane, term) in [
             ("the exterior SH lobe", "wow_light.sh_c10_r.w + sun_dc.x"),
             ("the FFP N·L", "let ndotl = max(dot(n_lit, L), 0.0);"),

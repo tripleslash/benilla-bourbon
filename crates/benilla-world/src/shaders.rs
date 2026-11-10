@@ -137,7 +137,9 @@ mod tests {
     /// `textureSampleCompare`, and the explicit builtins `dpdx`, `dpdy`, `fwidth` with their
     /// `Coarse` and `Fine` variants) below a function body's top level. WGSL allows them only in
     /// uniform control flow, and a branch on a fragment input is not. This reads text: it does not
-    /// follow helper calls, a sample after a `return` inside a branch, or `/* */` comments.
+    /// follow helper calls, a sample after a `return` inside a branch, or `/* */` comments. An
+    /// `#else` branch starts at the depth its `#ifdef` opened at, so one body under two signatures
+    /// (`#ifdef GX_MESHLETS fn gx_vertex(…) { #else fn vertex(…) { #endif`) counts one brace.
     fn derivatives_in_nested_blocks(src: &str) -> Vec<usize> {
         const IMPLICIT: [&str; 12] = [
             "textureSample",
@@ -155,7 +157,27 @@ mod tests {
         ];
         let mut depth = 0usize;
         let mut hits = Vec::new();
+        // Per open `#if…`: the depth it opened at, and the depth its first branch closed at.
+        let mut branches: Vec<(usize, Option<usize>)> = Vec::new();
         for (n, line) in src.lines().enumerate() {
+            let directive = line.trim_start();
+            if directive.starts_with("#if") {
+                branches.push((depth, None));
+                continue;
+            }
+            if directive.starts_with("#else") {
+                if let Some((open, first)) = branches.last_mut() {
+                    first.get_or_insert(depth);
+                    depth = *open;
+                }
+                continue;
+            }
+            if directive.starts_with("#endif") {
+                if let Some((_, Some(first))) = branches.pop() {
+                    depth = first;
+                }
+                continue;
+            }
             let code = line.split("//").next().unwrap_or("");
             let mut word = String::new();
             for c in code.chars().chain(std::iter::once(' ')) {
@@ -189,6 +211,13 @@ mod tests {
             derivatives_in_nested_blocks(bad),
             [3],
             "the scanner finds the nested sample"
+        );
+        let twin =
+            "#ifdef A\nfn a(in: V) {\n#else\nfn b(in: V) {\n#endif\n    let d = dpdx(in.uv);\n}\n";
+        assert_eq!(
+            derivatives_in_nested_blocks(twin),
+            Vec::<usize>::new(),
+            "one body under two signatures is one level"
         );
 
         let root = env!("CARGO_MANIFEST_DIR");
