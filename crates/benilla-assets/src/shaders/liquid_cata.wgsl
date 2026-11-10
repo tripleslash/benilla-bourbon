@@ -223,6 +223,10 @@ var<private> modern_glint: vec3<f32>;
 // fog (the bed seen through the water, the reflected world): `fragment_classic` leaves it out of its
 // gamma output and the wrapper adds it after the surface's fog. Zero on every other lane.
 var<private> modern_prefogged: vec3<f32>;
+// fork: fog once — the weight that share has in the pixel, per channel: its in-scatter came with it,
+// so the wrapper's surface fog adds its own in-scatter only over the rest (`1 − share`). Zero on every
+// other lane.
+var<private> modern_prefog_share: vec3<f32>;
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(113) var ripple_map: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(114) var ripple_samp: sampler;
@@ -1354,6 +1358,9 @@ fn caustic_net(entry: vec2<f32>, path: f32, t: f32, foot: f32) -> f32 {
 struct ClearWater {
     rgb: vec3<f32>,
     fogged: vec3<f32>,
+    /// The weight `fogged` carries in `rgb`, per channel: how much of the in-scatter it was drawn
+    /// with comes through to the pixel, so the surface fog adds its own over the rest only.
+    fog_share: vec3<f32>,
 }
 
 /// What [`modern_water`] reads beyond the surface's own frame: the reflection, how much of it is
@@ -1452,6 +1459,12 @@ fn modern_water(
     var out: ClearWater;
     out.rgb = (1.0 - fres) * (seen_bed + body) + fres * ((1.0 - a) * x.refl + a * scatter);
     out.fogged = (1.0 - fres) * seen_bed + fres * (1.0 - a) * x.refl * clamp(x.refl_fogged, 0.0, 1.0);
+    let bed_gain = clamp(tint * x.caustic * trans, vec3<f32>(0.0), vec3<f32>(1.0));
+    out.fog_share = clamp(
+        (1.0 - fres) * bed_gain + vec3<f32>(fres * (1.0 - a) * clamp(x.refl_fogged, 0.0, 1.0)),
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
     return out;
 }
 
@@ -2093,6 +2106,7 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
             // wrapper's surface fog; the rest is fogged at the surface as before.
             if (modern) {
                 modern_prefogged = mix(here, (1.0 - k) * clear.fogged, shore_cover);
+                modern_prefog_share = mix(vec3<f32>(1.0), (1.0 - k) * clear.fog_share, shore_cover);
             }
             // Linear out, re-encoded so the wrapper's decode hands it back unchanged.
             rgb = colorspace::linear_to_srgb(max(total - modern_prefogged, vec3<f32>(0.0)));
@@ -2182,6 +2196,7 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
 fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     modern_glint = vec3<f32>(0.0);
     modern_prefogged = vec3<f32>(0.0);
+    modern_prefog_share = vec3<f32>(0.0);
     let c = fragment_classic(in);
     var rgb = colorspace::modern_out(c.rgb, wow_light.point_count.y) + modern_glint;
     // P4: transparent water draws after the fog composite, so it fogs itself; opaque magma and slime
@@ -2189,7 +2204,10 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     if (wow_light.point_count.y > 0.5 && wow_light.fog_color.w > 0.5 && w.kind.x < 0.5) {
         let air = modern_block.fog;
         let fog = froxelfog::fog_at(modern_fog_volume, scene_samp, air, in.world_position.xyz);
-        rgb = rgb * fog.a + fog.rgb;
+        // fog once — the in-scatter too: the prefogged share brought its own, so the surface's
+        // falls on the rest alone. Added at full weight, a shallow edge or the bank at the waterline
+        // took the haze twice and drew every distant shoreline as a line brighter than the fog.
+        rgb = rgb * fog.a + fog.rgb * (vec3<f32>(1.0) - modern_prefog_share);
     }
     // fork: fog once — what already carried its fog when it was drawn (the experimental tier's bed and
     // reflected world, `fragment_classic`) joins after the surface's fog, not under it.
