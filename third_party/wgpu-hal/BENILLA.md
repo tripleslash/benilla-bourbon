@@ -147,11 +147,15 @@ swap chain. In manual-hooking mode (`ProgrammingGuideManualHooking.md`) the host
 calls through Streamline's proxies:
 
 - **DX12** (`src/dx12/mod.rs`, `interposer`; `src/dx12/adapter.rs`): with an `slUpgradeInterface`
-  installed by `interposer::set_upgrade_interface`, the direct queue is created on the proxy device
+  installed by `interposer::set_upgrade_interface` (and `slSetD3DDevice` by
+  `interposer::set_device_hook`, handed the native device in `Adapter::open` before the first
+  proxy is made, the guide's 5.1 order), the direct queue is created on the proxy device
   (`eID3D12Device_CreateCommandQueue`) and the HWND swap chain on the proxy factory
   (`eIDXGIFactory_CreateSwapChainForHwnd`); the swap chain wgpu then holds is the proxy, so
-  `Present`, `GetBuffer`, `ResizeBuffers` and the rest reach Streamline. The composition targets are
-  not routed.
+  `Present`, `GetBuffer`, `ResizeBuffers` and the rest reach Streamline. Each proxy keeps one
+  reference for the process (`interposer::upgraded`): Streamline destroys a proxy at its last
+  release, and the queue and swap chain made through it still lead back to it. The composition
+  targets are not routed.
 - **Vulkan** (`src/vulkan/mod.rs`, `interposer`; `src/vulkan/instance.rs`): with a loader path set
   by `interposer::set_loader`, `ash::Entry::load_from(sl.interposer.dll)` replaces
   `Entry::load()`, Streamline's documented Vulkan path (1.1): its `vkGet*ProcAddr` answer the

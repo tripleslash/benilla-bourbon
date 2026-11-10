@@ -11,7 +11,8 @@
 //! on DX12 `slUpgradeInterface` for the direct queue and the HWND swap chain; on Vulkan the
 //! interposer is the Vulkan loader.
 //!
-//! **Device** (`finish`): `slSetD3DDevice` on DX12; Reflex's and PC Latency's functions; then
+//! **Device**: on DX12 `slSetD3DDevice` when wgpu-hal opens the adapter, before its first proxy;
+//! then (`finish`) Reflex's and PC Latency's functions; then
 //! `slIsFeatureSupported(DLSS_G)` on this adapter and, where it runs, `slDLSSGGetState`'s
 //! `numFramesToGenerateMax`, the multiplier the card reaches ([`DlssSupport::frame_generation_max`]).
 //!
@@ -728,6 +729,9 @@ pub(super) fn boot(_app: &mut App, runtime: &DlssRuntime, backends: wgpu::Backen
     }
     match render_api {
         eRenderD3D12 => {
+            // The device first, then the proxies (manual-hooking guide 5.1): wgpu-hal calls
+            // `slSetD3DDevice` when the adapter opens, before it upgrades the queue.
+            wgpu::hal::dx12::interposer::set_device_hook(sl.set_d3d_device);
             wgpu::hal::dx12::interposer::set_upgrade_interface(upgrade);
         }
         _ => {
@@ -781,7 +785,8 @@ pub(super) fn finish(app: &mut App) {
                 return;
             };
             let raw = hal.raw_device();
-            if (sl.set_d3d_device)(raw.as_raw()) != 0 {
+            // Handed over when the adapter opened (`boot`'s device hook).
+            if wgpu::hal::dx12::interposer::device_set() != Some(true) {
                 info!("dlss: slSetD3DDevice refused; no Reflex, FSR frame generation stands in");
                 return;
             }

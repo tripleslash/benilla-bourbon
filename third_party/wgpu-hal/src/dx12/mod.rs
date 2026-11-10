@@ -1735,11 +1735,40 @@ pub mod interposer {
     /// `sl::Result slUpgradeInterface(void** baseInterface)`; `0` is `eOk`.
     pub type UpgradeInterface = unsafe extern "C" fn(*mut *mut c_void) -> i32;
 
+    /// `sl::Result slSetD3DDevice(void* d3dDevice)`; `0` is `eOk`.
+    pub type SetDevice = unsafe extern "C" fn(*mut c_void) -> i32;
+
     static UPGRADE: OnceLock<UpgradeInterface> = OnceLock::new();
+    static SET_DEVICE: OnceLock<SetDevice> = OnceLock::new();
+    /// The hook's answer for the device it was handed, once the adapter opened.
+    static DEVICE_SET: OnceLock<bool> = OnceLock::new();
 
     /// Install the interposer, once, before the adapter opens. `false` if one was already set.
     pub fn set_upgrade_interface(upgrade: UpgradeInterface) -> bool {
         UPGRADE.set(upgrade).is_ok()
+    }
+
+    /// Install the device hook, once, before the adapter opens: the native device goes to it
+    /// before the first upgraded interface is made, as the manual-hooking guide's 5.1 asks
+    /// (create the device, `slSetD3DDevice`, then the proxies).
+    pub fn set_device_hook(set: SetDevice) -> bool {
+        SET_DEVICE.set(set).is_ok()
+    }
+
+    /// Whether the device hook accepted the opened device (`None` before it ran or without one).
+    pub fn device_set() -> Option<bool> {
+        DEVICE_SET.get().copied()
+    }
+
+    /// Hand `device` to the device hook, once; a no-op without one.
+    pub(crate) fn announce_device<I: Interface>(device: &I) {
+        let Some(set) = SET_DEVICE.get() else {
+            return;
+        };
+        DEVICE_SET.get_or_init(|| {
+            // SAFETY: a live device; the hook takes no ownership (it AddRefs what it keeps).
+            unsafe { set(device.as_raw()) == 0 }
+        });
     }
 
     /// Whether an interposer is installed.
@@ -1749,6 +1778,12 @@ pub mod interposer {
 
     /// The interposer's proxy for `native`, or `None` without one or on its refusal. The proxy is
     /// handed a reference of its own (a clone's), and the returned interface owns the proxy's.
+    ///
+    /// One more reference to the proxy is kept for the process: wgpu uses the device and factory
+    /// proxies only to make the queue and the swap chain, and Streamline destroys a proxy when its
+    /// last reference goes (`d3d12Device.cpp`'s `Release`), while the queue and the swap chain it
+    /// made still lead back to it. The guide's host keeps its upgraded interfaces for good; with
+    /// the proxy released, the first present after the swap chain's creation crashed the process.
     pub(crate) fn upgraded<I: Interface + Clone>(native: &I) -> Option<I> {
         let upgrade = UPGRADE.get()?;
         let mut raw = native.clone().into_raw();
@@ -1756,6 +1791,9 @@ pub mod interposer {
         // with its proxy (or leaves it) and the result is ours to release.
         let ok = unsafe { upgrade(&mut raw) } == 0;
         let iface = unsafe { I::from_raw(raw) };
+        if ok {
+            core::mem::forget(iface.clone());
+        }
         ok.then_some(iface)
     }
 }
