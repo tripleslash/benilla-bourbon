@@ -1,6 +1,6 @@
 # benilla's `bevy_tasks` fork — what differs from upstream, and how to check
 
-Upstream: `bevy_tasks 0.19.1` (crates.io), MIT OR Apache-2.0 — the version bevy 0.19.1 resolves to.
+Upstream: `bevy_tasks 0.20.1` (crates.io), MIT OR Apache-2.0 — the version bevy 0.20.1 resolves to.
 Wired in through `[patch.crates-io]` in the workspace root. One patch entry covers the whole graph:
 every bevy crate depends on this one, so patching it here patches `bevy_ecs`'s executor,
 `bevy_asset`'s loader spawns and `bevy_app`'s `TaskPoolPlugin` at the same time.
@@ -92,7 +92,7 @@ If a future hunk needs to ask about `std`, ask `crate::cfg::std!`.
 
 **This does not make wasm threads work by itself.** The crate still answers "no threads" unless a
 host installs a spawner, and it deliberately contains no `wasm-bindgen`, no `web-sys` and no
-knowledge of a page — which also keeps it clear of the tree's load-bearing `wasm-bindgen = "=0.2.126"`
+knowledge of a page — which also keeps it clear of the tree's load-bearing `wasm-bindgen = "=0.2.127"`
 pin. The browser half lives in benilla's own crates.
 
 It also does not touch `conditional_send`, `usages.rs`, or `single_threaded_task_pool.rs`. Native
@@ -103,8 +103,8 @@ routes through a `thread_spawner` whose default *is* `std::thread::Builder`.
 
 ```sh
 # The patched crate is never downloaded into cargo's registry, so fetch the pinned upstream.
-mkdir -p /tmp/upstream && curl -sL https://static.crates.io/crates/bevy_tasks/bevy_tasks-0.19.1.crate   | tar xz -C /tmp/upstream
-diff -r third_party/bevy_tasks /tmp/upstream/bevy_tasks-0.19.1
+mkdir -p /tmp/upstream && curl -sL https://static.crates.io/crates/bevy_tasks/bevy_tasks-0.20.1.crate   | tar xz -C /tmp/upstream
+diff -r third_party/bevy_tasks /tmp/upstream/bevy_tasks-0.20.1
 ```
 
 That must print exactly:
