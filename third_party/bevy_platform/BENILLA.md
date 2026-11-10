@@ -1,6 +1,6 @@
 # benilla's `bevy_platform` fork — what differs from upstream, and how to check
 
-Upstream: `bevy_platform 0.19.1` (crates.io), MIT OR Apache-2.0. Wired in through `[patch.crates-io]`
+Upstream: `bevy_platform 0.20.1` (crates.io), MIT OR Apache-2.0. Wired in through `[patch.crates-io]`
 in the workspace root, beside the other threading forks (`third_party/bevy_tasks`, `bevy_ecs`,
 `bevy_render`, `bevy_winit`).
 
@@ -30,8 +30,8 @@ unchanged.
 ## Verifying against upstream
 
 ```sh
-mkdir -p /tmp/upstream && curl -sL https://static.crates.io/crates/bevy_platform/bevy_platform-0.19.1.crate | tar xz -C /tmp/upstream
-diff -r third_party/bevy_platform /tmp/upstream/bevy_platform-0.19.1
+mkdir -p /tmp/upstream && curl -sL https://static.crates.io/crates/bevy_platform/bevy_platform-0.20.1.crate | tar xz -C /tmp/upstream
+diff -r third_party/bevy_platform /tmp/upstream/bevy_platform-0.20.1
 ```
 
 That prints the `cfg` hunks in `src/sync/{mutex,rwlock,mod}.rs`, the `Cargo.toml` dependency, `Only in third_party/bevy_platform: BENILLA.md`, and cargo's packaging
