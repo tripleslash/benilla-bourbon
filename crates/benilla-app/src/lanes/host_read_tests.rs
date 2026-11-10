@@ -292,7 +292,12 @@ fn writers_between(app: &mut App) -> Option<BTreeMap<String, BTreeSet<String>>> 
         return None;
     }
     let one = |suffix: &str| {
-        let mut hits = c.systems.iter().filter(|(_, s)| s.name.ends_with(suffix));
+        // A generic system's name carries its parameters (`…<With<…Transport>>`) after the path.
+        let path = |n: &str| n.split_once('<').map_or(n, |(p, _)| p).to_owned();
+        let mut hits = c
+            .systems
+            .iter()
+            .filter(|(_, s)| path(&s.name).ends_with(suffix));
         match (hits.next(), hits.next()) {
             (Some((k, _)), None) => *k,
             _ => panic!("exactly one system named `…{suffix}` in Update"),
