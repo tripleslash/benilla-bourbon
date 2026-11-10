@@ -228,11 +228,15 @@ impl DlssRuntime {
         if cfg!(windows) {
             Some(self.dir.join("nvngx_dlss.dll")).filter(|p| p.is_file())
         } else {
-            std::fs::read_dir(&self.dir).ok()?.flatten().map(|e| e.path()).find(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("libnvidia-ngx-dlss.so"))
-            })
+            std::fs::read_dir(&self.dir)
+                .ok()?
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("libnvidia-ngx-dlss.so"))
+                })
         }
     }
 }
@@ -405,6 +409,9 @@ mod tests {
                 std::fs::read_to_string(crates.join(file)).map_or(true, |t| !t.contains(MARKER))
             })
             .collect();
-        assert!(missing.is_empty(), "HOOKS.md rows that lost `{MARKER}`: {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "HOOKS.md rows that lost `{MARKER}`: {missing:?}"
+        );
     }
 }

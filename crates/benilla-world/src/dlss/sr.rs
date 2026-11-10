@@ -90,7 +90,11 @@ pub(super) fn init_sdk(app: &mut App) {
             };
             info!(
                 "dlss: DLSS 4.5 super resolution on {backend:?}{}",
-                if fg { ", frame generation through Streamline" } else { "" }
+                if fg {
+                    ", frame generation through Streamline"
+                } else {
+                    ""
+                }
             );
             let support = DlssSupport {
                 super_resolution: true,
@@ -177,7 +181,8 @@ pub(crate) fn prepare_dlss(
                         view_formats: &[],
                     });
                     let exposure_view = exposure.create_view(&TextureViewDescriptor::default());
-                    info!("dlss: {mode:?} at {render} → {display}, HDR {hdr}");
+                    let shown = display;
+                    info!("dlss: {mode:?} at {render} → {shown}, HDR {hdr}");
                     state.dlss = Some(super::DlssViewState::new(ViewDlss {
                         context,
                         render,

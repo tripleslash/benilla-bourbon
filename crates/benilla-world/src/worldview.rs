@@ -111,7 +111,9 @@ pub fn run_with(build: BuildId, extra: impl FnOnce(&mut App)) -> AppExit {
     // keeps Streamline out.
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let state = std::env::current_dir().ok().map(|d| d.join("benilla-config"));
+        let state = std::env::current_dir()
+            .ok()
+            .map(|d| d.join("benilla-config"));
         let backends = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::all());
         let streamline =
             !crate::launch_env::live_var("WOW_STREAMLINE").is_some_and(|v| v.trim() == "0");

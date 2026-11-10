@@ -939,9 +939,10 @@ pub(super) fn fsr_upscale_pass(
                 reset: state.reset_pending || state.frame_index == 0,
             };
             let state = &mut *state;
-            state.dlss.as_mut().is_some_and(|d| {
-                crate::dlss::sr::encode(d, &adapter, &mut render_context, inputs)
-            })
+            state
+                .dlss
+                .as_mut()
+                .is_some_and(|d| crate::dlss::sr::encode(d, &adapter, &mut render_context, inputs))
         };
         #[cfg(target_arch = "wasm32")]
         let ok = {

@@ -33,7 +33,7 @@ use std::ffi::{c_char, c_void, CString};
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 use std::sync::OnceLock;
 
 use bevy::core_pipeline::{Core3d, Core3dSystems};
@@ -41,7 +41,9 @@ use bevy::prelude::*;
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_resource::*;
-use bevy::render::renderer::{render_system, RenderAdapter, RenderContext, RenderDevice, ViewQuery};
+use bevy::render::renderer::{
+    render_system, RenderAdapter, RenderContext, RenderDevice, ViewQuery,
+};
 use bevy::render::sync_world::MainEntity;
 use bevy::render::view::{ExtractedView, ViewDepthTexture, ViewTarget};
 use bevy::render::{Render, RenderApp, RenderSystems};
@@ -72,6 +74,7 @@ const fn guid(data1: u32, data2: u16, data3: u16, data4: [u8; 8]) -> StructType 
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct Base {
     next: *mut Base,
     struct_type: StructType,
@@ -138,7 +141,12 @@ impl ViewportHandle {
     fn zero() -> Self {
         Self {
             base: Base::new(
-                guid(0x171b6435, 0x9b3c, 0x4fc8, [0x99, 0x94, 0xfb, 0xe5, 0x25, 0x69, 0xaa, 0xa4]),
+                guid(
+                    0x171b6435,
+                    0x9b3c,
+                    0x4fc8,
+                    [0x99, 0x94, 0xfb, 0xe5, 0x25, 0x69, 0xaa, 0xa4],
+                ),
                 1,
             ),
             value: 0,
@@ -350,7 +358,12 @@ impl ReflexState {
     fn new() -> Box<Self> {
         let report = ReflexReport {
             base: Base::new(
-                guid(0x0d56_9b37, 0xa1c8, 0x4453, [0xbe, 0x4d, 0x40, 0xf4, 0xde, 0x57, 0x95, 0x2b]),
+                guid(
+                    0x0d56_9b37,
+                    0xa1c8,
+                    0x4453,
+                    [0xbe, 0x4d, 0x40, 0xf4, 0xde, 0x57, 0x95, 0x2b],
+                ),
                 1,
             ),
             frame_id: 0,
@@ -372,7 +385,12 @@ impl ReflexState {
         };
         let report2 = ReflexReport2 {
             base: Base::new(
-                guid(0x68bb_0632, 0x5e1c, 0x402b, [0x89, 0x9d, 0xb4, 0x9f, 0x63, 0x3c, 0x56, 0xc2]),
+                guid(
+                    0x68bb_0632,
+                    0x5e1c,
+                    0x402b,
+                    [0x89, 0x9d, 0xb4, 0x9f, 0x63, 0x3c, 0x56, 0xc2],
+                ),
                 1,
             ),
             camera_constructed_time: 0,
@@ -380,7 +398,12 @@ impl ReflexState {
         };
         Box::new(Self {
             base: Base::new(
-                guid(0xf0bb_5985, 0xdaf9, 0x4728, [0xb2, 0xfd, 0xae, 0x80, 0xa2, 0xbd, 0x79, 0x89]),
+                guid(
+                    0xf0bb_5985,
+                    0xdaf9,
+                    0x4728,
+                    [0xb2, 0xfd, 0xae, 0x80, 0xa2, 0xbd, 0x79, 0x89],
+                ),
                 2,
             ),
             low_latency_available: false,
@@ -412,7 +435,12 @@ impl DlssgState {
     fn new() -> Self {
         Self {
             base: Base::new(
-                guid(0xcc8a_c8e1, 0xa179, 0x44f5, [0x97, 0xfa, 0xe7, 0x41, 0x12, 0xf9, 0xbc, 0x61]),
+                guid(
+                    0xcc8a_c8e1,
+                    0xa179,
+                    0x44f5,
+                    [0x97, 0xfa, 0xe7, 0x41, 0x12, 0xf9, 0xbc, 0x61],
+                ),
                 4,
             ),
             estimated_vram_usage_in_bytes: 0,
@@ -584,9 +612,9 @@ fn signed(path: &Path) -> bool {
         cb_struct: std::mem::size_of::<TrustData>() as u32,
         policy_callback_data: ptr::null_mut(),
         sip_client_data: ptr::null_mut(),
-        ui_choice: 2,        // WTD_UI_NONE
+        ui_choice: 2,         // WTD_UI_NONE
         revocation_checks: 0, // WTD_REVOKE_NONE
-        union_choice: 1,     // WTD_CHOICE_FILE
+        union_choice: 1,      // WTD_CHOICE_FILE
         file: &mut file,
         state_action: 1, // WTD_STATEACTION_VERIFY
         state_data: ptr::null_mut(),
@@ -613,7 +641,10 @@ pub(super) fn boot(_app: &mut App, runtime: &DlssRuntime, backends: wgpu::Backen
         info!("dlss: frame generation needs Direct3D 12 or Vulkan; FSR frame generation stands in");
         return;
     };
-    if let Some(missing) = RUNTIME_FILES.iter().find(|f| !runtime.dir.join(f).is_file()) {
+    if let Some(missing) = RUNTIME_FILES
+        .iter()
+        .find(|f| !runtime.dir.join(f).is_file())
+    {
         info!(
             "dlss: no Streamline runtime ({missing}) in {}; FSR frame generation stands in",
             runtime.dir.display()
@@ -634,7 +665,10 @@ pub(super) fn boot(_app: &mut App, runtime: &DlssRuntime, backends: wgpu::Backen
             match unsafe { library.get::<$ty>(concat!($name, "\0").as_bytes()) } {
                 Ok(f) => *f,
                 Err(_) => {
-                    info!("dlss: sl.interposer.dll lacks {}; FSR frame generation stands in", $name);
+                    info!(
+                        "dlss: sl.interposer.dll lacks {}; FSR frame generation stands in",
+                        $name
+                    );
                     return;
                 }
             }
@@ -662,7 +696,12 @@ pub(super) fn boot(_app: &mut App, runtime: &DlssRuntime, backends: wgpu::Backen
     let engine_version = CString::new(env!("CARGO_PKG_VERSION")).unwrap();
     let prefs = Preferences {
         base: Base::new(
-            guid(0x1ca10965, 0xbf8e, 0x432b, [0x8d, 0xa1, 0x67, 0x16, 0xd8, 0x79, 0xfb, 0x14]),
+            guid(
+                0x1ca10965,
+                0xbf8e,
+                0x432b,
+                [0x8d, 0xa1, 0x67, 0x16, 0xd8, 0x79, 0xfb, 0x14],
+            ),
             1,
         ),
         show_console: false,
@@ -724,7 +763,12 @@ pub(super) fn finish(app: &mut App) {
     let mut luid = [0u8; 8];
     let mut info = AdapterInfo {
         base: Base::new(
-            guid(0x0677315f, 0xa746, 0x4492, [0x9f, 0x42, 0xcb, 0x61, 0x42, 0xc9, 0xc3, 0xd4]),
+            guid(
+                0x0677315f,
+                0xa746,
+                0x4492,
+                [0x9f, 0x42, 0xcb, 0x61, 0x42, 0xc9, 0xc3, 0xd4],
+            ),
             1,
         ),
         device_luid: ptr::null(),
@@ -752,23 +796,32 @@ pub(super) fn finish(app: &mut App) {
         }
     }
     let reflex_supported = unsafe { (sl.is_feature_supported)(kFeatureReflex, &info) } == 0;
-    let (true, Some(reflex_set_options), Some(reflex_sleep), Some(reflex_get_state), Some(pcl_set_marker)) = (
+    let (
+        true,
+        Some(reflex_set_options),
+        Some(reflex_sleep),
+        Some(reflex_get_state),
+        Some(pcl_set_marker),
+    ) = (
         reflex_supported,
         feature_fn::<PfnReflexSetOptions>(sl, kFeatureReflex, "slReflexSetOptions"),
         feature_fn::<PfnReflexSleep>(sl, kFeatureReflex, "slReflexSleep"),
         feature_fn::<PfnReflexGetState>(sl, kFeatureReflex, "slReflexGetState"),
         feature_fn::<PfnPclSetMarker>(sl, kFeaturePCL, "slPCLSetMarker"),
-    ) else {
+    )
+    else {
         info!("dlss: Streamline offers no Reflex here; no Reflex, FSR frame generation stands in");
         return;
     };
     let dlssg_supported = unsafe { (sl.is_feature_supported)(kFeatureDLSS_G, &info) };
-    let dlssg = if dlssg_supported == 0 {
-        feature_fn::<PfnDlssgSetOptions>(sl, kFeatureDLSS_G, "slDLSSGSetOptions")
-            .zip(feature_fn::<PfnDlssgGetState>(sl, kFeatureDLSS_G, "slDLSSGGetState"))
-    } else {
-        None
-    };
+    let dlssg =
+        if dlssg_supported == 0 {
+            feature_fn::<PfnDlssgSetOptions>(sl, kFeatureDLSS_G, "slDLSSGSetOptions").zip(
+                feature_fn::<PfnDlssgGetState>(sl, kFeatureDLSS_G, "slDLSSGGetState"),
+            )
+        } else {
+            None
+        };
     // `numFramesToGenerateMax`: 1 where the card reaches 2x (RTX 40), 3 for 4x (RTX 50).
     let max_generated = dlssg.map_or(0, |(_, get_state)| {
         let mut state = DlssgState::new();
@@ -786,7 +839,11 @@ pub(super) fn finish(app: &mut App) {
     };
     info!(
         "dlss: Streamline up: Reflex {}, DLSS frame generation {}",
-        if low_latency { "available" } else { "not available" },
+        if low_latency {
+            "available"
+        } else {
+            "not available"
+        },
         if dlssg.is_some() {
             format!("up to {}x", max_generated + 1)
         } else {
@@ -807,7 +864,11 @@ pub(super) fn finish(app: &mut App) {
         .unwrap_or_default();
     support.reflex = low_latency;
     support.frame_generation = dlssg.is_some();
-    support.frame_generation_max = if dlssg.is_some() { max_generated + 1 } else { 0 };
+    support.frame_generation_max = if dlssg.is_some() {
+        max_generated + 1
+    } else {
+        0
+    };
     app.insert_resource(support);
 }
 
@@ -865,7 +926,12 @@ fn simulation_start(
     if REFLEX_MODE.swap(mode, Ordering::AcqRel) != mode {
         let options = ReflexOptions {
             base: Base::new(
-                guid(0xf03af81a, 0x6d0b, 0x4902, [0xa6, 0x51, 0xc4, 0x96, 0x5e, 0x21, 0x54, 0x34]),
+                guid(
+                    0xf03af81a,
+                    0x6d0b,
+                    0x4902,
+                    [0xa6, 0x51, 0xc4, 0x96, 0x5e, 0x21, 0x54, 0x34],
+                ),
                 1,
             ),
             mode,
@@ -878,7 +944,11 @@ fn simulation_start(
         info!(
             "dlss: Reflex {}{} ({result})",
             ["off", "on", "on + boost"][mode as usize],
-            if forced { ", forced on by DLSS frame generation" } else { "" }
+            if forced {
+                ", forced on by DLSS frame generation"
+            } else {
+                ""
+            }
         );
     }
     frame.0 = FRAME.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
@@ -1021,12 +1091,20 @@ fn hudless_pass(
     let Some(upscaled) = fsr.output() else {
         return;
     };
-    crate::ffx_glow::compose_world_final(world, entity, upscaled, &hudless.view, &mut render_context);
-    let read = |t: &wgpu::Texture| wgpu::TextureTransition {
-        texture: t,
-        selector: None,
-        state: wgpu::TextureUses::RESOURCE,
-    };
+    crate::ffx_glow::compose_world_final(
+        world,
+        entity,
+        upscaled,
+        &hudless.view,
+        &mut render_context,
+    );
+    fn read(t: &wgpu::Texture) -> wgpu::TextureTransition<&wgpu::Texture> {
+        wgpu::TextureTransition {
+            texture: t,
+            selector: None,
+            state: wgpu::TextureUses::RESOURCE,
+        }
+    }
     let mv = fsr.motion_vectors().texture();
     render_context.command_encoder().transition_resources(
         std::iter::empty(),
@@ -1043,7 +1121,12 @@ fn describe(
 ) -> Resource {
     let mut r = Resource {
         base: Base::new(
-            guid(0x3a9d70cf, 0x2418, 0x4b72, [0x83, 0x91, 0x13, 0xf8, 0x72, 0x1c, 0x72, 0x61]),
+            guid(
+                0x3a9d70cf,
+                0x2418,
+                0x4b72,
+                [0x83, 0x91, 0x13, 0xf8, 0x72, 0x1c, 0x72, 0x61],
+            ),
             1,
         ),
         kind: eResourceTex2d,
@@ -1133,7 +1216,12 @@ fn frame_inputs(
     if DLSSG_FRAMES.swap(generate, Ordering::AcqRel) != generate {
         let options = DlssgOptions {
             base: Base::new(
-                guid(0xfac5f1cb, 0x2dfd, 0x4f36, [0xa1, 0xe6, 0x3a, 0x9e, 0x86, 0x52, 0x56, 0xc5]),
+                guid(
+                    0xfac5f1cb,
+                    0x2dfd,
+                    0x4f36,
+                    [0xa1, 0xe6, 0x3a, 0x9e, 0x86, 0x52, 0x56, 0xc5],
+                ),
                 5,
             ),
             mode: if on { eDLSSGModeOn } else { eDLSSGModeOff },
@@ -1159,7 +1247,10 @@ fn frame_inputs(
         };
         let result = unsafe { dlssg_set_options(&viewport, &options) };
         if on {
-            info!("dlss: DLSS frame generation on, {}x ({result})", generate + 1);
+            info!(
+                "dlss: DLSS frame generation on, {}x ({result})",
+                generate + 1
+            );
         } else {
             info!("dlss: DLSS frame generation off ({result})");
         }
@@ -1183,7 +1274,12 @@ fn frame_inputs(
     let near = proj.w_axis.z;
     let constants = Constants {
         base: Base::new(
-            guid(0xdcd35ad7, 0x4e4a, 0x4bad, [0xa9, 0x0c, 0xe0, 0xc4, 0x9e, 0xb2, 0x3a, 0xfe]),
+            guid(
+                0xdcd35ad7,
+                0x4e4a,
+                0x4bad,
+                [0xa9, 0x0c, 0xe0, 0xc4, 0x9e, 0xb2, 0x3a, 0xfe],
+            ),
             2,
         ),
         camera_view_to_clip: Float4x4::from(proj),
@@ -1211,7 +1307,11 @@ fn frame_inputs(
         depth_inverted: eTrue,
         camera_motion_included: eTrue,
         motion_vectors_3d: eFalse,
-        reset: if fsr.frame_index() == 0 { eTrue } else { eFalse },
+        reset: if fsr.frame_index() == 0 {
+            eTrue
+        } else {
+            eFalse
+        },
         orthographic_projection: eFalse,
         motion_vectors_dilated: eFalse,
         motion_vectors_jittered: eFalse,
@@ -1233,7 +1333,12 @@ fn frame_inputs(
     let mut hudless_res = describe(&hudless.texture, &hudless.view, &adapter, false);
     let tag = |resource: &mut Resource, kind, extent| ResourceTag {
         base: Base::new(
-            guid(0x4c6a5aad, 0xb445, 0x496c, [0x87, 0xff, 0x1a, 0xf3, 0x84, 0x5b, 0xe6, 0x53]),
+            guid(
+                0x4c6a5aad,
+                0xb445,
+                0x496c,
+                [0x87, 0xff, 0x1a, 0xf3, 0x84, 0x5b, 0xe6, 0x53],
+            ),
             1,
         ),
         resource,

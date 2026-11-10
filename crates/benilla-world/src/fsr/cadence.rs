@@ -588,7 +588,8 @@ pub(super) fn run_held_frames(world: &mut World) {
         )
     };
     for i in 1..=held {
-        let due = now + std::time::Duration::from_secs_f32((spacing * i as f32 - held_cost).max(0.0));
+        let due =
+            now + std::time::Duration::from_secs_f32((spacing * i as f32 - held_cost).max(0.0));
         let at = bevy::platform::time::Instant::now();
         if due > at {
             std::thread::sleep(due - at);
@@ -609,7 +610,8 @@ pub(super) fn run_held_frames(world: &mut World) {
 
 /// Set while [`run_held_frames`] renders a held frame: the latency markers around submit and
 /// present (`dlss::streamline`) belong to the world frame, and a held frame marks nothing.
-pub static RENDERING_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static RENDERING_HELD: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// The render-world schedule after `Render` that presents the held frames ([`run_held_frames`]).
 #[derive(ScheduleLabel, Debug, Clone, PartialEq, Eq, Hash)]
@@ -618,7 +620,7 @@ pub struct FgHeldRender;
 /// Native, just before `render_system`: nothing to wait for, the held frames pace themselves in
 /// [`run_held_frames`]. The web presents on rAF, which paces it; this only counts its presents.
 pub(super) fn pace_held_frames(
-    #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))] mut last_present: Local<
+    #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables, unused_mut))] mut last_present: Local<
         Option<bevy::platform::time::Instant>,
     >,
 ) {

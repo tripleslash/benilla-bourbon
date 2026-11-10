@@ -32,10 +32,10 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, T
 use bevy::window::PrimaryWindow;
 
 use crate::ui_pass::PlayerUiCamera;
-use benilla_world::ffx_glow::FfxBackdrop;
 use benilla_world::dlss::{
     DlssFrameGeneration, DlssSupport, DlssgFrames, Reflex, ReflexSetting, Upscaler, UpscalerChoice,
 };
+use benilla_world::ffx_glow::FfxBackdrop;
 use benilla_world::fsr::{FgBlocked, FrameGeneration, FsrView, UpscalerKind};
 use benilla_world::view::WorldCamera;
 
@@ -171,10 +171,7 @@ pub(crate) fn resolve_upscaler(
 
 /// fork: dlss (FORK.md) — frame generation of either kind is wanted, with an upscaler in the
 /// slot (`upscaler = off` runs neither).
-fn frame_generation_wanted(
-    choice: Option<&UpscalerChoice>,
-    fg: Option<&FrameGeneration>,
-) -> bool {
+fn frame_generation_wanted(choice: Option<&UpscalerChoice>, fg: Option<&FrameGeneration>) -> bool {
     fg.is_some_and(|f| f.0) && choice.is_none_or(|c| c.0 != Upscaler::Off)
 }
 
@@ -450,7 +447,11 @@ fn sync_fsr_view(
 /// (`frameGenerationMultiplier`), the slot and what this machine supports, and the reason it is
 /// what it is: DLSS-G reaches [`DlssSupport::frame_generation_max`], FSR's chain one generated
 /// frame (2x), and 1 is no frame generation.
-pub(crate) fn effective_multiplier(asked: u32, slot: Slot, support: DlssSupport) -> (u32, &'static str) {
+pub(crate) fn effective_multiplier(
+    asked: u32,
+    slot: Slot,
+    support: DlssSupport,
+) -> (u32, &'static str) {
     let asked = asked.max(2);
     if slot.dlss_frame_generation {
         let max = support.frame_generation_max.max(2);
@@ -570,7 +571,11 @@ pub(crate) fn on_frame_generation_cvar(
     if ev.is("frameGenerationMultiplier") {
         if let Some(mut m) = multiplier {
             let v = ev.num();
-            m.0 = if v.is_finite() { (v.round() as u32).clamp(2, 4) } else { 2 };
+            m.0 = if v.is_finite() {
+                (v.round() as u32).clamp(2, 4)
+            } else {
+                2
+            };
         }
     }
     if ev.is("nvidiaReflex") {
@@ -852,7 +857,10 @@ mod tests {
         assert!(s.dlss_frame_generation && !s.fsr_frame_generation);
         let s = resolve_upscaler(Upscaler::Dlss, sr, false, true);
         assert_eq!(s.upscaler, Some(UpscalerKind::Dlss));
-        assert!(!s.dlss_frame_generation && s.fsr_frame_generation, "RTX 20/30: FSR FG on DLSS");
+        assert!(
+            !s.dlss_frame_generation && s.fsr_frame_generation,
+            "RTX 20/30: FSR FG on DLSS"
+        );
         let s = resolve_upscaler(Upscaler::Dlss, none, false, true);
         assert_eq!(s.upscaler, Some(UpscalerKind::Fsr), "no NGX: FSR");
         let s = resolve_upscaler(Upscaler::Dlss, all, true, false);
