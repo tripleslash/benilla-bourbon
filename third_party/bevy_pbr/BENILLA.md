@@ -1,6 +1,6 @@
 # benilla's `bevy_pbr` fork — what differs from upstream, and how to check
 
-Upstream: `bevy_pbr 0.19.1` (crates.io), MIT OR Apache-2.0. Wired in through `[patch.crates-io]`
+Upstream: `bevy_pbr 0.20.1` (crates.io), MIT OR Apache-2.0. Wired in through `[patch.crates-io]`
 in the workspace root. Unpacked from the registry's `.crate` (sha256
 `244ae7d618b51a59c913c36b0564a295cd85ea91a5e777b542bb7bdb846a23d6`, the `Cargo.lock` checksum),
 with cargo's packaging metadata (`.cargo_vcs_info.json`, `Cargo.lock`, `Cargo.toml.orig`) dropped
@@ -8,7 +8,7 @@ as the other `third_party` forks drop it.
 
 ## The first delta: occlusion culling never culls a `NoFrustumCulling` mesh
 
-`src/render/mesh_preprocess.wgsl`, the occlusion test of the GPU preprocessing pass
+`src/render/mesh_preprocess.wesl` (WESL since 0.20), the occlusion test of the GPU preprocessing pass
 (`OCCLUSION_CULLING`, both phases).
 
 Upstream skips the *frustum* test for a mesh flagged `MESH_FLAGS_NO_FRUSTUM_CULLING_BIT` and then
@@ -52,7 +52,9 @@ shadow cascades, point faces and spot shadows (the `DirectionalLight` `benilla-a
 `pass_span` named after the shadow view (`shadow_directional_light_{L}_cascade_{C}`,
 `shadow_point_light_{L}_{face}`, `shadow_spot_light_{L}`), with a `_late` twin for the late
 occlusion-culling pass, as `src/ssr/mod.rs` does for its own pass. Only a pass span opens a
-pipeline-statistics query and those cannot nest; nothing above `view_shadow_pass` holds one.
+pipeline-statistics query and those cannot nest; nothing above `view_shadow_pass` holds one. 0.20
+wraps all the shadow views in one encoder `time_span` (`per_view_shadow_pass`), timestamps only, so
+the per-view pass spans still nest under nothing that queries statistics.
 
 ## The fourth delta: one extra bind group after the material's
 
@@ -84,11 +86,11 @@ requests wherever the adapter has it.
 ## Verifying against upstream
 
 ```sh
-mkdir -p /tmp/upstream && curl -sL https://static.crates.io/crates/bevy_pbr/bevy_pbr-0.19.1.crate | tar xz -C /tmp/upstream
-diff -r third_party/bevy_pbr /tmp/upstream/bevy_pbr-0.19.1
+mkdir -p /tmp/upstream && curl -sL https://static.crates.io/crates/bevy_pbr/bevy_pbr-0.20.1.crate | tar xz -C /tmp/upstream
+diff -r third_party/bevy_pbr /tmp/upstream/bevy_pbr-0.20.1
 ```
 
-That must print exactly a `diff` for `src/render/mesh_preprocess.wgsl` (the `occlusion_exempt`
+That must print exactly a `diff` for `src/render/mesh_preprocess.wesl` (the `occlusion_exempt`
 binding and the condition it joins, five lines in, one changed), one for `src/prepass/mod.rs`
 (two parameters, the view's colour cache lookup and the readiness check), one for
 `src/render/light.rs` (the `RecordDiagnostics` import and the span around the shadow phase), one

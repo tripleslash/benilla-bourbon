@@ -1,6 +1,6 @@
 use crate::{
-    AreaLightLuts, DfgLut, ViewFogUniformOffset, ViewLightProbesUniformOffset,
-    ViewLightsUniformOffset, ViewScreenSpaceReflectionsUniformOffset,
+    AreaLightLuts, DfgLut, ScreenSpaceTransmission, ViewFogUniformOffset,
+    ViewLightProbesUniformOffset, ViewLightsUniformOffset, ViewScreenSpaceReflectionsUniformOffset,
 };
 use arrayvec::ArrayVec;
 use bevy_core_pipeline::{
@@ -18,7 +18,7 @@ use bevy_ecs::{
     entity::Entity,
     query::Has,
     resource::Resource,
-    system::{Commands, Local, Query, Res},
+    system::{Commands, Query, Res},
 };
 use bevy_light::{EnvironmentMapLight, IrradianceVolume};
 use bevy_math::Vec4;
@@ -99,6 +99,7 @@ bitflags::bitflags! {
         const CONTACT_SHADOWS                  = 1 << 13;
         const DISTANCE_FOG                     = 1 << 14;
         const AREA_LIGHT_LUTS                  = 1 << 15;
+        const VIEW_TRANSMISSION_TEXTURE        = 1 << 16;
     }
 }
 
@@ -178,6 +179,9 @@ impl From<MeshPipelineKey> for MeshPipelineViewLayoutKey {
         }
         if value.contains(MeshPipelineKey::DISTANCE_FOG) {
             result |= MeshPipelineViewLayoutKey::DISTANCE_FOG;
+        }
+        if value.contains(MeshPipelineKey::VIEW_TRANSMISSION_TEXTURE) {
+            result |= MeshPipelineViewLayoutKey::VIEW_TRANSMISSION_TEXTURE;
         }
 
         result
@@ -414,13 +418,15 @@ fn layout_entries(
     }
 
     // View Transmission Texture
-    entries = entries.extend_with_indices((
-        (
-            24,
-            texture_2d(TextureSampleType::Float { filterable: true }),
-        ),
-        (25, sampler(SamplerBindingType::Filtering)),
-    ));
+    if layout_key.contains(MeshPipelineViewLayoutKey::VIEW_TRANSMISSION_TEXTURE) {
+        entries = entries.extend_with_indices((
+            (
+                24,
+                texture_2d(TextureSampleType::Float { filterable: true }),
+            ),
+            (25, sampler(SamplerBindingType::Filtering)),
+        ));
+    }
 
     // OIT
     if layout_key.contains(MeshPipelineViewLayoutKey::OIT_ENABLED) {
@@ -666,6 +672,7 @@ pub fn prepare_mesh_view_bind_groups(
         Option<&ViewPrepassTextures>,
         Option<&ViewTransmissionTexture>,
         Option<&AtmosphereTextures>,
+        Option<&AtmosphereBuffer>,
         &Tonemapping,
         (
             Option<&RenderViewLightProbes<EnvironmentMapLight>>,
@@ -680,6 +687,7 @@ pub fn prepare_mesh_view_bind_groups(
             Option<&ViewScreenSpaceReflectionsUniformOffset>,
             Option<&ViewContactShadowsUniformOffset>,
             Option<&OrderIndependentTransparencySettingsOffset>,
+            Has<ScreenSpaceTransmission>,
         ),
     )>,
     (images, fallback_image, fallback_image_zero): (
@@ -696,29 +704,19 @@ pub fn prepare_mesh_view_bind_groups(
         Res<ContactShadowsBuffer>,
         Res<OitBuffers>,
     ),
-    (
-        decals_buffer,
-        render_decals,
-        atmosphere_buffer,
-        atmosphere_sampler,
-        blue_noise,
-        area_light_luts,
-        dfg_lut,
-    ): (
+    (decals_buffer, render_decals, atmosphere_sampler, blue_noise, area_light_luts, dfg_lut): (
         Res<DecalsBuffer>,
         Res<RenderClusteredDecals>,
-        Option<Res<AtmosphereBuffer>>,
         Option<Res<AtmosphereSampler>>,
         Res<Bluenoise>,
         Res<AreaLightLuts>,
         Res<DfgLut>,
     ),
     // TODO: Figure out how to reuse the memory. `BindGroupEntry` is non-send on wasm with atomics.
-    #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))] mut entries_cache: Local<
-        Vec<BindGroupEntry>,
-    >,
     #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
-    mut entries_binding_array_cache: Local<Vec<BindGroupEntry>>,
+    mut entries_cache: bevy_ecs::system::Local<Vec<BindGroupEntry>>,
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
+    mut entries_binding_array_cache: bevy_ecs::system::Local<Vec<BindGroupEntry>>,
 ) {
     if let (
         Some(view_binding),
@@ -747,6 +745,7 @@ pub fn prepare_mesh_view_bind_groups(
             prepass_textures,
             transmission_texture,
             atmosphere_textures,
+            atmosphere_buffer,
             tonemapping,
             (render_view_environment_maps, render_view_irradiance_volumes),
             has_atmosphere,
@@ -758,6 +757,7 @@ pub fn prepare_mesh_view_bind_groups(
                 view_ssr_offset,
                 view_contact_shadows_offset,
                 view_oit_settings_offset,
+                has_transmission,
             ),
         ) in &views
         {
@@ -777,7 +777,8 @@ pub fn prepare_mesh_view_bind_groups(
                     .collect();
             }
 
-            let tonemap_in_shader = camera.is_none_or(|camera| !camera.hdr);
+            let tonemap_in_shader =
+                camera.is_none_or(|camera| !camera.hdr) && tonemapping.is_enabled();
             let mut layout_key = MeshPipelineViewLayoutKey::from(*msaa)
                 | MeshPipelineViewLayoutKey::from(prepass_textures);
             let mut offsets = ArrayVec::from_iter([
@@ -844,7 +845,7 @@ pub fn prepare_mesh_view_bind_groups(
 
             if has_atmosphere
                 && let Some(atmosphere_textures) = atmosphere_textures
-                && let Some(atmosphere_buffer) = atmosphere_buffer.as_ref()
+                && let Some(atmosphere_buffer) = atmosphere_buffer
                 && let Some(atmosphere_sampler) = atmosphere_sampler.as_ref()
                 && let Some(atmosphere_buffer_binding) = atmosphere_buffer.buffer.binding()
             {
@@ -883,16 +884,17 @@ pub fn prepare_mesh_view_bind_groups(
                 entries = entries.extend_with_indices(((17, ssao_view),));
             }
 
-            let transmission_view = transmission_texture
-                .map(|transmission| &transmission.view)
-                .unwrap_or(&fallback_image_zero.texture_view);
-
-            let transmission_sampler = transmission_texture
-                .map(|transmission| &transmission.sampler)
-                .unwrap_or(&fallback_image_zero.sampler);
-
-            entries =
-                entries.extend_with_indices(((24, transmission_view), (25, transmission_sampler)));
+            if has_transmission {
+                layout_key |= MeshPipelineViewLayoutKey::VIEW_TRANSMISSION_TEXTURE;
+                let transmission_view = transmission_texture
+                    .map(|transmission| &transmission.view)
+                    .unwrap_or(&fallback_image_zero.texture_view);
+                let transmission_sampler = transmission_texture
+                    .map(|transmission| &transmission.sampler)
+                    .unwrap_or(&fallback_image_zero.sampler);
+                entries = entries
+                    .extend_with_indices(((24, transmission_view), (25, transmission_sampler)));
+            }
 
             // When using WebGL, we can't have a multisampled texture with `TEXTURE_BINDING`
             // See https://github.com/gfx-rs/wgpu/issues/5263

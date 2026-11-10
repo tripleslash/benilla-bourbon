@@ -23,7 +23,7 @@ use bevy_render::{
     render_resource::{binding_types::*, *},
     renderer::{RenderDevice, RenderQueue},
     texture::{CachedTexture, TextureCache},
-    view::{ExtractedView, Msaa, ViewDepthTexture, ViewUniform, ViewUniforms},
+    view::{ExtractedView, Msaa, ViewDepthStencilTexture, ViewUniform, ViewUniforms},
 };
 use bevy_shader::Shader;
 use bevy_utils::default;
@@ -223,7 +223,7 @@ impl FromWorld for RenderSkyBindGroupLayouts {
             render_sky,
             render_sky_msaa,
             fullscreen_shader: world.resource::<FullscreenShader>().clone(),
-            fragment_shader: load_embedded_asset!(world, "render_sky.wgsl"),
+            fragment_shader: load_embedded_asset!(world, "render_sky.wesl"),
         }
     }
 }
@@ -262,7 +262,7 @@ impl FromWorld for AtmosphereLutPipelines {
         let transmittance_lut = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("transmittance_lut_pipeline".into()),
             layout: vec![layouts.transmittance_lut.clone()],
-            shader: load_embedded_asset!(world, "transmittance_lut.wgsl"),
+            shader: load_embedded_asset!(world, "transmittance_lut.wesl"),
             ..default()
         });
 
@@ -270,21 +270,21 @@ impl FromWorld for AtmosphereLutPipelines {
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some("multi_scattering_lut_pipeline".into()),
                 layout: vec![layouts.multiscattering_lut.clone()],
-                shader: load_embedded_asset!(world, "multiscattering_lut.wgsl"),
+                shader: load_embedded_asset!(world, "multiscattering_lut.wesl"),
                 ..default()
             });
 
         let sky_view_lut = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("sky_view_lut_pipeline".into()),
             layout: vec![layouts.sky_view_lut.clone()],
-            shader: load_embedded_asset!(world, "sky_view_lut.wgsl"),
+            shader: load_embedded_asset!(world, "sky_view_lut.wesl"),
             ..default()
         });
 
         let aerial_view_lut = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("aerial_view_lut_pipeline".into()),
             layout: vec![layouts.aerial_view_lut.clone()],
-            shader: load_embedded_asset!(world, "aerial_view_lut.wgsl"),
+            shader: load_embedded_asset!(world, "aerial_view_lut.wesl"),
             ..default()
         });
 
@@ -624,7 +624,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
             Entity,
             &ExtractedAtmosphere,
             &AtmosphereTextures,
-            &ViewDepthTexture,
+            &ViewDepthStencilTexture,
             &Msaa,
         ),
         (With<Camera3d>, With<ExtractedAtmosphere>),
@@ -671,6 +671,13 @@ pub(super) fn prepare_atmosphere_bind_groups(
         .ok_or(AtmosphereBindGroupError::LightUniforms)?;
 
     for (entity, atmosphere, textures, view_depth_texture, msaa) in &views {
+        let Some(depth_view) = view_depth_texture
+            .attachment
+            .depth_stencil_views()
+            .depth_only_view()
+        else {
+            continue;
+        };
         let gpu_medium = gpu_media
             .get(atmosphere.medium)
             .ok_or(ScatteringMediumMissingError(atmosphere.medium))?;
@@ -780,7 +787,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 (11, &textures.aerial_view_lut.default_view),
                 (12, &**atmosphere_sampler),
                 // view depth texture
-                (13, view_depth_texture.view()),
+                (13, depth_view),
             )),
         );
 
@@ -796,32 +803,44 @@ pub(super) fn prepare_atmosphere_bind_groups(
     Ok(())
 }
 
-pub fn init_atmosphere_buffer(mut commands: Commands) {
-    commands.insert_resource(AtmosphereBuffer {
-        buffer: StorageBuffer::from(GpuAtmosphere {
-            ground_albedo: Vec3::ZERO,
-            inner_radius: 0.0,
-            outer_radius: 0.0,
-            world_to_atmosphere: Mat4::IDENTITY,
-        }),
-    });
+#[derive(ShaderType)]
+#[repr(C)]
+pub(crate) struct AtmosphereData {
+    pub atmosphere: GpuAtmosphere,
+    pub settings: GpuAtmosphereSettings,
 }
 
-#[derive(Resource)]
+#[derive(Component)]
 pub struct AtmosphereBuffer {
-    pub(crate) buffer: StorageBuffer<GpuAtmosphere>,
+    pub(crate) buffer: StorageBuffer<AtmosphereData>,
 }
 
-pub(crate) fn write_atmosphere_buffer(
+pub(crate) fn prepare_atmosphere_buffers(
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
-    atmosphere_entity: Query<&GpuAtmosphere, With<Camera3d>>,
-    mut atmosphere_buffer: ResMut<AtmosphereBuffer>,
+    mut views: Query<
+        (
+            Entity,
+            &GpuAtmosphere,
+            &GpuAtmosphereSettings,
+            Option<&mut AtmosphereBuffer>,
+        ),
+        With<ExtractedAtmosphere>,
+    >,
+    mut commands: Commands,
 ) {
-    let Ok(atmosphere) = atmosphere_entity.single() else {
-        return;
-    };
-
-    atmosphere_buffer.buffer.set(atmosphere.clone());
-    atmosphere_buffer.buffer.write_buffer(&device, &queue);
+    for (entity, atmosphere, settings, existing_buffer) in &mut views {
+        let data = AtmosphereData {
+            atmosphere: atmosphere.clone(),
+            settings: settings.clone(),
+        };
+        if let Some(mut atmosphere_buffer) = existing_buffer {
+            atmosphere_buffer.buffer.set(data);
+            atmosphere_buffer.buffer.write_buffer(&device, &queue);
+        } else {
+            let mut buffer = StorageBuffer::from(data);
+            buffer.write_buffer(&device, &queue);
+            commands.entity(entity).insert(AtmosphereBuffer { buffer });
+        }
+    }
 }
