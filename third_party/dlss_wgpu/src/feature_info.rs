@@ -85,10 +85,8 @@ fn get_shared_library_paths() -> Vec<Vec<wchar_t>> {
         })
         .unwrap_or_default();
 
-    #[cfg(not(target_os = "windows"))]
-    let platform = "Linux_x86_64";
-    #[cfg(target_os = "windows")]
-    let platform = "Windows_x86_64";
+    // Set by build.rs
+    let platform = env!("DLSS_SDK_PLATFORM");
 
     #[cfg(feature = "debug_overlay")]
     let profile = "dev";

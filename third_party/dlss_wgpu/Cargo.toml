@@ -1,18 +1,18 @@
 [package]
 name = "dlss_wgpu"
-version = "4.0.0"
+version = "6.0.0"
 edition = "2024"
 categories = ["graphics", "rendering"]
 description = "Adds support for using DLSS with wgpu"
 repository = "https://github.com/bevyengine/dlss_wgpu"
 documentation = "https://docs.rs/dlss_wgpu"
 license = "MIT OR Apache-2.0"
-# BENILLA: vendored from bevyengine/dlss_wgpu v4.0.0 (323ba14), the release on wgpu 29; see
+# BENILLA: vendored from dlss_wgpu 6.0.0 (crates.io), the release on wgpu 30; see
 # BENILLA.md for every delta.
 publish = false
 
 [dependencies]
-wgpu = { version = "29", default-features = false, features = ["vulkan"] }
+wgpu = { version = "30", default-features = false, features = ["vulkan"] }
 ash = "0.38"
 uuid = "1"
 bitflags = "2"
@@ -20,11 +20,11 @@ thiserror = "2"
 
 # BENILLA: the D3D12 path reaches wgpu-hal's DX12 device, command list and resources.
 [target.'cfg(windows)'.dependencies]
-wgpu = { version = "29", default-features = false, features = ["dx12"] }
+wgpu = { version = "30", default-features = false, features = ["dx12"] }
 windows-core = { version = "0.62", default-features = false }
 
 [build-dependencies]
-bindgen = "0.72"
+bindgen = "0.73"
 cc = "1"
 
 [features]

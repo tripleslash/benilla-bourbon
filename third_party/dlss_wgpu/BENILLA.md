@@ -1,7 +1,7 @@
 # benilla's `dlss_wgpu` fork: what differs from upstream, and how to check
 
-Upstream: [`bevyengine/dlss_wgpu`](https://github.com/bevyengine/dlss_wgpu) v4.0.0 (commit
-`323ba14`, the release on wgpu 29, DLSS SDK 310.5.3), MIT OR Apache-2.0 (`LICENSE-MIT`,
+Upstream: [`bevyengine/dlss_wgpu`](https://github.com/bevyengine/dlss_wgpu) 6.0.0 (crates.io, the
+release on wgpu 30, DLSS SDK 310.9.1), MIT OR Apache-2.0 (`LICENSE-MIT`,
 `LICENSE-APACHE`). Used directly by `benilla-world/src/dlss/` (not through Bevy's `DlssPlugin`,
 which owns the camera, jitter and prepasses that benilla's FSR slot already owns). Every hunk is
 marked `BENILLA:`.
@@ -46,9 +46,11 @@ linked: the host loads them from the folder it names (`set_runtime_paths`).
 7. **The runtime and data folders** (`src/feature_info.rs`, `set_runtime_paths`) searched before
    `$DLSS_SDK`'s library folder; NGX's data (its logs) in the host's folder instead of the system
    temp directory.
-8. **Upstream fixes after 4.0.0, backported**: `f7c75dc` (the enum-prefixed result names; the bare
-   ones were bindings that matched every result) and `943e15d`'s shape (the Vulkan evaluate's
-   resources held in named bindings until the call returns).
+8. *(Dropped in 6.0.0.)* The backports of `f7c75dc` (enum-prefixed result names) and `943e15d`
+   (the Vulkan evaluate's resources held in named bindings) are upstream since 5.0/6.0. 6.0.0's
+   Ray Reconstruction parameters (transparency overlay, colour before transparency, depth of
+   field guide, responsivity mask, alpha and output alpha; no `bias`; `AutoExposure` refused) and
+   its per-architecture SDK platform (`DLSS_SDK_PLATFORM`) are taken as they are.
 9. **Ray Reconstruction** stays Vulkan-only, as upstream, and answers `NotImplemented` on D3D12; it
    is the hook `benilla-world/src/dlss/HOOKS.md` describes. `DlssSdk::ray_reconstruction_available`
    reads NGX's `SuperSamplingDenoising.Available`. The OTA update check runs only once NGX reports
@@ -72,8 +74,9 @@ linked: the host loads them from the folder it names (`set_runtime_paths`).
 - Without libclang: `cargo check -p dlss_wgpu` prints the mock warning and builds.
 - With LLVM installed (or `LIBCLANG_PATH` set): `cargo check -p dlss_wgpu` builds the bindings from
   the vendored SDK, no warning. `DLSS_SDK` / `VULKAN_SDK` point it elsewhere.
-- Diff against upstream: `git -C <dlss_wgpu clone> show 323ba14:src/super_resolution.rs` beside
-  `src/super_resolution.rs`; every difference carries `BENILLA:`.
+- Diff against upstream: `curl -sL https://static.crates.io/crates/dlss_wgpu/dlss_wgpu-6.0.0.crate | tar xz`
+  (CRLF: `diff --strip-trailing-cr -r`); every difference carries `BENILLA:`. The manifest is the
+  source `Cargo.toml.orig`, `publish = false`.
 
 ## When to drop it
 
