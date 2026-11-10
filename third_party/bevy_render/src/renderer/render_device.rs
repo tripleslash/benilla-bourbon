@@ -1,19 +1,24 @@
 use super::RenderQueue;
 use crate::render_resource::{
-    BindGroup, BindGroupLayout, Buffer, ComputePipeline, RawRenderPipelineDescriptor,
-    RenderPipeline, Sampler, Texture,
+    BindGroup, BindGroupLayout, Buffer, ComputePipeline, RawMeshPipelineDescriptor,
+    RawRenderPipelineDescriptor, RenderPipeline, Sampler, Texture,
 };
-use crate::renderer::WgpuWrapper;
+use crate::renderer::wgpu_wrapper;
 use bevy_ecs::resource::Resource;
 use wgpu::{
     util::DeviceExt, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BufferAsyncError, BufferBindingType, PollError, PollStatus,
 };
 
+wgpu_wrapper! {
+    #[derive(Clone)]
+    struct WgpuDevice(wgpu::Device);
+}
+
 /// This GPU device is responsible for the creation of most rendering and compute resources.
 #[derive(Resource, Clone)]
 pub struct RenderDevice {
-    device: WgpuWrapper<wgpu::Device>,
+    device: WgpuDevice,
     // **benilla fork (BENILLA.md, "The render worker").** Read once where the device is made, so
     // `features()`/`limits()` answer on the page too, where the device itself may not be touched.
     #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
@@ -24,18 +29,18 @@ pub struct RenderDevice {
 
 impl From<wgpu::Device> for RenderDevice {
     fn from(device: wgpu::Device) -> Self {
-        Self::new(WgpuWrapper::new(device))
+        Self::new(device)
     }
 }
 
 impl RenderDevice {
-    pub fn new(device: WgpuWrapper<wgpu::Device>) -> Self {
+    pub fn new(device: wgpu::Device) -> Self {
         Self {
             #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
             features: device.features(),
             #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
             limits: device.limits(),
-            device,
+            device: WgpuDevice::new(device),
         }
     }
 
@@ -218,6 +223,13 @@ impl RenderDevice {
         ComputePipeline::from(wgpu_compute_pipeline)
     }
 
+    /// Creates a [`RenderPipeline`] from a [`RawMeshPipelineDescriptor`].
+    #[inline]
+    pub fn create_mesh_pipeline(&self, desc: &RawMeshPipelineDescriptor) -> RenderPipeline {
+        let wgpu_mesh_pipeline = self.device.create_mesh_pipeline(desc);
+        RenderPipeline::from(wgpu_mesh_pipeline)
+    }
+
     /// Creates a [`Buffer`].
     pub fn create_buffer(&self, desc: &wgpu::BufferDescriptor) -> Buffer {
         // benilla fork (BENILLA.md, "The render worker"): on the page, a buffer made on first use.
@@ -259,9 +271,9 @@ impl RenderDevice {
         order: wgpu::util::TextureDataOrder,
         data: &[u8],
     ) -> Texture {
-        let wgpu_texture =
-            self.device
-                .create_texture_with_data(render_queue.as_ref(), desc, order, data);
+        let wgpu_texture = self
+            .device
+            .create_texture_with_data(render_queue, desc, order, data);
         Texture::from(wgpu_texture)
     }
 

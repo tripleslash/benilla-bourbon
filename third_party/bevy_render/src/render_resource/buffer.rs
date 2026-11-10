@@ -1,14 +1,19 @@
-use crate::renderer::WgpuWrapper;
+use crate::renderer::wgpu_wrapper;
 use bevy_utils::define_atomic_id;
 use core::ops::{Deref, RangeBounds};
 
 define_atomic_id!(BufferId);
 
+wgpu_wrapper! {
+    #[derive(Clone, Debug)]
+    struct WgpuBuffer(wgpu::Buffer);
+}
+
 #[derive(Clone, Debug)]
 pub struct Buffer {
     id: BufferId,
     #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
-    value: WgpuWrapper<wgpu::Buffer>,
+    value: WgpuBuffer,
     // **benilla fork (BENILLA.md, "The render worker").** Shared, so a clone is an `Arc` clone that
     // never touches wgpu (cloning a `SendWrapper` dereferences it, which panics on the page when the
     // device lives on the render worker), and lazy, so the page can create one. The cell derefs to
@@ -41,9 +46,9 @@ impl From<wgpu::Buffer> for Buffer {
         Buffer {
             id: BufferId::new(),
             #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
-            value: WgpuWrapper::new(value),
+            value: WgpuBuffer::new(value),
             #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-            value: alloc::sync::Arc::new(lazy::BufferCell::ready(WgpuWrapper::new(value))),
+            value: alloc::sync::Arc::new(lazy::BufferCell::ready(WgpuBuffer::new(value))),
         }
     }
 }
@@ -76,13 +81,13 @@ impl Buffer {
 
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 mod lazy {
-    use crate::renderer::WgpuWrapper;
+    use super::WgpuBuffer;
     use alloc::{string::String, vec::Vec};
     use std::sync::OnceLock;
 
     /// A `wgpu::Buffer`, made now or on first use on the render worker.
     pub struct BufferCell {
-        value: OnceLock<WgpuWrapper<wgpu::Buffer>>,
+        value: OnceLock<WgpuBuffer>,
         pending: Option<Pending>,
     }
 
@@ -102,7 +107,7 @@ mod lazy {
     }
 
     impl BufferCell {
-        pub fn ready(value: WgpuWrapper<wgpu::Buffer>) -> Self {
+        pub fn ready(value: WgpuBuffer) -> Self {
             Self {
                 value: OnceLock::from(value),
                 pending: None,
@@ -138,7 +143,7 @@ mod lazy {
                     .pending
                     .as_ref()
                     .expect("a buffer cell is either created or pending");
-                WgpuWrapper::new(crate::render_worker::create_buffer(
+                WgpuBuffer::new(crate::render_worker::create_buffer(
                     &wgpu::BufferDescriptor {
                         label: pending.label.as_deref(),
                         size: pending.size,

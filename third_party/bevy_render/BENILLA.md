@@ -1,6 +1,6 @@
 # benilla's `bevy_render` fork — what differs from upstream, and how to check
 
-Upstream: `bevy_render 0.19.1` (crates.io), MIT OR Apache-2.0. Wired in through `[patch.crates-io]`
+Upstream: `bevy_render 0.20.1` (crates.io), MIT OR Apache-2.0. Wired in through `[patch.crates-io]`
 in the workspace root. The fourth and last of the threading forks, after `third_party/bevy_tasks`,
 `third_party/bevy_ecs` and `third_party/async-executor`.
 
@@ -46,6 +46,30 @@ a `Write` camera targets (a Quest 3 fence-leak fix). At the glue screens the pla
 the window's only camera, so after the initial present the window had no texture and the browser
 client stayed black at 140 fps (found live, `?diag=1`). The hunk drops the `Write` condition: any
 camera targeting the window counts.
+
+## The port to 0.20.1
+
+Re-ported from 0.19.1 by a three-way merge (0.19.1 → the fork, onto 0.20.1), every conflict by hand:
+
+- **Dropped, upstream solves it:** the sixteenth delta (mesh-shader pipelines): 0.20's
+  `PipelineCache::queue_mesh_pipeline` takes a `MeshPipelineDescriptor` (`bevy_material`) and builds
+  it with `create_mesh_pipeline`; the twelfth delta's disk cache now rides on its
+  `start_create_mesh_pipeline`. The eleventh delta (the exit frame) is out pending
+  `benilla-app`'s `shutdown` tests: 0.20's `RenderAppChannels` pumps a `MainThreadExecutor` while it
+  waits (upstream's shutdown-deadlock fix), which may end the same hang; the hunk comes back if
+  those tests hang without it.
+- **Reworked:** the eighth delta (the render worker): 0.20 has no generic `WgpuWrapper<T>`; each
+  wrapped type is a `wgpu_wrapper!` newtype. The `Held` scheme (`Local`/`Shared`, burial on drop off
+  thread) lives in the macro's `wasm32 + atomics` arm, `@shared` marks plain data
+  (`RenderAdapterInfo`); the native arm is upstream's, unchanged. `RenderQueue` and its siblings hide
+  their field, so the page-write shadow calls `Queue::write_buffer` through `Deref`, and
+  `RenderDevice::new` takes a `wgpu::Device`. The third delta and the window half of the second
+  apply to 0.20's per-entity `ExtractedWindow` (`extract_windows`, `prepare_windows`,
+  `create_surfaces`). The fourteenth delta's queue is a `wgpu_wrapper!` type
+  (`WgpuAsyncComputeQueue`) and submits through `PendingCommandBuffers::finish`.
+- **Checked and kept:** 0.20 finishes pending encoders in parallel (`render_context.rs`,
+  `finish_parallel`) but already serially on wasm (`finish_sequential`), so it hands no wgpu handle
+  to a worker there.
 
 ## The third delta: per-task canvas texture (web)
 
@@ -208,7 +232,7 @@ exclusion rests on an unmeasured recollection (bevyengine/bevy#10812); bevyengin
 proposes the same deletion. It shows on a login as `pipeline warm: N rigs drained` where it used to
 print `TIMED OUT`.
 
-## The eleventh delta: the exit frame is not rendered
+## The eleventh delta: the exit frame is not rendered — out in 0.20, pending the `shutdown` tests
 
 `src/pipelined_rendering.rs`: `renderer_extract` takes the finished render app back as ever, and on
 a frame with an `AppExit` keeps it in `RenderAppChannels` instead of handing it over, so the exit
@@ -297,8 +321,7 @@ wait. On wasm32 no queue is ever made, so nothing of it runs.
 | `src/batching/gpu_preprocessing.rs` | two `ComputeTaskPool::get().scope(` (0.19.1 lines ~2355 and ~2657) become `crate::wasm_serial::compute_scope(`, and the now-unused `use bevy_tasks::ComputeTaskPool;` goes |
 | `src/render_asset.rs` | `RenderAsset::DEFERRABLE`, asked by `prepare_assets` before each of its two deferrals (above) |
 | `src/mesh/mod.rs` | `RenderMesh` sets `DEFERRABLE = false` (above) |
-| `src/render_resource/pipeline_cache.rs` | the web's async pipeline creation (fifth delta); `create_pipeline_task` drops its two macOS lines (tenth delta); the `disk_cache` field, passed as each pipeline's `cache` (twelfth delta); `mesh_tasks`, `queue_mesh_pipeline`, `start_create_mesh_pipeline` and the branch into it (sixteenth delta); `multiview_masks`, `queue_multiview_render_pipeline` and the mask passed in `start_create_render_pipeline` (seventeenth delta) |
-| `src/pipelined_rendering.rs` | `renderer_extract` holds the render app back on the exit frame (eleventh delta) |
+| `src/render_resource/pipeline_cache.rs` | the web's async pipeline creation (fifth delta); `create_pipeline_task` drops its two macOS lines (tenth delta); the `disk_cache` field, passed as each render, compute and mesh pipeline's `cache` (twelfth delta); `multiview_masks`, `queue_multiview_render_pipeline` and the mask passed in `start_create_render_pipeline` (seventeenth delta) |
 | `src/render_phase/mod.rs` | `render_batchable_meshes` no longer excludes DX12 from multi-draw-indirect-count (thirteenth delta) |
 | `src/lib.rs` | `mod wasm_serial;`; the render worker's lines (eighth delta); `destroy_released_gpu_resources` and its counter (ninth delta) |
 | `src/wasm_serial.rs` | new — the scope itself. Has its own header |
@@ -325,9 +348,10 @@ otherwise both are the plain `Instance::new` / `request_device`. The raw device 
 descriptor's `required_limits` rather than `adapter.limits()` (upstream dlss_wgpu 4.0.0 made the same
 fix in its own `request_device`).
 
-## The sixteenth delta: mesh-shader pipelines in the pipeline cache (native)
+## The sixteenth delta: mesh-shader pipelines in the pipeline cache (native) — dropped in 0.20
 
-`src/render_resource/pipeline_cache.rs`: bevy 0.19.1's `PipelineCache` builds render and compute
+Upstream's `queue_mesh_pipeline` replaces it (above, "The port to 0.20.1"); what follows is how
+0.19.1's was built. `src/render_resource/pipeline_cache.rs`: bevy 0.19.1's `PipelineCache` builds render and compute
 pipelines only, and `PipelineDescriptor` (in `bevy_material`) has no third kind. benilla's
 static_gx mesh-shader lane (`crates/benilla-world/src/static_gx/render/meshlets.rs`) needs its
 pipelines composed by the same shader cache (its module imports the lighting libraries), so
@@ -381,8 +405,8 @@ on the render thread. `PipelineCache`'s async pipeline tasks are gated off wasm 
 
 ```sh
 # The patched crate is never downloaded into cargo's registry, so fetch the pinned upstream.
-mkdir -p /tmp/upstream && curl -sL https://static.crates.io/crates/bevy_render/bevy_render-0.19.1.crate   | tar xz -C /tmp/upstream
-diff -r third_party/bevy_render /tmp/upstream/bevy_render-0.19.1
+mkdir -p /tmp/upstream && curl -sL https://static.crates.io/crates/bevy_render/bevy_render-0.20.1.crate   | tar xz -C /tmp/upstream
+diff -r third_party/bevy_render /tmp/upstream/bevy_render-0.20.1
 ```
 
 That must print exactly a `diff` for `src/batching/gpu_preprocessing.rs` (three lines),

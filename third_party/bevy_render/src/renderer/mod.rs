@@ -14,15 +14,15 @@ pub use async_compute::{
     RenderAsyncComputeQueue,
 };
 pub use render_device::*;
-pub use wgpu_wrapper::WgpuWrapper;
+
+pub(crate) use wgpu_wrapper::wgpu_wrapper;
 
 use crate::{
     settings::{RenderResources, WgpuSettings, WgpuSettingsPriority},
-    view::{ExtractedWindows, ViewTarget},
+    sync_world::MainEntity,
+    view::{screenshot::SubmitScreenshotCommandsState, ExtractedWindow, ViewTarget},
 };
-use alloc::sync::Arc;
 use bevy_camera::NormalizedRenderTarget;
-use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::schedule::ScheduleLabel;
 use bevy_ecs::{prelude::*, system::SystemState};
 #[cfg(feature = "trace")]
@@ -37,6 +37,19 @@ use wgpu::{
 
 /// Schedule label for the root render graph schedule. This schedule runs once per frame
 /// in the [`render_system`] system and is responsible for driving the entire rendering process.
+///
+/// The default bevy render graph is executed as follows:
+/// ```ignore
+/// RenderApp (App)
+///   Render (Schedule)
+///     RenderSystems::Render (SystemSet)
+///       render_system (System)
+///         RenderGraph (Schedule)
+///           camera_driver (System)
+///             Core2d (Schedule)
+///             Core3d (Schedule)
+///             CUSTOM_PIPELINE (Schedule)
+/// ```
 #[derive(ScheduleLabel, Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct RenderGraph;
 
@@ -50,7 +63,7 @@ impl RenderGraph {
                 RenderGraphSystems::Submit,
                 RenderGraphSystems::Finish,
             )
-                .chain(),
+                .chain_weak(),
         );
         schedule
     }
@@ -74,7 +87,12 @@ pub enum RenderGraphSystems {
 /// calls present on swap chains that need to be presented.
 pub fn render_system(
     world: &mut World,
-    state: &mut SystemState<Query<(&ViewTarget, &ExtractedCamera)>>,
+    present_state: &mut SystemState<(
+        Query<(&ViewTarget, &ExtractedCamera)>,
+        Query<(MainEntity, &mut ExtractedWindow)>,
+        Res<RenderQueue>,
+    )>,
+    screenshot_state: &mut SystemState<SubmitScreenshotCommandsState>,
 ) {
     #[cfg(feature = "trace")]
     let _span = info_span!("main_render_schedule").entered();
@@ -90,7 +108,7 @@ pub fn render_system(
         let mut encoder =
             render_device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
 
-        crate::view::screenshot::submit_screenshot_commands(world, &mut encoder);
+        crate::view::screenshot::submit_screenshot_commands(world, screenshot_state, &mut encoder);
         crate::gpu_readback::submit_readback_commands(world, &mut encoder);
 
         render_queue.submit([encoder.finish()]);
@@ -102,22 +120,21 @@ pub fn render_system(
         let _span = info_span!("present_frames").entered();
         present_hook::mark(present_hook::Phase::PresentStart);
 
-        world.resource_scope(|world, mut windows: Mut<ExtractedWindows>| {
-            let views = state.get(world).unwrap();
-            for window in windows.values_mut() {
+        if let Ok((views, mut windows, render_queue)) = present_state.get_mut(world) {
+            for (window_entity, mut window) in &mut windows {
                 let view_needs_present = views.iter().any(|(view_target, camera)| {
                     matches!(
                         camera.target,
-                        Some(NormalizedRenderTarget::Window(w)) if w.entity() == window.entity
+                        Some(NormalizedRenderTarget::Window(w)) if w.entity() == window_entity
                     ) && view_target.needs_present()
                 });
 
                 if view_needs_present || window.needs_initial_present {
-                    window.present();
+                    window.present(&render_queue);
                     window.needs_initial_present = false;
                 }
             }
-        });
+        }
 
         present_hook::mark(present_hook::Phase::PresentEnd);
 
@@ -132,9 +149,27 @@ pub fn render_system(
     crate::view::screenshot::collect_screenshots(world);
 }
 
-/// This queue is used to enqueue tasks for the GPU to execute asynchronously.
-#[derive(Resource, Clone, Deref, DerefMut)]
-pub struct RenderQueue(pub Arc<WgpuWrapper<Queue>>);
+wgpu_wrapper! {
+    /// This queue is used to enqueue tasks for the GPU to execute asynchronously.
+    #[derive(Resource, Clone)]
+    pub struct RenderQueue(Queue);
+
+    /// The handle to the physical device being used for rendering.
+    /// See [`Adapter`] for more info.
+    #[derive(Resource, Clone, Debug)]
+    pub struct RenderAdapter(Adapter);
+
+    /// The GPU instance is used to initialize the [`RenderQueue`] and [`RenderDevice`].
+    #[derive(Resource, Clone)]
+    pub struct RenderInstance(Instance);
+}
+
+// benilla fork (BENILLA.md, "The render worker"): plain data, read on the page too.
+wgpu_wrapper! {@shared
+    /// The [`AdapterInfo`] of the adapter in use by the renderer.
+    #[derive(Resource, Clone)]
+    pub struct RenderAdapterInfo(AdapterInfo);
+}
 
 /// **benilla fork (BENILLA.md, "The render worker").** `write_buffer` that the page may call while
 /// the queue lives on the render worker: there it is queued and applied right after the next
@@ -163,7 +198,7 @@ pub trait QueueWriteTarget {
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 impl QueueWriteTarget for wgpu::Buffer {
     fn write_through(&self, queue: &RenderQueue, offset: wgpu::BufferAddress, data: &[u8]) {
-        queue.0.write_buffer(self, offset, data);
+        Queue::write_buffer(queue, self, offset, data);
     }
 }
 
@@ -171,7 +206,7 @@ impl QueueWriteTarget for wgpu::Buffer {
 impl QueueWriteTarget for crate::render_resource::Buffer {
     fn write_through(&self, queue: &RenderQueue, offset: wgpu::BufferAddress, data: &[u8]) {
         if crate::render_worker::is_render_thread() {
-            queue.0.write_buffer(self, offset, data);
+            Queue::write_buffer(queue, self, offset, data);
         } else {
             crate::render_worker::defer_write(self.clone(), offset, data);
         }
@@ -185,19 +220,6 @@ impl<T: QueueWriteTarget + ?Sized> QueueWriteTarget for &T {
     }
 }
 
-/// The handle to the physical device being used for rendering.
-/// See [`Adapter`] for more info.
-#[derive(Resource, Clone, Debug, Deref, DerefMut)]
-pub struct RenderAdapter(pub Arc<WgpuWrapper<Adapter>>);
-
-/// The GPU instance is used to initialize the [`RenderQueue`] and [`RenderDevice`],
-/// as well as to create [`WindowSurfaces`](crate::view::window::WindowSurfaces).
-#[derive(Resource, Clone, Deref, DerefMut)]
-pub struct RenderInstance(pub Arc<WgpuWrapper<Instance>>);
-
-/// The [`AdapterInfo`] of the adapter in use by the renderer.
-#[derive(Resource, Clone, Deref, DerefMut)]
-pub struct RenderAdapterInfo(pub WgpuWrapper<AdapterInfo>);
 
 const GPU_NOT_FOUND_ERROR_MESSAGE: &str = if cfg!(target_os = "linux") {
     "Unable to find a GPU! Make sure you have installed required drivers! For extra information, see: https://github.com/bevyengine/bevy/blob/latest/docs/linux_dependencies.md"
@@ -265,7 +287,10 @@ pub async fn initialize_renderer(
                 force_shader_model: ForceShaderModelToken::default(),
                 agility_sdk: None,
             },
-            noop: wgpu::NoopBackendOptions { enable: false },
+            noop: wgpu::NoopBackendOptions {
+                enable: false,
+                ..Default::default()
+            },
         },
     };
 
@@ -311,6 +336,7 @@ pub async fn initialize_renderer(
         power_preference: options.power_preference,
         compatible_surface: surface.as_ref(),
         force_fallback_adapter,
+        apply_limit_buckets: false,
     };
 
     #[cfg(not(target_family = "wasm"))]
@@ -424,11 +450,10 @@ pub async fn initialize_renderer(
 
     RenderResources(
         RenderDevice::from(device),
-        RenderQueue(Arc::new(WgpuWrapper::new(queue))),
-        // benilla fork (BENILLA.md, "The render worker"): plain data, read on the page too.
-        RenderAdapterInfo(WgpuWrapper::new_send(adapter_info)),
-        RenderAdapter(Arc::new(WgpuWrapper::new(adapter))),
-        RenderInstance(Arc::new(WgpuWrapper::new(instance))),
+        RenderQueue::new(queue),
+        RenderAdapterInfo::new(adapter_info),
+        RenderAdapter::new(adapter),
+        RenderInstance::new(instance),
         #[cfg(feature = "raw_vulkan_init")]
         additional_vulkan_features,
     )

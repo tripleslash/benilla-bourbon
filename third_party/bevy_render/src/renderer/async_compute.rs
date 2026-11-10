@@ -15,10 +15,10 @@
 //! [`RenderContext`]: super::RenderContext
 //! [`FlushCommands`]: super::FlushCommands
 
-use super::{PendingCommandBuffers, RenderDevice, RenderQueue, WgpuWrapper};
+use super::{wgpu_wrapper, PendingCommandBuffers, RenderDevice, RenderQueue};
 use crate::diagnostic::internal::DiagnosticsRecorder;
 use crate::render_resource::CommandEncoder;
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use bevy_derive::Deref;
 use bevy_ecs::prelude::*;
 use bevy_ecs::system::{Deferred, SystemBuffer, SystemMeta, SystemParam};
@@ -27,7 +27,12 @@ use bevy_ecs::world::DeferredWorld;
 /// The device's async compute queue, where the backend has one. Insert it with
 /// [`RenderAsyncComputeQueue::create`]; [`AsyncComputeContext`] records for it while it exists.
 #[derive(Resource, Clone, Deref)]
-pub struct RenderAsyncComputeQueue(pub Arc<WgpuWrapper<wgpu::AsyncComputeQueue>>);
+pub struct RenderAsyncComputeQueue(pub Arc<WgpuAsyncComputeQueue>);
+
+wgpu_wrapper! {
+    /// The `wgpu::AsyncComputeQueue` behind [`RenderAsyncComputeQueue`].
+    pub struct WgpuAsyncComputeQueue(wgpu::AsyncComputeQueue);
+}
 
 impl RenderAsyncComputeQueue {
     /// The device's one async compute queue, or `None` (WebGPU, GL, Metal, no second queue, or
@@ -36,7 +41,7 @@ impl RenderAsyncComputeQueue {
         device
             .wgpu_device()
             .create_async_compute_queue(queue)
-            .map(|q| Self(Arc::new(WgpuWrapper::new(q))))
+            .map(|q| Self(Arc::new(WgpuAsyncComputeQueue::new(q))))
     }
 }
 
@@ -60,11 +65,15 @@ struct AsyncComputeStateInner {
 }
 
 /// The [`SystemBuffer`] behind [`AsyncComputeContext`].
-pub struct AsyncComputeState(WgpuWrapper<AsyncComputeStateInner>);
+pub struct AsyncComputeState(WgpuAsyncComputeStateInner);
+
+wgpu_wrapper!(struct WgpuAsyncComputeStateInner(AsyncComputeStateInner));
 
 impl Default for AsyncComputeState {
     fn default() -> Self {
-        Self(WgpuWrapper::new(AsyncComputeStateInner::default()))
+        Self(WgpuAsyncComputeStateInner::new(
+            AsyncComputeStateInner::default(),
+        ))
     }
 }
 
@@ -76,7 +85,10 @@ impl SystemBuffer for AsyncComputeState {
             return;
         };
         // What the graph recorded before this system goes first, so the async work sees it.
-        let earlier = world.resource_mut::<PendingCommandBuffers>().take();
+        let earlier: Vec<_> = world
+            .resource_mut::<PendingCommandBuffers>()
+            .finish()
+            .collect();
         if !earlier.is_empty() {
             world.resource::<RenderQueue>().submit(earlier);
         }
@@ -135,7 +147,7 @@ pub fn wait_for_async_compute(
     let (Some(last), Some(async_queue)) = (frame.last.take(), async_queue) else {
         return;
     };
-    let buffers = pending.take();
+    let buffers: Vec<_> = pending.finish().collect();
     if !buffers.is_empty() {
         queue.submit(buffers);
     }

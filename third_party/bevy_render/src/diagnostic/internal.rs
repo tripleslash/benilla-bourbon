@@ -19,7 +19,7 @@ use wgpu::{
     RenderPass,
 };
 
-use crate::renderer::{RenderAdapterInfo, RenderDevice, RenderQueue, WgpuWrapper};
+use crate::renderer::{wgpu_wrapper, RenderAdapterInfo, RenderDevice, RenderQueue};
 
 use super::RecordDiagnostics;
 
@@ -40,10 +40,12 @@ struct DiagnosticsRecorderInternal {
     tracy_gpu_context: Option<tracy_client::GpuContext>,
 }
 
+wgpu_wrapper!(struct WgpuDiagnosticsRecorderInternal(DiagnosticsRecorderInternal));
+
 /// Records diagnostics into [`QuerySet`]'s keeping track of the mapping between
 /// spans and indices to the corresponding entries in the [`QuerySet`].
 #[derive(Resource)]
-pub struct DiagnosticsRecorder(WgpuWrapper<DiagnosticsRecorderInternal>);
+pub struct DiagnosticsRecorder(WgpuDiagnosticsRecorderInternal);
 
 impl DiagnosticsRecorder {
     /// Creates the new `DiagnosticsRecorder`.
@@ -59,20 +61,22 @@ impl DiagnosticsRecorder {
             super::tracy_gpu::new_tracy_gpu_context(adapter_info, device, queue);
         let _ = adapter_info; // Prevent unused variable warnings when tracing-tracy is not enabled
 
-        DiagnosticsRecorder(WgpuWrapper::new(DiagnosticsRecorderInternal {
-            timestamp_period_ns: queue.get_timestamp_period(),
-            features,
-            current_frame: Mutex::new(FrameData::new(
-                device,
+        DiagnosticsRecorder(WgpuDiagnosticsRecorderInternal::new(
+            DiagnosticsRecorderInternal {
+                timestamp_period_ns: queue.get_timestamp_period(),
                 features,
+                current_frame: Mutex::new(FrameData::new(
+                    device,
+                    features,
+                    #[cfg(feature = "tracing-tracy")]
+                    tracy_gpu_context.clone(),
+                )),
+                submitted_frames: Vec::new(),
+                finished_frames: Vec::new(),
                 #[cfg(feature = "tracing-tracy")]
-                tracy_gpu_context.clone(),
-            )),
-            submitted_frames: Vec::new(),
-            finished_frames: Vec::new(),
-            #[cfg(feature = "tracing-tracy")]
-            tracy_gpu_context,
-        }))
+                tracy_gpu_context,
+            },
+        ))
     }
 
     fn current_frame_mut(&mut self) -> &mut FrameData {
@@ -154,7 +158,7 @@ impl RecordDiagnostics for DiagnosticsRecorder {
     {
         assert_eq!(
             buffer.size(),
-            BufferSize::new(4).unwrap(),
+            BufferSize::new(4).unwrap().get(),
             "DiagnosticsRecorder::record_f32 buffer slice must be 4 bytes long"
         );
         assert!(
@@ -172,7 +176,7 @@ impl RecordDiagnostics for DiagnosticsRecorder {
     {
         assert_eq!(
             buffer.size(),
-            BufferSize::new(4).unwrap(),
+            BufferSize::new(4).unwrap().get(),
             "DiagnosticsRecorder::record_u32 buffer slice must be 4 bytes long"
         );
         assert!(
@@ -430,7 +434,7 @@ impl FrameData {
             buffer.offset(),
             &dest_buffer,
             0,
-            Some(buffer.size().into()),
+            Some(buffer.size()),
         );
 
         command_encoder.map_buffer_on_submit(&dest_buffer, MapMode::Read, .., |_| {});
@@ -536,7 +540,7 @@ impl FrameData {
             }
 
             for (buffer, diagnostic_path, is_f32) in self.value_buffers.drain(..) {
-                let buffer = buffer.get_mapped_range(..);
+                let buffer = buffer.get_mapped_range(..).unwrap();
                 diagnostics.push(RenderDiagnostic {
                     path: DiagnosticPath::from_components(
                         core::iter::once("render")
@@ -581,7 +585,7 @@ impl FrameData {
             return true;
         };
 
-        let data = read_buffer.slice(..).get_mapped_range();
+        let data = read_buffer.slice(..).get_mapped_range().unwrap();
 
         let timestamps = data[..(self.num_timestamps * 8) as usize]
             .as_chunks()
@@ -694,7 +698,7 @@ impl FrameData {
         }
 
         for (buffer, diagnostic_path, is_f32) in self.value_buffers.drain(..) {
-            let buffer = buffer.get_mapped_range(..);
+            let buffer = buffer.get_mapped_range(..).unwrap();
             diagnostics.push(RenderDiagnostic {
                 path: DiagnosticPath::from_components(
                     core::iter::once("render").chain(core::iter::once(diagnostic_path.as_ref())),

@@ -213,7 +213,6 @@ impl RenderResources {
         render_world.insert_resource(instance);
         let pipeline_cache = PipelineCache::new(
             device.clone(),
-            render_adapter.clone(),
             synchronous_pipeline_compilation,
         );
         // benilla fork (twelfth delta): the on-disk pipeline cache, native only, opened for this
@@ -241,7 +240,7 @@ impl RenderResources {
 /// An enum describing how the renderer will initialize resources. This is used when creating the [`RenderPlugin`](crate::RenderPlugin).
 pub enum RenderCreation {
     /// Allows renderer resource initialization to happen outside of the rendering plugin.
-    Manual(RenderResources),
+    Manual(Box<RenderResources>),
     /// Lets the rendering plugin create resources itself.
     Automatic(Box<WgpuSettings>),
 }
@@ -284,7 +283,7 @@ impl RenderCreation {
     ) -> bool {
         match self {
             RenderCreation::Manual(resources) => {
-                *future_resources.lock().unwrap() = Some(resources.clone());
+                *future_resources.lock().unwrap() = Some(*resources.clone());
             }
             RenderCreation::Automatic(render_creation) => {
                 let Some(backends) = render_creation.backends else {
@@ -348,7 +347,7 @@ impl RenderCreation {
 
 impl From<RenderResources> for RenderCreation {
     fn from(value: RenderResources) -> Self {
-        Self::Manual(value)
+        Self::Manual(Box::new(value))
     }
 }
 
