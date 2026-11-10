@@ -135,11 +135,6 @@ wgpu-hal = { path = "third_party/wgpu-hal" }
 # runs on DX12 whatever `VALIDATION_INDIRECT_CALL` says (gfx-rs/wgpu#7974,
 # `third_party/wgpu-core/BENILLA.md`).
 wgpu-core = { path = "third_party/wgpu-core" }
-# naga_oil 0.22.0, patched so a composed mesh or task shader keeps its own output variable, output
-# types and payload: upstream copies those entry-point handles verbatim while every import's items
-# land ahead of the shader's, so they name the wrong items. static_gx's mesh-shader lane imports.
-# `third_party/naga_oil/BENILLA.md` has the diff.
-naga_oil = { path = "third_party/naga_oil" }
 
 # Dependencies at opt-level 3 in dev: at opt-level 0, avian/parry collision drops a run to <1 fps.
 [profile.dev.package."*"]
