@@ -1,6 +1,6 @@
 # benilla's `bevy_ecs` fork — what differs from upstream, and how to check
 
-Upstream: `bevy_ecs 0.19.1` (crates.io), MIT OR Apache-2.0 — the version bevy 0.19.1 resolves to.
+Upstream: `bevy_ecs 0.20.1` (crates.io), MIT OR Apache-2.0 — the version bevy 0.20.1 resolves to.
 Wired in through `[patch.crates-io]` in the workspace root. It is the companion to
 `third_party/bevy_tasks`, and neither is any use without the other.
 
@@ -72,8 +72,8 @@ of ~3,400 systems' queries re-walk hundreds of archetypes.
 
 ```sh
 # The patched crate is never downloaded into cargo's registry, so fetch the pinned upstream.
-mkdir -p /tmp/upstream && curl -sL https://static.crates.io/crates/bevy_ecs/bevy_ecs-0.19.1.crate   | tar xz -C /tmp/upstream
-diff -r third_party/bevy_ecs /tmp/upstream/bevy_ecs-0.19.1
+mkdir -p /tmp/upstream && curl -sL https://static.crates.io/crates/bevy_ecs/bevy_ecs-0.20.1.crate   | tar xz -C /tmp/upstream
+diff -r third_party/bevy_ecs /tmp/upstream/bevy_ecs-0.20.1
 ```
 
 That must print exactly a `diff` for `src/query/par_iter.rs` and `src/query/state.rs`, plus
