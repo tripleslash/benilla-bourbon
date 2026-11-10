@@ -30,6 +30,8 @@
 //! the map already packs — which is what the reference's `GetDynamicDisplMapInterpolation` is, and
 //! why its `ProcWaterAbove` lerps `.x` against `.y` before taking the gradient.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use bevy::asset::RenderAssetUsages;
 use bevy::core_pipeline::core_3d::{main_opaque_pass_3d, main_transparent_pass_3d};
 use bevy::core_pipeline::{Core3d, Core3dSystems, FullscreenShader};
@@ -371,6 +373,7 @@ pub(super) fn advance_clock(
     if field.steps == 0 {
         return;
     }
+    MAIN_STEPS.fetch_add(field.steps, Ordering::Relaxed);
     field.accumulator -= field.steps as f32 * STEP_MS;
     // Keep the remainder inside one step: it is the shader's interpolation numerator, and a value
     // above the period would extrapolate past the frame it is meant to sit between.
@@ -712,6 +715,7 @@ fn ripple_pass(
                 )),
             )
         });
+        RENDER_STEPS.fetch_add(field.steps, Ordering::Relaxed);
         // `steps` integrations, each one map -> scratch -> map. The reference catches up the same
         // way and with the same cap; the stamps are applied on every one of them, which is right,
         // because a catch-up step stands for a slice of time the disturbance was also present for.
@@ -757,6 +761,26 @@ fn ripple_pass(
     }
 }
 
+/// Steps [`advance_clock`] scheduled and integrations [`ripple_pass`] ran, since the last
+/// [`report_ripple_rate`]: equal at 20 Hz each when every scheduled step is integrated once.
+static MAIN_STEPS: AtomicU32 = AtomicU32::new(0);
+static RENDER_STEPS: AtomicU32 = AtomicU32::new(0);
+
+/// `WOW_RIPPLE_RATE=1`: every two seconds, `RIPPLE_RATE main_hz= render_hz=`, the scheduled and
+/// the integrated wave steps a second. The waves move one texel a step, so a render rate above
+/// the main one is waves travelling faster than the reference's 20 Hz.
+fn report_ripple_rate(time: Res<Time<Real>>, mut since: Local<f32>) {
+    let now = time.elapsed_secs();
+    if now - *since < 2.0 {
+        return;
+    }
+    let span = now - *since;
+    *since = now;
+    let main = MAIN_STEPS.swap(0, Ordering::Relaxed) as f32 / span;
+    let render = RENDER_STEPS.swap(0, Ordering::Relaxed) as f32 / span;
+    info!("RIPPLE_RATE main_hz={main:.1} render_hz={render:.1}");
+}
+
 /// Wire the ripple simulation into the app. Called from [`super::LiquidPlugin`].
 pub(super) fn register(app: &mut App) {
     app.init_resource::<RippleData>()
@@ -780,6 +804,9 @@ pub(super) fn register(app: &mut App) {
             Update,
             pack_sky_rows.in_set(crate::lighting::LightingConsumeSet),
         );
+    if crate::launch_env::var("WOW_RIPPLE_RATE").is_some_and(|v| v == "1") {
+        app.add_systems(Last, report_ripple_rate);
+    }
 
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
