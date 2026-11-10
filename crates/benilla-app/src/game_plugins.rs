@@ -1151,7 +1151,10 @@ pub(crate) mod schedule_tests {
     /// their calls, the bars, crafts and tutorials read live); the merge of fcda90fd7 measures
     /// 1,694 (-317), with the fork's own knob readers (SSILVB, water tier, ripples, lava light)
     /// ordered after the calls whose callbacks write them.
-    const UPDATE_ACTIONABLE_CEILING: usize = 1_694;
+    ///
+    /// The fork's tree at 19f75959c (the native-GPU waves, frame generation and the cursor's scale
+    /// cache) measures 1,617 (-77).
+    const UPDATE_ACTIONABLE_CEILING: usize = 1_617;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {

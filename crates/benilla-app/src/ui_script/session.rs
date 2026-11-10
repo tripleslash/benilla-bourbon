@@ -204,6 +204,8 @@ mod tests {
         ("cursor.rs", "decode_failed"),
         ("cursor.rs", "last_set"),
         ("cursor.rs", "last_ptr"),
+        // The cursor pictures uploaded at the window's scale factor, a fact about the window.
+        ("cursor.rs", "scaled"),
         // The wheel's fraction toward its next notch, a fact about the device, not the VM.
         ("bindings.rs", "notches"),
         // The keys believed down, a fact about the keyboard; an alt-tab wipes it by reconcile.

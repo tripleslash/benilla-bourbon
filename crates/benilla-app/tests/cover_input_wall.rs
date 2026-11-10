@@ -107,6 +107,8 @@ const VERDICTS: &[(&str, Verdict)] = &[
     ("ExitSystems", Plumbing),
     ("Monitor", Plumbing),
     ("MonitorSelection", Plumbing),
+    // The fullscreen mode's video-mode pick (`video.rs`), an output the window takes.
+    ("VideoModeSelection", Plumbing),
     ("PresentMode", Plumbing),
     ("PrimaryWindow", Plumbing),
     ("RawHandleWrapper", Plumbing),
