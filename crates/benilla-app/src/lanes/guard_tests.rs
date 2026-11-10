@@ -1784,11 +1784,15 @@ const QUEUES_NOT_VIEWS: &[&str] = &[
 ];
 
 /// A type's name as [`READS_FRAME_FINAL`] spells it: the crate's own by its path in the crate, an
-/// engine type by its own name.
+/// engine type by its own name. An engine name's generic parameters go first, so a generic
+/// system (`…::refit_changed_collider_aabbs<With<…::Transport>>`) keeps its own last segment.
 pub(super) fn short_name(full: &str) -> String {
     match full.strip_prefix("benilla_app::") {
         Some(rest) => rest.to_string(),
-        None => full.rsplit("::").next().unwrap_or(full).to_string(),
+        None => {
+            let path = full.split_once('<').map_or(full, |(p, _)| p);
+            path.rsplit("::").next().unwrap_or(path).to_string()
+        }
     }
 }
 

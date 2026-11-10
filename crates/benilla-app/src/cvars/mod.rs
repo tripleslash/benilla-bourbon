@@ -1324,7 +1324,6 @@ fn apply_gpu_tier(cvars: &mut Cvars) {
 pub(crate) const GRAPHICS_CVARS: &[&str] = &[
     "uiScale",
     "farclip",
-    "WorldDetail",
     // Spell Detail, a Graphics page row since upstream's panel.
     "spellEffectLevel",
     "gamma",
@@ -1347,8 +1346,6 @@ pub(crate) const GRAPHICS_CVARS: &[&str] = &[
     "rcasSharpness",
     // fork: dlss (FORK.md)
     "upscaler",
-    "frameGenerationMultiplier",
-    "nvidiaReflex",
     // fork: the Everwood port (FORK.md)
     "foliageWind",
     "foliageWindStrength",

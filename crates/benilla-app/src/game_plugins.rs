@@ -1346,13 +1346,14 @@ pub(crate) mod schedule_tests {
     /// Each system costs its dispatch and parameter fetch even with nothing to do, about a
     /// microsecond apiece, so the count is a frame-time cost in its own right. `every_frame` is the
     /// number that matters: a system with a real trigger in its run condition skips on quiet frames.
+    /// Measured 2026-11-10 at `1beea9cf5`, Windows, from the counts this test printed.
     const FRAME_FLOOR: &[(&str, usize, usize)] = &[
-        ("Update", 0, 0),
-        ("PostUpdate", 0, 0),
-        ("PreUpdate", 0, 0),
-        ("First", 0, 0),
-        ("RunFixedMainLoop", 0, 0),
-        ("Last", 0, 0),
+        ("Update", 543, 529),
+        ("PostUpdate", 224, 178),
+        ("PreUpdate", 100, 85),
+        ("First", 12, 9),
+        ("RunFixedMainLoop", 13, 13),
+        ("Last", 59, 44),
     ];
     /// How far a count may sit under its ceiling before the ceiling must come down with it.
     const FRAME_FLOOR_SLACK: usize = 8;

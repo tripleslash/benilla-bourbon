@@ -224,7 +224,9 @@ fn a_minimap_is_born_with_nine_model_children_and_the_ninth_is_the_player_arrow(
     assert_eq!(s.visual_epoch(), still, "a still arrow moved the count");
     s.set_minimap_player_facing(1.0);
     assert_eq!(s.visual_epoch(), still, "an unanchored pane paints nothing");
-    s.run("m:SetPoint('TOPLEFT') m:SetWidth(140) m:SetHeight(140)")
+    // A bare `SetPoint(point)` raises Usage (`0x7a25e6`): the relative region is named, `nil` the
+    // screen.
+    s.run("m:SetPoint('TOPLEFT', nil, 'TOPLEFT', 0, 0) m:SetWidth(140) m:SetHeight(140)")
         .unwrap();
     s.run("({m:GetChildren()})[9]:SetAllPoints(m)").unwrap();
     s.resolve();

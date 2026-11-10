@@ -1082,7 +1082,8 @@
             local lo, hi = OPTIONS_FARCLIP_MIN, BENILLA_FARCLIP_MAX
             local bounds = {
                 { minValue = 0.64, maxValue = 1.0, valueStep = 0.01 },
-                { minValue = lo, maxValue = hi, valueStep = (hi - lo) / 10 },
+                -- The step stays the stock grid's (777 - 177) / 10 = 60; only the ceiling is raised.
+                { minValue = lo, maxValue = hi, valueStep = (OPTIONS_FARCLIP_MAX - lo) / 10 },
                 { minValue = 0, maxValue = 2, valueStep = 1 },
                 [6] = { minValue = -0.5, maxValue = 0.5, valueStep = 0.1 },
                 [8] = { minValue = 0, maxValue = 2, valueStep = 1 },

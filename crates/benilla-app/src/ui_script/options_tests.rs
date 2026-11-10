@@ -2139,14 +2139,15 @@ fn defaults_resets_the_graphics_page_to_registered_defaults() {
         3,
         "only the default writes queue — never the dead pending: {changes:?}"
     );
-    // The fork's 1000, inside the row's raised ceiling (`BENILLA_FARCLIP_MAX`); a refresh sets the
-    // slider raw, off the 177 + n * 60 ladder (`OptionsFrame.lua:26`).
+    // The fork's 1000, inside the row's raised ceiling (`BENILLA_FARCLIP_MAX`), reads as 1017:
+    // `CSimpleSlider::SetValue` (`0x789930`) rounds onto the 177 + n * 60 ladder
+    // (`OptionsFrame.lua:26`), and the CVar keeps its 1000.
     assert_eq!(
         s.eval::<String>(
             "return BenillaOptionsFrameContainerBodyGraphicsRowFarclipControlValue:GetText()"
         )
         .unwrap(),
-        "1000"
+        "1017"
     );
     assert_eq!(
         s.eval::<String>(
@@ -2808,6 +2809,20 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
             ("BENILLA_TOOLTIP_RCAS_SHARPNESS", "GraphicsRowRcasSharpness"),
             // fork: dlss (FORK.md)
             ("BENILLA_TOOLTIP_UPSCALER", "GraphicsRowUpscaler"),
+            ("BENILLA_TOOLTIP_REFLEX", "GraphicsRowNvidiaReflex"),
+            // fork: the ground clutter's draw distance, density gain and tuft size.
+            (
+                "BENILLA_TOOLTIP_GROUND_CLUTTER_DISTANCE",
+                "GraphicsRowGroundClutterDistance",
+            ),
+            (
+                "BENILLA_TOOLTIP_GROUND_CLUTTER_DENSITY",
+                "GraphicsRowGroundClutterDensity",
+            ),
+            (
+                "BENILLA_TOOLTIP_GROUND_CLUTTER_SCALE",
+                "GraphicsRowGroundClutterScale",
+            ),
             // fork: the Everwood port (FORK.md)
             ("BENILLA_TOOLTIP_FOLIAGE_WIND", "GraphicsRowFoliageWind"),
             (
@@ -5175,6 +5190,10 @@ fn turtle_options_carry_every_graphics_row() {
         "foliageWind",
         "foliageWindStrength",
         "rainSurfaces",
+        // fork: the ground clutter's draw distance, density gain and tuft size.
+        "groundClutterDistance",
+        "groundClutterDensity",
+        "groundClutterScale",
         "graphicsQuality",
         "brightness",
     ] {
@@ -5273,7 +5292,7 @@ fn turtle_options_carry_every_graphics_row() {
             end
             return text("BENILLA_AMBIENT_OCCLUSION", 0, 1, 0.6) .. ","
                 .. text("BENILLA_RENDER_SCALE", 0.5, 2, 0.67) .. ","
-                .. text("ENVIRONMENT_DETAIL", 0, 2, 1) .. ","
+                .. text("SPELL_DETAIL", 0, 2, 1) .. ","
                 .. text("WEATHER_DETAIL", 0, 3, 3) .. ","
                 .. text("GAMMA", -0.5, 0.5, 0) .. ","
                 .. text("GAMMA", -0.5, 0.5, 0.5) .. ","
