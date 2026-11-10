@@ -285,7 +285,7 @@ fn build_skybox(
                 Transform::default(),
                 Visibility::Hidden, // `apply_skybox_visibility` turns on exactly the wanted one
                 // The crossfade's alpha (bits 0..=5), written only by `apply_skybox_visibility`.
-                MeshTag(crate::mesh_tag::spawn_tag(0, 1.0)),
+                MeshTag::new(crate::mesh_tag::spawn_tag(0, 1.0)),
                 SkyboxPart {
                     path: path.to_string(),
                     steady: pair.steady,
@@ -352,9 +352,9 @@ fn apply_skybox_visibility(
         if mat.0 != *handle {
             mat.0 = handle.clone();
         }
-        let bits = crate::mesh_tag::with_alpha(tag.0, weight.0);
-        if tag.0 != bits {
-            tag.0 = bits;
+        let bits = crate::mesh_tag::with_alpha(tag.value, weight.0);
+        if tag.value != bits {
+            tag.value = bits;
         }
     }
 }

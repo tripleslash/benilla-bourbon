@@ -120,7 +120,7 @@ fn spawn_exile(commands: &mut Commands, f: &GxFader, alpha: f32, admitted: bool)
             },
             crate::model_render::EntityPathWhy("exile"),
             crate::interact::PickMesh(b.geometry.clone()),
-            bevy::mesh::MeshTag(crate::mesh_tag::alpha_bits(alpha)),
+            bevy::mesh::MeshTag::new(crate::mesh_tag::alpha_bits(alpha)),
             crate::model_fade::DoodadFade {
                 radius: f.radius,
                 local_center: f.local_center,

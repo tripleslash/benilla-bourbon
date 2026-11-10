@@ -69,13 +69,13 @@ pub(crate) fn sync_zfill_twins(
         let Some(mat) = fm.zfill.as_ref() else {
             continue; // no-z-write, Mod or Mod2x batch: the reference's own twin gate
         };
-        let active = crate::mesh_tag::translucent(tag.0);
+        let active = crate::mesh_tag::translucent(tag.value);
         match twin {
             None if active => {
                 let mut twin = commands.spawn((
                     Mesh3d(mesh.0.clone()),
                     MeshMaterial3d(mat.clone()),
-                    MeshTag(tag.0),
+                    MeshTag::new(tag.value),
                     Transform::IDENTITY,
                     ZfillTwinOf(part),
                     ChildOf(part),
@@ -85,12 +85,12 @@ pub(crate) fn sync_zfill_twins(
                 }
                 let t = twin.id();
                 commands.entity(part).insert(ZfillTwin(t));
-                trace("arm", part, tag.0);
+                trace("arm", part, tag.value);
             }
             Some(t) if !active => {
                 commands.entity(t.0).despawn();
                 commands.entity(part).remove::<ZfillTwin>();
-                trace("release", part, tag.0);
+                trace("release", part, tag.value);
             }
             _ => {}
         }
@@ -103,12 +103,12 @@ pub(crate) fn sync_zfill_twins(
             if parked.contains(of.0) {
                 commands.entity(twin).despawn();
                 commands.entity(of.0).remove::<ZfillTwin>();
-                trace("park", of.0, tag.0);
+                trace("park", of.0, tag.value);
             }
             continue; // else the part is going away; the child despawns with it
         };
-        if tag.0 != ptag.0 {
-            tag.0 = ptag.0;
+        if tag.value != ptag.value {
+            tag.value = ptag.value;
         }
         if mesh.0 != pmesh.0 {
             mesh.0 = pmesh.0.clone();
@@ -150,7 +150,7 @@ mod tests {
                     bake_blend: None,
                     zfill: Some(Handle::default()),
                 },
-                MeshTag(crate::mesh_tag::with_alpha(0, 0.5)),
+                MeshTag::new(crate::mesh_tag::with_alpha(0, 0.5)),
                 Mesh3d(Handle::default()),
             ))
             .id();

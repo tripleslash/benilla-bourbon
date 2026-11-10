@@ -1307,9 +1307,9 @@ fn sync_tiles(
                     if *pvis != want {
                         *pvis = want;
                     }
-                    let bits = benilla_world::mesh_tag::with_alpha(tag.0, a);
-                    if tag.0 != bits {
-                        tag.0 = bits;
+                    let bits = benilla_world::mesh_tag::with_alpha(tag.value, a);
+                    if tag.value != bits {
+                        tag.value = bits;
                     }
                 }
             }
@@ -1972,7 +1972,7 @@ fn build_tile(
         let mut child = commands.spawn((
             Mesh3d(mesh),
             MeshMaterial3d(part_mats[i].clone()),
-            MeshTag(benilla_world::mesh_tag::spawn_tag(tag_slot, 1.0)),
+            MeshTag::new(benilla_world::mesh_tag::spawn_tag(tag_slot, 1.0)),
             Transform::IDENTITY,
             layer.clone(),
             ChildOf(root),

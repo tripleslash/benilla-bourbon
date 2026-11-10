@@ -70,12 +70,12 @@ fn set_bit(root: Entity, on: bool, children: &Query<&Children>, tags: &mut Query
     for e in std::iter::once(root).chain(children.iter_descendants(root)) {
         if let Ok(mut tag) = tags.get_mut(e) {
             let bits = if on {
-                tag.0 | HIGHLIGHT_BIT
+                tag.value | HIGHLIGHT_BIT
             } else {
-                tag.0 & !HIGHLIGHT_BIT
+                tag.value & !HIGHLIGHT_BIT
             };
-            if tag.0 != bits {
-                tag.0 = bits;
+            if tag.value != bits {
+                tag.value = bits;
             }
         }
     }

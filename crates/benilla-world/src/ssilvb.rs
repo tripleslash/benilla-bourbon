@@ -41,7 +41,7 @@ use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::texture::{CachedTexture, TextureCache};
 use bevy::render::view::{
-    Msaa, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
+    Msaa, ViewDepthStencilTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
 };
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 use bevy::shader::ShaderDefVal;
@@ -54,6 +54,7 @@ use crate::view::WorldCamera;
 /// Written by `benilla-app`'s CVar host (`ssaoStrength` / `ssgiStrength`); read by the render
 /// node. Both are clamped to [`SSILVB_RANGE`] at every writer's edge.
 #[derive(Resource, Clone, Copy, PartialEq, Debug, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct IndirectLighting {
     /// Ambient-occlusion strength. `0` = no occlusion; `1` = the gather's own visibility applied
     /// whole.
@@ -163,6 +164,7 @@ const PARAMS_SIZE: u64 = 32;
 /// view in the tree, including the portrait-booth bakes and the minimap, occluding a character's
 /// face against the booth backdrop and costing four full-screen passes per pane.
 #[derive(Component, Clone, Copy, Default, ExtractComponent)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct SsilvbView;
 
 fn mark_world_camera(
@@ -312,6 +314,7 @@ fn build_variant(
             layout: vec![layout.clone()],
             vertex: fullscreen_shader.to_vertex_state(),
             fragment: Some(FragmentState {
+                constants: Default::default(),
                 shader: shader.clone(),
                 shader_defs: defs.clone(),
                 entry_point: Some(entry.into()),
@@ -461,7 +464,7 @@ pub(crate) fn ssilvb_pass(
     world: &World,
     view: ViewQuery<(
         &ViewTarget,
-        &ViewDepthTexture,
+        &ViewDepthStencilTexture,
         &ViewUniformOffset,
         &SsilvbTextures,
         &Msaa,
@@ -489,7 +492,7 @@ pub(crate) fn ssilvb_pass(
         // (`benilla-app`'s `capture::depth_probe` guards its own readback the same way, and for
         // the same reason: its `COPY_SRC` only lands on the texture allocated after it asked.)
         if !depth
-            .texture
+            .texture()
             .usage()
             .contains(TextureUsages::TEXTURE_BINDING)
         {
@@ -548,7 +551,7 @@ pub(crate) fn ssilvb_pass(
                 &layout_pass,
                 &BindGroupEntries::with_indices((
                     (0, view_binding.clone()),
-                    (1, depth.view()),
+                    (1, depth.attachment.depth_stencil_views().attachment_view()),
                     (2, src),
                     (3, textures.params.as_entire_binding()),
                 )),

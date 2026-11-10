@@ -188,6 +188,7 @@ impl Default for LightingSettings {
 /// worldview). Has no effect where the session cannot ray-trace, and none on the web build. The
 /// water's ray-traced tier (`waterDetail` 4) reads none of it.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct RayTracingSetting {
     pub on: bool,
     pub gi: bool,
@@ -261,6 +262,7 @@ impl Default for RayTracingSetting {
 /// re-streaming. The tier costs a one-frame hitch when it crosses a boundary that re-sizes the
 /// shadow array, and nothing at all when it does not.
 #[derive(Resource, Clone, Copy, PartialEq, Debug, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct ActiveLighting {
     pub model: LightingModel,
     pub quality: LightingQuality,

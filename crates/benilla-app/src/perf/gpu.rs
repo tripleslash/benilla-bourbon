@@ -322,7 +322,11 @@ fn readback(stamp: Option<ResMut<GpuStamp>>) {
     for i in 0..RING {
         if stamp.ring[i].1.load(Ordering::Relaxed) == MAPPED {
             let (t0, t1) = {
-                let data = stamp.ring[i].0.slice(..).get_mapped_range();
+                let data = stamp.ring[i]
+                    .0
+                    .slice(..)
+                    .get_mapped_range()
+                    .expect("a mapped stamp buffer reads");
                 let words: &[u64] = bytemuck::cast_slice(&data);
                 (words[0], words[1])
             };

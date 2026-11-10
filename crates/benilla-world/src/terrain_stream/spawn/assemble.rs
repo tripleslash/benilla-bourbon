@@ -563,8 +563,8 @@ pub fn spawn_model_entities(
         // payload's writer and readers cannot disagree.
         let probe_slot = interior_slot.filter(|_| interior_probe);
         let mesh_tag = match probe_slot {
-            Some(slot) => MeshTag(crate::mesh_tag::probe_bits(slot)),
-            None => MeshTag(alpha_bits(1.0)),
+            Some(slot) => MeshTag::new(crate::mesh_tag::probe_bits(slot)),
+            None => MeshTag::new(alpha_bits(1.0)),
         };
         // A static doodad's opaque batch occludes the mouse pick; a WMO's is the walk collider's.
         let occluder = (kind == ModelKind::Doodad)

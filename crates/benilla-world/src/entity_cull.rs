@@ -72,7 +72,7 @@ fn decide(lever: Option<&str>) -> bool {
 /// late test runs without the buildings. What its side must do, through the depth texture alone:
 ///
 /// 1. Record the depth-only job (`static_gx_prepass`, the `GX_PREPASSED` twins) from a system of
-///    its own, `.in_set(WorldOccluders)`, on the same `ViewDepthTexture` with `StoreOp::Store`.
+///    its own, `.in_set(WorldOccluders)`, on the same `ViewDepthStencilTexture` with `StoreOp::Store`.
 ///    The early prepass has already taken the depth clear, so this pass loads. Its pipelines keep
 ///    `GreaterEqual` and write; the compare and the reverse-Z target are Bevy's prepass's own.
 /// 2. Leave the colour job where it is, in `MainPass`: its `Equal` test against the depth the
@@ -117,7 +117,7 @@ impl Plugin for EntityCullPlugin {
 /// camera — the water mirror, the portrait booths and the glue camera keep direct draws and no
 /// occlusion test, and only the mirror a prepass ([`match_static_views`]).
 fn arm_world_camera(
-    add: On<Add, crate::view::WorldCamera>,
+    add: On<Add<crate::view::WorldCamera>>,
     cameras: Query<(), With<Camera>>,
     mut commands: Commands,
 ) {
@@ -135,7 +135,7 @@ fn arm_world_camera(
 /// (the prepass depth at binding 20), so a mirror without it cannot bind them. It also keeps the
 /// mirror's material pipelines on the world camera's view key, the one the warm pass compiles.
 fn match_static_views(
-    add: On<Add, crate::static_gx::StaticGxView>,
+    add: On<Add<crate::static_gx::StaticGxView>>,
     views: Query<&crate::static_gx::StaticGxView, With<Camera>>,
     mut commands: Commands,
 ) {

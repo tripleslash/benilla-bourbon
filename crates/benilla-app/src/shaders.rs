@@ -51,6 +51,33 @@ mod tests {
     }
 
     /// Every `.wgsl` file under `dir` of the embedded source, as the asset server would serve it.
+    /// The tests' `ShaderCache` loader: bevy 0.20 composes to WGSL text, which naga parses.
+    fn naga_module(
+        _: &(),
+        source: bevy::shader::ShaderCacheSource,
+        _: &bevy::shader::ValidateShader,
+    ) -> Result<naga::Module, bevy::shader::ShaderCacheError> {
+        match source {
+            bevy::shader::ShaderCacheSource::Wgsl(text) => naga::front::wgsl::parse_str(&text)
+                .map_err(|e| {
+                    bevy::shader::ShaderCacheError::CreateShaderModule(e.emit_to_string(&text))
+                }),
+            bevy::shader::ShaderCacheSource::SpirV(_) => {
+                panic!("a composed shader is WGSL text")
+            }
+        }
+    }
+
+    /// An embedded shader as the asset loader makes it: WESL by its extension, else WGSL.
+    fn shader_of(text: String, path: &str) -> bevy::shader::Shader {
+        let path_url = format!("embedded://{path}");
+        if path.ends_with(".wesl") {
+            bevy::shader::Shader::from_wesl(text, path_url)
+        } else {
+            bevy::shader::Shader::from_wgsl(text, path_url)
+        }
+    }
+
     fn embedded_shaders(
         source: &bevy::asset::io::AssetSource,
         dir: &std::path::Path,
@@ -94,23 +121,15 @@ mod tests {
     /// The module must validate and translate for the backend this platform renders with.
     #[test]
     fn the_ui_quad_shader_composes_and_translates() {
-        use bevy::shader::{Shader, ShaderCache, ShaderCacheSource, ShaderDefVal};
+        use bevy::shader::{Shader, ShaderCache, ShaderDefVal};
         let app = crate::game_plugins::schedule_tests::headless_client_unrun();
         let server = app.world().resource::<AssetServer>();
         let source = server.get_source(AssetSourceId::from("embedded")).unwrap();
         let mut files = Vec::new();
         embedded_shaders(source, std::path::Path::new(""), &mut files);
 
-        // Bevy 0.19's cache owns the device it loads through; the test loads into naga alone.
-        let mut cache: ShaderCache<naga::Module, ()> = ShaderCache::new(
-            (),
-            bevy::render::render_resource::WgpuFeatures::empty(),
-            bevy::render::render_resource::DownlevelFlags::all(),
-            |_, source, _| match source {
-                ShaderCacheSource::Naga(module) => Ok(module),
-                _ => panic!("a WGSL shader composes to a naga module"),
-            },
-        );
+        // The cache loads into naga alone: no device.
+        let mut cache: ShaderCache<naga::Module, ()> = ShaderCache::new((), naga_module);
         let mut ui_quad = None;
         for (i, (path, text)) in files.into_iter().enumerate() {
             let id = AssetId::<Shader>::Uuid {
@@ -119,7 +138,7 @@ mod tests {
             if path == "benilla_app/shaders/ui_quad.wgsl" {
                 ui_quad = Some(id);
             }
-            cache.set_shader(id, Shader::from_wgsl(text, format!("embedded://{path}")));
+            cache.set_shader(id, shader_of(text, &path));
         }
         let ui_quad = ui_quad.expect("ui_quad.wgsl is embedded");
 
@@ -179,16 +198,16 @@ mod tests {
         WebWithoutStandIns,
     }
 
-    /// A `ShaderCache` that composes for `features` over `libraries` plus the cata water
-    /// (`benilla_assets`'s `liquid_cata.wgsl`), and the water's id in it.
+    /// A `ShaderCache` over `libraries` plus the cata water (`benilla_assets`'s
+    /// `liquid_cata.wgsl`), and the water's id in it. Bevy 0.20's cache composes to WGSL text
+    /// whatever the device; each test validates against the capabilities it names.
     fn cata_water_cache(
-        features: bevy::render::render_resource::WgpuFeatures,
         libraries: Libraries,
     ) -> (
         bevy::shader::ShaderCache<naga::Module, ()>,
         AssetId<bevy::shader::Shader>,
     ) {
-        use bevy::shader::{Shader, ShaderCache, ShaderCacheSource};
+        use bevy::shader::{Shader, ShaderCache};
         let app = crate::game_plugins::schedule_tests::headless_client_unrun();
         let server = app.world().resource::<AssetServer>();
         let source = server.get_source(AssetSourceId::from("embedded")).unwrap();
@@ -209,15 +228,7 @@ mod tests {
             ));
         }
 
-        let mut cache: ShaderCache<naga::Module, ()> = ShaderCache::new(
-            (),
-            features,
-            bevy::render::render_resource::DownlevelFlags::all(),
-            |_, source, _| match source {
-                ShaderCacheSource::Naga(module) => Ok(module),
-                _ => panic!("a WGSL shader composes to a naga module"),
-            },
-        );
+        let mut cache: ShaderCache<naga::Module, ()> = ShaderCache::new((), naga_module);
         // The material registers its shader with the world's plugins, which the headless client
         // does not build; it takes its import libraries (bevy's, `benilla_modern`'s) from there.
         files.push((
@@ -231,7 +242,7 @@ mod tests {
             let id = AssetId::<Shader>::Uuid {
                 uuid: bevy::asset::uuid::Uuid::from_u128(i as u128 + 1),
             };
-            cache.set_shader(id, Shader::from_wgsl(text, format!("embedded://{path}")));
+            cache.set_shader(id, shader_of(text, &path));
         }
         (cache, water)
     }
@@ -272,10 +283,7 @@ mod tests {
     /// and a frame; this one needs neither.
     #[test]
     fn the_cata_water_shader_composes_and_translates() {
-        let (mut cache, water) = cata_water_cache(
-            bevy::render::render_resource::WgpuFeatures::empty(),
-            Libraries::Here,
-        );
+        let (mut cache, water) = cata_water_cache(Libraries::Here);
         for colors in [false, true] {
             let defs = cata_water_defs(colors);
             let module = cache.get(0, water, &defs).unwrap_or_else(|e| {
@@ -317,8 +325,7 @@ mod tests {
     /// for ever: every M2, terrain and water pipeline on the web stayed queued and drew nothing.
     #[test]
     fn the_cata_water_shader_composes_over_the_web_libraries() {
-        let features = bevy::render::render_resource::WgpuFeatures::empty();
-        let (mut cache, water) = cata_water_cache(features, Libraries::WebWithoutStandIns);
+        let (mut cache, water) = cata_water_cache(Libraries::WebWithoutStandIns);
         let unstood = cache.get(0, water, &cata_water_defs(false));
         assert!(
             matches!(
@@ -328,7 +335,7 @@ mod tests {
             "without the stand-ins the web's water should wait on its RT import, got {:?}",
             unstood.map(|_| ())
         );
-        let (mut cache, water) = cata_water_cache(features, Libraries::Web);
+        let (mut cache, water) = cata_water_cache(Libraries::Web);
         for colors in [false, true] {
             let module = cache
                 .get(0, water, &cata_water_defs(colors))
@@ -356,15 +363,9 @@ mod tests {
     #[cfg(not(any(target_arch = "wasm32", target_os = "macos")))]
     #[test]
     fn the_cata_water_shader_composes_with_the_ray_traced_lanes() {
-        use bevy::render::render_resource::WgpuFeatures;
         use bevy::shader::ShaderDefVal;
         use naga::valid::Capabilities;
-        let (mut cache, water) = cata_water_cache(
-            WgpuFeatures::EXPERIMENTAL_RAY_QUERY
-                | WgpuFeatures::TEXTURE_BINDING_ARRAY
-                | WgpuFeatures::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
-            Libraries::Here,
-        );
+        let (mut cache, water) = cata_water_cache(Libraries::Here);
         // What `wgpu_naga_bridge::features_to_naga_capabilities` makes of those features and of
         // `DownlevelFlags::all()`, which the composer validates against.
         let capabilities = Capabilities::RAY_QUERY
@@ -408,24 +409,10 @@ mod tests {
     #[cfg(not(any(target_arch = "wasm32", target_os = "macos")))]
     #[test]
     fn the_entity_shadow_caster_composes_in_every_variant() {
-        use bevy::render::render_resource::{DownlevelFlags, WgpuFeatures};
-        use bevy::shader::{Shader, ShaderCache, ShaderCacheSource, ShaderDefVal};
+        use bevy::shader::{Shader, ShaderCache, ShaderDefVal};
         use naga::valid::Capabilities;
         for multiview in [false, true] {
-            let features = if multiview {
-                WgpuFeatures::MULTIVIEW
-            } else {
-                WgpuFeatures::empty()
-            };
-            let mut cache: ShaderCache<naga::Module, ()> = ShaderCache::new(
-                (),
-                features,
-                DownlevelFlags::all(),
-                |_, source, _| match source {
-                    ShaderCacheSource::Naga(module) => Ok(module),
-                    _ => panic!("a WGSL shader composes to a naga module"),
-                },
-            );
+            let mut cache: ShaderCache<naga::Module, ()> = ShaderCache::new((), naga_module);
             let id = AssetId::<Shader>::Uuid {
                 uuid: bevy::asset::uuid::Uuid::from_u128(1),
             };

@@ -300,7 +300,7 @@ pub(crate) fn spawn_liquids<'a>(
         let mesh = liquid_bevy_mesh(&layers, None);
         // Computed here, so the exterior cull tests the cell from its first frame. fork: as tall as
         // the surface's displacement reaches (`liquid_cata.wgsl`'s `HEIGHT_MAX_YD`).
-        let aabb = mesh.compute_aabb().map(|mut b| {
+        let aabb = mesh.get_aabb().map(|mut b| {
             b.half_extents.y += HEIGHT_MAX_YD;
             b
         });
@@ -612,7 +612,7 @@ pub(crate) fn spawn_wmo_liquids<'a>(
                 LiquidSurface,
                 // Bit 30 is the interior-fog lane (`liquid.wgsl`'s `room_fog`), written each frame
                 // by the `Visibility` authority off the pool's room; spawned clear.
-                bevy::mesh::MeshTag(0),
+                bevy::mesh::MeshTag::new(0),
                 // Every kind, the lava and slime hum too.
                 LiquidSoundSource {
                     nibble: lq.sound_nibble,

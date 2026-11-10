@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use bevy::prelude::*;
 use kira::effect::reverb::{ReverbBuilder, ReverbHandle};
 use kira::effect::volume_control::{VolumeControlBuilder, VolumeControlHandle};
@@ -670,7 +670,10 @@ fn freeverb_projection(p: &SoundProvider) -> (f64, f64, Decibels) {
 
 /// Decode audio-file bytes (WAV incl. IMA-ADPCM, MP3) into a ready-to-play SFX sound.
 pub(crate) fn sfx_from_bytes(bytes: Vec<u8>) -> Result<StaticSoundData> {
-    StaticSoundData::from_cursor(std::io::Cursor::new(bytes)).context("decoding sfx")
+    anyhow::Context::context(
+        StaticSoundData::from_cursor(std::io::Cursor::new(bytes)),
+        "decoding sfx",
+    )
 }
 
 /// Decode a looping bed whole. fork: web — the browser's bed path, which cannot stream; native
@@ -717,12 +720,14 @@ where
     R: std::io::Read + std::io::Seek + Send + Sync + 'static,
 {
     let armed = Arc::new(AtomicBool::new(false));
-    let data = StreamingSoundData::from_media_source(PromotingSource {
-        inner: source,
-        len,
-        armed: armed.clone(),
-    })
-    .context("opening stream")?;
+    let data = anyhow::Context::context(
+        StreamingSoundData::from_media_source(PromotingSource {
+            inner: source,
+            len,
+            armed: armed.clone(),
+        }),
+        "opening stream",
+    )?;
     armed.store(true, Ordering::Relaxed);
     Ok(data)
 }

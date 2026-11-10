@@ -157,6 +157,7 @@ impl PropProbes {
 /// One publish of the probe table to the render world: the rows written since the last one, in
 /// slot order, numbered so the render side applies each publish once.
 #[derive(Resource, Clone, Default, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub(crate) struct PropProbeExtract {
     changes: Arc<Vec<(u16, Row)>>,
     seq: u64,

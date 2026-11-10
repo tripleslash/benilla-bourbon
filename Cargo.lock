@@ -895,6 +895,7 @@ dependencies = [
  "bevy_render",
  "bytemuck",
  "dlss_wgpu",
+ "glam 0.33.12",
  "image",
  "libloading",
  "naga",

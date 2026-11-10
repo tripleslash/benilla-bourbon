@@ -398,8 +398,8 @@ pub(crate) fn update_ground_shade(
             else {
                 continue;
             };
-            if shade_of(tag.0, ext) != byte {
-                tag.0 = with_shade(tag.0, byte, ext);
+            if shade_of(tag.value, ext) != byte {
+                tag.value = with_shade(tag.value, byte, ext);
             }
         }
     }
@@ -422,8 +422,8 @@ pub(crate) fn update_ground_shade(
         let Some(byte) = card_root_shade(&root_shade, &child_of, card.follows()) else {
             continue; // a fixed terrain doodad's card: its shade rides the material selector
         };
-        if shade_of(tag.0, ext) != byte {
-            tag.0 = with_shade(tag.0, byte, ext);
+        if shade_of(tag.value, ext) != byte {
+            tag.value = with_shade(tag.value, byte, ext);
         }
     }
 }
@@ -481,9 +481,9 @@ mod tests {
         app.init_resource::<ShadeDirtyRoots>()
             .add_systems(Update, detect_shade_reclaims);
         let root = app.world_mut().spawn(GroundShade::default()).id();
-        let part = app.world_mut().spawn((MeshTag(7), ChildOf(root))).id();
+        let part = app.world_mut().spawn((MeshTag::new(7), ChildOf(root))).id();
         let other = app.world_mut().spawn(GroundShade::default()).id();
-        app.world_mut().spawn((MeshTag(9), ChildOf(other)));
+        app.world_mut().spawn((MeshTag::new(9), ChildOf(other)));
 
         app.update(); // both parts are Added ⇒ both roots flagged
         let dirty = |app: &App| {
@@ -495,7 +495,7 @@ mod tests {
         app.update(); // nobody wrote ⇒ quiet
         assert_eq!(dirty(&app), (false, false), "a settled frame flags nothing");
 
-        app.world_mut().get_mut::<MeshTag>(part).unwrap().0 = 42;
+        app.world_mut().get_mut::<MeshTag>(part).unwrap().value = 42;
         app.update();
         assert_eq!(
             dirty(&app),
@@ -531,7 +531,7 @@ mod tests {
                     Vec3::ZERO,
                     root,
                 ),
-                MeshTag(0),
+                MeshTag::new(0),
             ))
             .id();
         let mut sys = IntoSystem::into_system(update_ground_shade);
@@ -539,7 +539,10 @@ mod tests {
         let ext = exterior_payload(false, false).unwrap();
         sys.run((), &mut world).unwrap();
         let lit = shade_byte(LIT_T);
-        assert_eq!(shade_of(world.get::<MeshTag>(card).unwrap().0, ext), lit);
+        assert_eq!(
+            shade_of(world.get::<MeshTag>(card).unwrap().value, ext),
+            lit
+        );
         sys.run((), &mut world).unwrap();
         let ticks = |w: &World| {
             (
@@ -564,7 +567,7 @@ mod tests {
         }
         sys.run((), &mut world).unwrap();
         assert_eq!(
-            shade_of(world.get::<MeshTag>(card).unwrap().0, ext),
+            shade_of(world.get::<MeshTag>(card).unwrap().value, ext),
             255,
             "the moved byte reaches the card"
         );
@@ -580,12 +583,16 @@ mod tests {
         let root = app.world_mut().spawn(GroundShade::default()).id();
         let part = app
             .world_mut()
-            .spawn((MeshTag(7), ChildOf(root), ParkedMesh(Handle::default())))
+            .spawn((
+                MeshTag::new(7),
+                ChildOf(root),
+                ParkedMesh(Handle::default()),
+            ))
             .id();
         app.update();
         let dirty = |app: &App| app.world().resource::<ShadeDirtyRoots>().0.contains(&root);
         assert!(!dirty(&app), "a parked part is not watched");
-        app.world_mut().get_mut::<MeshTag>(part).unwrap().0 = 42;
+        app.world_mut().get_mut::<MeshTag>(part).unwrap().value = 42;
         app.update();
         assert!(!dirty(&app), "nor its tag writes while parked");
         app.world_mut().entity_mut(part).remove::<ParkedMesh>();
@@ -620,7 +627,7 @@ mod tests {
                     Vec3::ZERO,
                     root,
                 ),
-                MeshTag(0),
+                MeshTag::new(0),
                 ParkedMesh(Handle::default()),
             ))
             .id();
@@ -629,14 +636,14 @@ mod tests {
         let ext = exterior_payload(false, false).unwrap();
         sys.run((), &mut world).unwrap();
         assert_eq!(
-            world.get::<MeshTag>(card).unwrap().0,
+            world.get::<MeshTag>(card).unwrap().value,
             0,
             "parked: untouched"
         );
         world.entity_mut(card).remove::<ParkedMesh>();
         sys.run((), &mut world).unwrap();
         assert_eq!(
-            shade_of(world.get::<MeshTag>(card).unwrap().0, ext),
+            shade_of(world.get::<MeshTag>(card).unwrap().value, ext),
             shade_byte(LIT_T),
             "unparked: the root's byte"
         );

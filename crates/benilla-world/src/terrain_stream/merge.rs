@@ -595,7 +595,7 @@ fn spawn_blob(
         MeshMaterial3d(mat.clone()),
         Transform::from_translation(center),
         ModelPart { kind, blend },
-        MeshTag(tag),
+        MeshTag::new(tag),
         Aabb::from_min_max(mn, mx),
         NoAutoAabb,
         // The draw's own identity; the members answer the pick.
@@ -783,7 +783,7 @@ mod tests {
         assert_eq!(&*vis.groups, &[3, 5]);
         // The tag keeps the interior-fog bit; its slot half is dead (probe 0).
         let tag = app.world().get::<MeshTag>(blob).unwrap();
-        assert_eq!(tag.0, crate::mesh_tag::probe_bits(0));
+        assert_eq!(tag.value, crate::mesh_tag::probe_bits(0));
         let mesh3d = app.world().get::<Mesh3d>(blob).unwrap().0.clone();
         let meshes = app.world().resource::<Assets<Mesh>>();
         let mesh = meshes.get(&mesh3d).unwrap();

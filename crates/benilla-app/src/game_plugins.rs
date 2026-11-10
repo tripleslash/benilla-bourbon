@@ -335,8 +335,9 @@ pub(crate) mod schedule_tests {
         );
         // With no render app there is no extract, whose plugin keeps the render-sync queue: a
         // synced component's removal hook (the world shadow's sun leaving) writes to it.
-        if !app.is_plugin_added::<bevy::render::sync_world::SyncWorldPlugin>() {
-            app.add_plugins(bevy::render::sync_world::SyncWorldPlugin);
+        type SyncWorld = bevy::extract::sync_world::SyncWorldPlugin<bevy::render::RenderApp>;
+        if !app.is_plugin_added::<SyncWorld>() {
+            app.add_plugins(SyncWorld::default());
         }
         app.add_plugins(benilla_world::world_plugins::WorldPlugins);
         app.add_plugins(GamePlugins {
@@ -489,26 +490,15 @@ pub(crate) mod schedule_tests {
             // `initialize` fills the systems' access (the build would run it anyway); done
             // first so pass 1 can read it while the graph still holds the systems.
             schedule.graph_mut().systems.initialize(world);
-            // Each system's access, read back by initializing it again: 0.19 keeps the stored
-            // access private, and a function system's `initialize` keeps its state and only
-            // recomputes the access.
-            let accesses: HashMap<_, _> = {
-                let systems = &mut schedule.graph_mut().systems;
-                let keys: Vec<_> = systems.iter().map(|(key, _, _)| key).collect();
-                keys.into_iter()
-                    .filter_map(|key| {
-                        let system = systems.get_mut(key)?;
-                        Some((key, bevy::ecs::system::System::initialize(system, world)))
-                    })
-                    .collect()
-            };
+            // Each system's access, as the schedule stores it.
+            let accesses = crate::vm_pass::system_accesses(schedule, world);
             let vm = world
                 .components()
                 .get_id(TypeId::of::<benilla_ui::script::UiScript>());
             let host = {
-                use bevy::ecs::system::{IntoSystem, System};
+                use bevy::ecs::system::IntoSystem;
                 let mut host = IntoSystem::into_system(|_: crate::script_calls::ScriptCallHost| {});
-                System::initialize(&mut host, world)
+                crate::vm_pass::Declared::initialize(&mut host, world).into_set()
             };
             // Pass 1, before the build: the graph still holds the systems.
             let graph = schedule.graph();
@@ -534,7 +524,7 @@ pub(crate) mod schedule_tests {
                     if access.has_read(vm) || access.has_write(vm) {
                         holds_vm.insert(key);
                     }
-                    let mut with_host = set.clone();
+                    let mut with_host: bevy::ecs::query::FilteredAccessSet = (**set).clone();
                     with_host.extend(host.clone());
                     if with_host.combined_access() == access {
                         hosted.insert(key);
@@ -702,18 +692,8 @@ pub(crate) mod schedule_tests {
         app.world_mut()
             .schedule_scope(label.intern(), |world, schedule| {
                 schedule.graph_mut().systems.initialize(world);
-                // 0.19 keeps the stored access private: read it back by initializing again, as
-                // [`census`] does.
-                let accesses: HashMap<_, _> = {
-                    let systems = &mut schedule.graph_mut().systems;
-                    let keys: Vec<_> = systems.iter().map(|(key, _, _)| key).collect();
-                    keys.into_iter()
-                        .filter_map(|key| {
-                            let system = systems.get_mut(key)?;
-                            Some((key, bevy::ecs::system::System::initialize(system, world)))
-                        })
-                        .collect()
-                };
+                // The stored access, as [`census`] reads it.
+                let accesses = crate::vm_pass::system_accesses(schedule, world);
                 let Some(id) = world.components().get_id(TypeId::of::<T>()) else {
                     return Vec::new();
                 };
@@ -722,10 +702,10 @@ pub(crate) mod schedule_tests {
                 for (key, system, conds) in graph.systems.iter() {
                     // A write by name, not one of 0.19's inverted ones (bevy's `animate_targets`
                     // writes every component but a few, an `EntityMutExcept`), which names no
-                    // resource in particular: `try_writes` refuses an inverted set.
+                    // resource in particular: an inverted set is no finite set.
                     let writes = accesses.get(&key).is_some_and(|a| {
                         let c = a.combined_access();
-                        c.has_write(id) && c.try_writes().is_ok()
+                        c.has_write(id) && c.writes().as_finite_set().is_some()
                     });
                     if !writes {
                         continue;
@@ -881,8 +861,8 @@ pub(crate) mod schedule_tests {
                 vm: comps.get_id(TypeId::of::<benilla_ui::script::UiScript>()),
                 non_send: comps
                     .iter_registered()
-                    .filter(|info| !info.is_send_and_sync())
-                    .map(|info| info.id())
+                    .filter(|(_, info)| !info.is_send_and_sync())
+                    .map(|(id, _)| id)
                     .collect(),
                 caches: resolve(Self::CACHES),
                 sinks: resolve(Self::SINKS),

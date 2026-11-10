@@ -52,6 +52,7 @@ use super::{GxCellDraw, GxGpuCache, StaticGxView};
 use crate::modern::caps::HwCaps;
 use crate::par_encode::Recorder;
 use crate::static_gx::meshlet::GxMeshlets;
+use bevy::material::descriptor::{MeshPipelineDescriptor, MeshState, TaskState};
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use bevy::render::mesh::allocator::{MeshAllocator, MeshAllocatorSettings};
@@ -215,19 +216,40 @@ pub(super) fn queue_pipeline(
         ShaderDefVal::from("GX_MESHLETS"),
         ShaderDefVal::UInt("GX_MESH_GROUP".into(), desc.layout.len() as u32),
     ];
-    let mut mesh = desc.clone();
-    mesh.label = mesh.label.map(|label| format!("{label} meshlets").into());
-    mesh.layout.push(mesh_layout());
-    mesh.immediate_size = IMMEDIATE_BYTES;
-    mesh.vertex.shader = MESH_SHADER;
-    mesh.vertex.entry_point = Some(entry.into());
-    mesh.vertex.buffers.clear();
-    mesh.vertex.shader_defs.extend(defs.iter().cloned());
-    if let Some(fragment) = &mut mesh.fragment {
+    let mut layout = desc.layout.clone();
+    layout.push(mesh_layout());
+    let mut stage_defs = desc.vertex.shader_defs.clone();
+    stage_defs.extend(defs.iter().cloned());
+    let fragment = desc.fragment.clone().map(|mut fragment| {
         fragment.shader = MESH_SHADER;
         fragment.shader_defs.extend(defs);
-    }
-    cache.queue_mesh_pipeline(mesh, Some(TASK_ENTRY.into()))
+        fragment
+    });
+    cache.queue_mesh_pipeline(MeshPipelineDescriptor {
+        label: desc
+            .label
+            .clone()
+            .map(|label| format!("{label} meshlets").into()),
+        layout,
+        immediate_size: IMMEDIATE_BYTES,
+        task: Some(TaskState {
+            shader: MESH_SHADER,
+            shader_defs: stage_defs.clone(),
+            entry_point: Some(TASK_ENTRY.into()),
+            constants: Vec::new(),
+        }),
+        mesh: MeshState {
+            shader: MESH_SHADER,
+            shader_defs: stage_defs,
+            entry_point: Some(entry.into()),
+            constants: Vec::new(),
+        },
+        primitive: desc.primitive,
+        depth_stencil: desc.depth_stencil.clone(),
+        multisample: desc.multisample,
+        fragment,
+        zero_initialize_workgroup_memory: desc.zero_initialize_workgroup_memory,
+    })
 }
 
 /// One static_gx view's share of the lane.

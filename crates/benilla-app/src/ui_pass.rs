@@ -393,38 +393,48 @@ impl Material2d for UiQuadMaterial {
     }
 
     fn specialize(
+        _pipeline: &bevy::sprite_render::Material2dPipeline,
         descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
         _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
         key: Material2dKey<Self>,
     ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
-        if let Some(fragment) = descriptor.fragment.as_mut() {
-            if let Some(target) = fragment.targets.first_mut().and_then(|t| t.as_mut()) {
-                let component = |src_factor, dst_factor| BlendComponent {
-                    src_factor,
-                    dst_factor,
-                    operation: BlendOperation::Add,
-                };
-                target.blend = Some(if key.bind_group_data.modulate {
-                    // EGxBlend 4, `DestColor/Zero`: the shader emits the tinted texel, so the
-                    // target is multiplied by it; its alpha stays.
-                    BlendState {
-                        color: component(BlendFactor::Dst, BlendFactor::Zero),
-                        alpha: component(BlendFactor::Zero, BlendFactor::One),
-                    }
-                } else {
-                    // `(One, OneMinusSrcAlpha)` over gamma values: the shader emits `(rgb·a, a)`
-                    // for BLEND, `(rgb·a, 0)` for ADD and `(rgb, 1)` for DISABLE and a passing
-                    // ALPHAKEY texel, so this one state is EGxBlend 0 to 3, clamped at each write
-                    // like the reference's 8-bit backbuffer.
-                    let premultiplied = component(BlendFactor::One, BlendFactor::OneMinusSrcAlpha);
-                    BlendState {
-                        color: premultiplied,
-                        alpha: premultiplied,
-                    }
-                });
-            }
-        }
+        set_blend(descriptor, key.bind_group_data.modulate);
         Ok(())
+    }
+}
+
+/// The blend state of [`UiQuadMaterial`]'s pipeline: EGxBlend 4 (MOD) when `modulate`, else the
+/// premultiplied state that serves EGxBlend 0 to 3.
+fn set_blend(
+    descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
+    modulate: bool,
+) {
+    if let Some(fragment) = descriptor.fragment.as_mut() {
+        if let Some(target) = fragment.targets.first_mut().and_then(|t| t.as_mut()) {
+            let component = |src_factor, dst_factor| BlendComponent {
+                src_factor,
+                dst_factor,
+                operation: BlendOperation::Add,
+            };
+            target.blend = Some(if modulate {
+                // EGxBlend 4, `DestColor/Zero`: the shader emits the tinted texel, so the
+                // target is multiplied by it; its alpha stays.
+                BlendState {
+                    color: component(BlendFactor::Dst, BlendFactor::Zero),
+                    alpha: component(BlendFactor::Zero, BlendFactor::One),
+                }
+            } else {
+                // `(One, OneMinusSrcAlpha)` over gamma values: the shader emits `(rgb·a, a)`
+                // for BLEND, `(rgb·a, 0)` for ADD and `(rgb, 1)` for DISABLE and a passing
+                // ALPHAKEY texel, so this one state is EGxBlend 0 to 3, clamped at each write
+                // like the reference's 8-bit backbuffer.
+                let premultiplied = component(BlendFactor::One, BlendFactor::OneMinusSrcAlpha);
+                BlendState {
+                    color: premultiplied,
+                    alpha: premultiplied,
+                }
+            });
+        }
     }
 }
 
@@ -901,7 +911,7 @@ fn apply_colour_patch(
                 *t = Some(tag);
             }
             if let Some(&entity) = pools.entities.get(slot) {
-                commands.entity(entity).insert(MeshTag(tag));
+                commands.entity(entity).insert(MeshTag::new(tag));
             }
         }
     }
@@ -1426,7 +1436,7 @@ fn rebuild_ui_mesh(
             if pools.tags[used] != Some(tag) {
                 pools.tags[used] = Some(tag);
                 if let Some(&entity) = pools.entities.get(used) {
-                    commands.entity(entity).insert(MeshTag(tag));
+                    commands.entity(entity).insert(MeshTag::new(tag));
                 }
             }
             let d = SlotPan::moved(d);
@@ -1511,7 +1521,7 @@ fn rebuild_ui_mesh(
                 commands.entity(entity).insert((
                     Mesh2d(mesh_handle),
                     MeshMaterial2d(material_handle),
-                    MeshTag(tag),
+                    MeshTag::new(tag),
                     Transform::from_xyz(0.0, 0.0, z),
                 ));
             }
@@ -1521,7 +1531,7 @@ fn rebuild_ui_mesh(
                         UiQuadBatch,
                         Mesh2d(mesh_handle),
                         MeshMaterial2d(material_handle),
-                        MeshTag(tag),
+                        MeshTag::new(tag),
                         Transform::from_xyz(0.0, 0.0, z),
                         ui_render_layers(),
                     ))
@@ -1618,7 +1628,7 @@ mod tests {
             .world_mut()
             .query_filtered::<(&Mesh2d, &MeshTag, &Transform), With<UiQuadBatch>>()
             .iter(app.world())
-            .map(|(m, t, tf)| (m.0.clone(), t.0, tf.translation.z))
+            .map(|(m, t, tf)| (m.0.clone(), t.value, tf.translation.z))
             .collect();
         let meshes = app.world().resource::<Assets<Mesh>>();
         let mut rows: Vec<(Vec<[f32; 4]>, u32, f32)> = rows
@@ -2155,17 +2165,7 @@ mod tests {
                 }),
                 ..default()
             };
-            let layout = tile_quad_mesh()
-                .get_mesh_vertex_buffer_layout(&mut bevy::mesh::MeshVertexBufferLayouts::default());
-            UiQuadMaterial::specialize(
-                &mut descriptor,
-                &layout,
-                Material2dKey {
-                    mesh_key: bevy::sprite_render::Mesh2dPipelineKey::empty(),
-                    bind_group_data: UiQuadKey { modulate },
-                },
-            )
-            .unwrap();
+            set_blend(&mut descriptor, modulate);
             descriptor.fragment.unwrap().targets[0]
                 .clone()
                 .unwrap()

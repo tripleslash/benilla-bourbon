@@ -5,7 +5,7 @@
 //! beside state of its own pairs them in a [`Pair`].
 
 use bevy::ecs::change_detection::Tick;
-use bevy::ecs::query::FilteredAccessSet;
+use bevy::ecs::system::SystemAccess;
 use bevy::ecs::system::{SystemMeta, SystemParam, SystemParamItem, SystemParamValidationError};
 use bevy::ecs::world::unsafe_world_cell::UnsafeWorldCell;
 use bevy::ecs::world::{DeferredWorld, World};
@@ -16,12 +16,12 @@ use bevy::ecs::world::{DeferredWorld, World};
 pub(crate) fn gather<P: SystemParam>(
     state: &P::State,
     meta: &mut SystemMeta,
-    outside: &FilteredAccessSet,
-    gathered: &mut FilteredAccessSet,
+    outside: &SystemAccess,
+    gathered: &mut SystemAccess,
     world: &mut World,
     member: &str,
 ) {
-    let mut alone = FilteredAccessSet::new();
+    let mut alone = SystemAccess::default();
     P::init_access(state, meta, &mut alone, world);
     assert!(
         outside.is_compatible(&alone),
@@ -78,10 +78,10 @@ macro_rules! disjoint_set {
             fn init_access(
                 state: &Self::State,
                 meta: &mut bevy::ecs::system::SystemMeta,
-                access: &mut bevy::ecs::query::FilteredAccessSet,
+                access: &mut bevy::ecs::system::SystemAccess,
                 world: &mut bevy::ecs::world::World,
             ) {
-                let mut gathered = bevy::ecs::query::FilteredAccessSet::new();
+                let mut gathered = bevy::ecs::system::SystemAccess::default();
                 $(
                     $(#[cfg($cfg)])?
                     crate::script_calls::disjoint::gather::<$ty>(
@@ -224,10 +224,10 @@ unsafe impl<A: SystemParam, B: SystemParam> SystemParam for Pair<'_, '_, A, B> {
     fn init_access(
         state: &Self::State,
         meta: &mut SystemMeta,
-        access: &mut FilteredAccessSet,
+        access: &mut SystemAccess,
         world: &mut World,
     ) {
-        let mut gathered = FilteredAccessSet::new();
+        let mut gathered = SystemAccess::default();
         gather::<A>(&state.0, meta, access, &mut gathered, world, "p0");
         gather::<B>(&state.1, meta, access, &mut gathered, world, "p1");
         access.extend(gathered);
@@ -356,9 +356,9 @@ fn written_at(world: UnsafeWorldCell, tick: Tick) -> bool {
     }
     let components = world.components();
     storages.tables.iter().any(|table| {
-        components.iter_registered().any(|info| {
+        components.iter_registered().any(|(id, _)| {
             table
-                .get_changed_ticks_slice_for(info.id())
+                .get_changed_ticks_slice_for(id)
                 // SAFETY: as above.
                 .is_some_and(|ticks| {
                     ticks

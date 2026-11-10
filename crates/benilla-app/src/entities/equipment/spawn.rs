@@ -569,7 +569,7 @@ fn spawn_slot(
             // Lit as its wearer, whose light collector an equipped item aliases
             // (`[item+0x3b8] = [wearer+0x3b8]`, `0x718960`). Every part gets a tag, interior
             // variant or not, so the tint and the ground shade reach it.
-            child.insert(MeshTag(benilla_world::mesh_tag::spawn_tag(
+            child.insert(MeshTag::new(benilla_world::mesh_tag::spawn_tag(
                 rig_slot, tag_alpha,
             )));
             // The build-time bound, as the render mesh is `RENDER_WORLD`-only; none when skinned.
@@ -637,7 +637,7 @@ fn spawn_slot(
             card.insert(aabb);
         }
         // Tagged and lit as its mesh siblings, anchored at the wearer.
-        card.insert(MeshTag(benilla_world::mesh_tag::spawn_tag(
+        card.insert(MeshTag::new(benilla_world::mesh_tag::spawn_tag(
             rig_slot, tag_alpha,
         )));
         if let Some(lit) = part_interior_lit(
@@ -906,7 +906,7 @@ mod tests {
             .world_mut()
             .query::<&MeshTag>()
             .iter(app.world())
-            .map(|t| t.0)
+            .map(|t| t.value)
             .collect();
         // The item root's slot is the one that is not the wearer's.
         let item_rig = app
@@ -1010,7 +1010,7 @@ mod tests {
             .world_mut()
             .query::<&MeshTag>()
             .iter(app.world())
-            .map(|t| t.0)
+            .map(|t| t.value)
             .collect();
         tags.sort_unstable();
         (tags, slot)
@@ -1752,7 +1752,7 @@ mod tests {
         );
         assert_eq!(mat.0, blend, "…and opens ON the blend twin, not the cutout");
         assert!(
-            benilla_world::mesh_tag::alpha_of(tag.0) <= 1.0 / 63.0,
+            benilla_world::mesh_tag::alpha_of(tag.value) <= 1.0 / 63.0,
             "…at the encoder's ≈0 floor, so it never flashes opaque for a frame",
         );
         let anim = anim.expect("the batch's authored alpha rides the card");
@@ -1842,7 +1842,7 @@ mod tests {
         let fm = fm.expect("a FadeMaterials record, so despawn/stealth ramps re-arm it");
         assert_eq!(fm.blend, steady, "…whose 'twin' is the steady self");
         assert!(
-            benilla_world::mesh_tag::alpha_of(tag.0) <= 1.0 / 63.0,
+            benilla_world::mesh_tag::alpha_of(tag.value) <= 1.0 / 63.0,
             "…opening at tag alpha ≈ 0: the shader's identity-lerp makes it contribute nothing",
         );
     }

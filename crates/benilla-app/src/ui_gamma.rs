@@ -31,6 +31,7 @@ use benilla_world::final_pass::FinalPassTarget;
 /// Marks the camera whose target holds the gamma-composited UI, with the [`DisplayGamma`]
 /// exponent and the [`DisplayBrightness`] lift the decode applies.
 #[derive(Component, Clone, Copy, ExtractComponent)]
+#[extract_app(bevy::render::RenderApp)]
 pub(crate) struct UiGammaLane {
     /// The clamped `gamma` CVar; `1.0` is the identity ramp.
     pub(crate) gamma: f32,
@@ -141,6 +142,7 @@ impl SpecializedRenderPipeline for UiGammaPipeline {
             layout: vec![self.layout.clone()],
             vertex: self.fullscreen.to_vertex_state(),
             fragment: Some(FragmentState {
+                constants: Default::default(),
                 shader: self.shader.clone(),
                 shader_defs: vec![],
                 entry_point: Some("fs_decode".into()),

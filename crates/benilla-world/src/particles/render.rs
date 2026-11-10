@@ -1256,8 +1256,11 @@ mod tests {
     fn decal_depth_ties_only_through_the_mesh_matrix() {
         // A floor vertex at Kalimdor-scale coordinates (bevy = (−wow.y, wow.z, −wow.x)).
         let ground = Vec3::new(3807.13, 7.42, 7093.87);
-        let clip_from_view =
-            Mat4::perspective_infinite_reverse_rh(std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.1);
+        let clip_from_view = bevy::math::proj::perspective_infinite_reverse(
+            std::f32::consts::FRAC_PI_4,
+            16.0 / 9.0,
+            0.1,
+        );
         let dir = Vec3::new(0.35, 0.55, 0.76).normalize();
         let mut worst_route_over_bias = 0.0_f32;
         for step in 0..80 {
@@ -1265,7 +1268,8 @@ mod tests {
             let d = 1.5 + step as f32 * 0.5;
             let cam = ground + dir * d;
             // Bevy's own construction (`ExtractedView`), the rounding the mesh shaders see.
-            let world_from_view = Mat4::look_at_rh(cam, ground, Vec3::Y).inverse();
+            let world_from_view =
+                glam::camera::rh::view::look_at_mat4(cam, ground, Vec3::Y).inverse();
             let view_from_world = world_from_view.inverse();
             let clip_from_world = clip_from_view * view_from_world;
             let mesh = depth_world(&clip_from_world, ground);
@@ -1294,8 +1298,11 @@ mod tests {
         use crate::sky_order::Rung;
         // The Stormwind gate ramp, wow (−8843.41, 642.68, 95.92) in bevy axes.
         let ground = Vec3::new(-642.68, 95.92, 8843.41);
-        let clip_from_view =
-            Mat4::perspective_infinite_reverse_rh(std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.1);
+        let clip_from_view = bevy::math::proj::perspective_infinite_reverse(
+            std::f32::consts::FRAC_PI_4,
+            16.0 / 9.0,
+            0.1,
+        );
         let ulp = |v: f32| f32::from_bits(v.to_bits() + 1) - v;
         // 3 ulps per world axis, signs free: the worst normal offset is the absolute sum.
         let worst_normal_offset = |n: Vec3| {
@@ -1317,7 +1324,8 @@ mod tests {
                 for step in 0..80 {
                     let d = 1.0 + step as f32 * 0.5;
                     let cam = ground + cam_dir * d;
-                    let world_from_view = Mat4::look_at_rh(cam, ground, Vec3::Y).inverse();
+                    let world_from_view =
+                        glam::camera::rh::view::look_at_mat4(cam, ground, Vec3::Y).inverse();
                     let view_from_world = world_from_view.inverse();
                     let clip_from_world = clip_from_view * view_from_world;
                     let depth = depth_world(&clip_from_world, ground);

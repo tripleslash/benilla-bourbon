@@ -108,10 +108,10 @@ fn publish_compile_burst(
     let bursting = warm.spawned_at.is_some() && !warm.done;
     benilla_world::thread_qos::COMPILE_BURST.store(bursting, Ordering::Relaxed);
     if let Some(mut tree_opt) = tree_opt {
-        let use_async_tasks = !bursting
-            && avian3d::collider_tree::ColliderTreeOptimization::default().use_async_tasks;
-        if tree_opt.use_async_tasks != use_async_tasks {
-            tree_opt.use_async_tasks = use_async_tasks;
+        let use_compute_task = !bursting
+            && avian3d::collider_tree::ColliderTreeOptimization::default().use_compute_task;
+        if tree_opt.use_compute_task != use_compute_task {
+            tree_opt.use_compute_task = use_compute_task;
         }
     }
 }
@@ -193,7 +193,7 @@ fn describe(desc: &PipelineDescriptor) -> String {
         let mut v: Vec<String> = d
             .iter()
             .map(|d| match d {
-                bevy::shader::ShaderDefVal::Bool(k, true) => k.clone(),
+                bevy::shader::ShaderDefVal::Bool(k, true) => k.to_string(),
                 bevy::shader::ShaderDefVal::Bool(k, false) => format!("!{k}"),
                 bevy::shader::ShaderDefVal::Int(k, i) => format!("{k}={i}"),
                 bevy::shader::ShaderDefVal::UInt(k, u) => format!("{k}={u}"),
@@ -262,6 +262,24 @@ fn describe(desc: &PipelineDescriptor) -> String {
                 .path()
                 .map_or_else(|| format!("{:?}", d.shader.id()), |p| p.to_string());
             format!("label={label} compute={cs} defs=[{}]", defs(&d.shader_defs))
+        }
+        PipelineDescriptor::MeshPipelineDescriptor(d) => {
+            let label = d.label.as_deref().unwrap_or("?");
+            let ms = d
+                .mesh
+                .shader
+                .path()
+                .map_or_else(|| format!("{:?}", d.mesh.shader.id()), |p| p.to_string());
+            let task = d.task.as_ref().map_or_else(
+                || String::from("none"),
+                |t| t.entry_point.as_deref().unwrap_or("?").to_string(),
+            );
+            format!(
+                "label={label} mesh={ms} mesh_defs=[{}] task={task} cull={:?} samples={}",
+                defs(&d.mesh.shader_defs),
+                d.primitive.cull_mode,
+                d.multisample.count,
+            )
         }
     }
 }

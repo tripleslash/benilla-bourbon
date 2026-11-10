@@ -55,6 +55,7 @@ pub fn pack(rgb: [u8; 3]) -> u32 {
 /// rig slot. The glue scene is on it: its character is the instance the reference tints
 /// (`0x472939` into `0x710cf0`, the char-select ghost) and has a slot of its own.
 #[derive(Resource, Clone, Default, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct InstanceTintMirrors(
     pub std::collections::HashMap<&'static str, bevy::render::render_resource::Buffer>,
 );
@@ -62,6 +63,7 @@ pub struct InstanceTintMirrors(
 /// The per-slot tint table, indexed by the `MeshTag` rig slot; `Arc`-shared for a cheap extract
 /// and generation-stamped so an untinted world uploads nothing.
 #[derive(Resource, Clone, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct InstanceTints {
     slots: Arc<Vec<u32>>,
     generation: u64,

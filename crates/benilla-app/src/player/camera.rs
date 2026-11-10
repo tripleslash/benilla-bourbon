@@ -2059,9 +2059,9 @@ pub(crate) fn apply_self_model_fade(
         // From the card's authored factor (`MatAnim::current`, written first by
         // `entities::apply_unit_mat_alpha`), not the tag, so the animation survives the fade.
         let authored = anim.map_or(1.0, |a| a.current);
-        let bits = benilla_world::mesh_tag::with_alpha(tag.0, authored * alpha);
-        if tag.0 != bits {
-            tag.0 = bits;
+        let bits = benilla_world::mesh_tag::with_alpha(tag.value, authored * alpha);
+        if tag.value != bits {
+            tag.value = bits;
         }
         // The blend twin too: an additive card fades by alpha alone (`wow_model.wgsl`), an opaque
         // one only through the twin. `Visibility` is the card's hidden-owner mirror's.
@@ -2114,9 +2114,9 @@ fn apply_self_fade_to_descendants(
             if *vis != Visibility::Inherited {
                 *vis = Visibility::Inherited;
             }
-            let bits = benilla_world::mesh_tag::with_alpha(tag.0, 1.0);
-            if tag.0 != bits {
-                tag.0 = bits;
+            let bits = benilla_world::mesh_tag::with_alpha(tag.value, 1.0);
+            if tag.value != bits {
+                tag.value = bits;
             }
             let want = benilla_world::model_render::far_resolved(
                 fm.material_for(lit, false),
@@ -2142,9 +2142,9 @@ fn apply_self_fade_to_descendants(
             }
             // Feathering: the blend twin, with the alpha in the tag's alpha field (`with_alpha`
             // keeps the ground-shade byte, so a shadowed avatar does not flash lit).
-            let bits = benilla_world::mesh_tag::with_alpha(tag.0, alpha);
-            if tag.0 != bits {
-                tag.0 = bits;
+            let bits = benilla_world::mesh_tag::with_alpha(tag.value, alpha);
+            if tag.value != bits {
+                tag.value = bits;
             }
             // A bake-classified part feathers on the probe-lit blend twin, so the room light rides
             // the fade; `material_for` is shared with the appear/despawn ramp, so both pick alike.
@@ -3139,7 +3139,7 @@ mod tests {
             .world_mut()
             .spawn((
                 BillboardCard::following_joint(&info, joint),
-                MeshTag(alpha_bits(1.0)),
+                MeshTag::new(alpha_bits(1.0)),
             ))
             .id();
         // A brazier across the square: same mechanism, another model entirely.
@@ -3148,11 +3148,11 @@ mod tests {
             .world_mut()
             .spawn((
                 BillboardCard::following(&info, brazier_anchor),
-                MeshTag(alpha_bits(1.0)),
+                MeshTag::new(alpha_bits(1.0)),
             ))
             .id();
 
-        let tag_of = |app: &App, e: Entity| app.world().entity(e).get::<MeshTag>().unwrap().0;
+        let tag_of = |app: &App, e: Entity| app.world().entity(e).get::<MeshTag>().unwrap().value;
 
         app.world_mut()
             .resource_mut::<CameraControl>()

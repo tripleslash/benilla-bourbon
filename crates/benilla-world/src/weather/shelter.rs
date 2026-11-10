@@ -439,6 +439,7 @@ impl ShelterGrid {
 
 /// The render-world copy: the header every frame, the cells when they changed.
 #[derive(Resource, Clone, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct ShelterExtract {
     header: [[f32; 4]; HEADER_ROWS],
     cells: Arc<Vec<u32>>,

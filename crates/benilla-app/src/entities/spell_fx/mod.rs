@@ -265,7 +265,7 @@ pub(crate) fn attach_effect_visuals(
             if let (true, Some(_)) = (rigged, &part.skinned_mesh) {
                 child.insert((
                     benilla_world::rig_palette::RigPart(root),
-                    bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(rig_slot, 1.0)),
+                    bevy::mesh::MeshTag::new(benilla_world::mesh_tag::spawn_tag(rig_slot, 1.0)),
                 ));
             }
             // The alpha loops on this instance's clock; the sampler is the tag's only writer.
@@ -279,7 +279,7 @@ pub(crate) fn attach_effect_visuals(
                     0
                 };
                 child.insert((
-                    bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(
+                    bevy::mesh::MeshTag::new(benilla_world::mesh_tag::spawn_tag(
                         tag_slot,
                         mat_anim.current,
                     )),
@@ -318,7 +318,7 @@ pub(crate) fn attach_effect_visuals(
                 benilla_world::doodad_anim::MatAnim::driving_tag(anim.clone(), now, played_seq)
                     .following_host(seq_host);
             spawned.insert((
-                bevy::mesh::MeshTag(benilla_world::mesh_tag::spawn_tag(0, mat_anim.current)),
+                bevy::mesh::MeshTag::new(benilla_world::mesh_tag::spawn_tag(0, mat_anim.current)),
                 mat_anim,
             ));
         }

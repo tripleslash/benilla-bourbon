@@ -37,7 +37,7 @@ use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::sync_world::MainEntity;
 use bevy::render::texture::GpuImage;
-use bevy::render::view::{ExtractedView, ViewDepthTexture, ViewUniformOffset};
+use bevy::render::view::{ExtractedView, ViewDepthStencilTexture, ViewUniformOffset};
 use bevy::shader::ShaderDefVal;
 use bytemuck::{Pod, Zeroable};
 
@@ -72,6 +72,7 @@ pub struct MotionPart {
 
 /// This world frame's moving parts, extracted.
 #[derive(Resource, Default, Clone, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct FsrMotionParts {
     pub parts: Vec<MotionPart>,
     /// A skinned part was seen this world frame, fresh ones included: the next world frame may
@@ -457,12 +458,14 @@ pub(super) fn prepare_velocity(
                     label: Some("fsr_velocity".into()),
                     layout,
                     vertex: VertexState {
+                        constants: Default::default(),
                         shader: pipes.shader.clone(),
                         shader_defs: defs.clone(),
                         entry_point: Some("vertex".into()),
                         buffers: vec![vertex_layout],
                     },
                     fragment: Some(FragmentState {
+                        constants: Default::default(),
                         shader: pipes.shader.clone(),
                         shader_defs: defs,
                         entry_point: Some("fragment".into()),
@@ -563,7 +566,7 @@ pub(super) fn prepare_velocity(
 pub(super) fn fsr_velocity_pass(
     view: ViewQuery<(
         &FsrVelocityTarget,
-        &ViewDepthTexture,
+        &ViewDepthStencilTexture,
         &ExtractedView,
         &ViewUniformOffset,
     )>,
@@ -597,7 +600,7 @@ pub(super) fn fsr_velocity_pass(
                 },
             })],
             depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                view: depth.view(),
+                view: depth.attachment.depth_stencil_views().attachment_view(),
                 depth_ops: Some(Operations {
                     load: LoadOp::Load,
                     store: StoreOp::Store,
@@ -751,12 +754,14 @@ impl SpecializedRenderPipeline for EffectVelocityPipeline {
             label: Some("fsr_effect_velocity".into()),
             layout: layouts,
             vertex: VertexState {
+                constants: Default::default(),
                 shader: self.shader.clone(),
                 shader_defs: defs.clone(),
                 entry_point: Some("vertex".into()),
                 buffers,
             },
             fragment: Some(FragmentState {
+                constants: Default::default(),
                 shader: self.shader.clone(),
                 shader_defs: defs,
                 entry_point: Some("fragment".into()),

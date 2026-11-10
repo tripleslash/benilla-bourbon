@@ -34,6 +34,9 @@ webgpu = ["bevy/webgpu"]
 
 [dependencies]
 avian3d = "0.8"
+# `glam::camera::rh::view`, the view matrices glam 0.33 moved out of `Mat4` (bevy_math re-exports
+# only the projections, as `bevy::math::proj`). Must match bevy_math's glam.
+glam = "0.33"
 benilla-assets = { path = "../benilla-assets", default-features = false }
 benilla-formats = { path = "../benilla-formats", default-features = false }
 # No `benilla-protocol`: the engine renders a world and does not speak the protocol.

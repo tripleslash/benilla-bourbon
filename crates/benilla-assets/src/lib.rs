@@ -1088,7 +1088,7 @@ mod tests {
         for g in &geometries {
             let mesh = submesh_to_static_mesh(g);
             assert!(mesh.count_vertices() > 0, "submesh has vertices");
-            assert!(mesh.compute_aabb().is_some(), "static form yields an Aabb");
+            assert!(mesh.get_aabb().is_some(), "static form yields an Aabb");
             let skinned = submesh_to_skinned_mesh(g);
             assert_eq!(
                 skinned.count_vertices(),
@@ -1137,7 +1137,7 @@ mod tests {
         for g in &geometries {
             let mesh = submesh_to_static_mesh(g);
             assert!(mesh.count_vertices() > 0, "group submesh has vertices");
-            assert!(mesh.compute_aabb().is_some(), "static form yields an Aabb");
+            assert!(mesh.get_aabb().is_some(), "static form yields an Aabb");
         }
     }
 
@@ -1206,7 +1206,7 @@ mod tests {
                 "an MCNK cell is 9×9 + 8×8 vertices"
             );
             assert!(
-                mesh.compute_aabb().is_some(),
+                mesh.get_aabb().is_some(),
                 "a cell mesh must yield the Aabb the exterior cull fails open without"
             );
         }

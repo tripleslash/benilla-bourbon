@@ -452,6 +452,7 @@ pub struct WorldPointLight {
 
 /// The packed light for this frame, extracted for [`upload_light`].
 #[derive(Resource, Clone, Copy, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 struct WowLightData(LightStd430);
 
 impl Default for WowLightData {
@@ -474,6 +475,7 @@ impl Default for WowLightData {
 /// cell of the walls, whole 3 yd cells of stone stepped a tenth in brightness several times a
 /// second. The ranking reads this row and no flame can move it.
 #[derive(Resource, Clone, Copy, PartialEq, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct LightRank(pub [f32; MAX_POINT_LIGHTS]);
 
 impl Default for LightRank {
@@ -485,6 +487,7 @@ impl Default for LightRank {
 /// The persistent storage buffer every material binds, created by [`new_shared_light_buffer`] and
 /// extracted to the render world; a `Buffer` clone shares the GPU resource.
 #[derive(Resource, Clone, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct SharedLightBuffer(pub Buffer);
 
 /// Registers the light pack, the probe publish, their extracts and the render-world uploads.

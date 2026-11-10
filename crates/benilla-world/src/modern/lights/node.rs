@@ -76,6 +76,7 @@ fn init_pipelines(
         mapped_at_creation: false,
     });
     let bin = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        constants: Default::default(),
         label: Some("modern_light_bin".into()),
         layout: vec![layout.clone()],
         immediate_size: 0,

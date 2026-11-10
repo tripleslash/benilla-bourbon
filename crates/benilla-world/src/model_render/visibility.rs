@@ -216,7 +216,7 @@ pub(super) fn apply_model_visibility(
         // props included (their probe payload keeps bits 0..=15 as alpha), and the room's
         // interior-fog bit. The unit lane's alpha is `entities::apply_unit_mat_alpha`'s.
         if let Some(mut tag) = tag {
-            let mut bits = tag.0;
+            let mut bits = tag.value;
             if fade.is_some() || mat_anim.is_some_and(|m| !m.composes_unit_tag()) {
                 let alpha = fade_alpha * mat_factor;
                 // `with_alpha` keeps a visible card dimmed to 0 off the `MeshTag == 0` opaque
@@ -226,8 +226,8 @@ pub(super) fn apply_model_visibility(
             if let Some(on) = room_fog {
                 bits = crate::mesh_tag::with_interior_fog(bits, on);
             }
-            if tag.0 != bits {
-                tag.0 = bits;
+            if tag.value != bits {
+                tag.value = bits;
             }
         }
         if let Some(f) = fade {
@@ -282,9 +282,9 @@ pub(super) fn apply_model_visibility(
             let on = instances
                 .get(gv.instance)
                 .is_ok_and(|inst| gv.interior_fogged_by(inst));
-            let bits = crate::mesh_tag::with_interior_fog(tag.0, on);
-            if tag.0 != bits {
-                tag.0 = bits;
+            let bits = crate::mesh_tag::with_interior_fog(tag.value, on);
+            if tag.value != bits {
+                tag.value = bits;
             }
         }
     }

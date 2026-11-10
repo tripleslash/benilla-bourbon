@@ -44,11 +44,11 @@ impl PluginGroup for WorldPlugins {
             .disable::<CcdPlugin>()
             .disable::<IslandPlugin>()
             .disable::<IslandSleepingPlugin>()
-            .disable::<avian3d::dynamics::solver::joint_graph::JointGraphPlugin<FixedJoint>>()
-            .disable::<avian3d::dynamics::solver::joint_graph::JointGraphPlugin<RevoluteJoint>>()
-            .disable::<avian3d::dynamics::solver::joint_graph::JointGraphPlugin<PrismaticJoint>>()
-            .disable::<avian3d::dynamics::solver::joint_graph::JointGraphPlugin<DistanceJoint>>()
-            .disable::<avian3d::dynamics::solver::joint_graph::JointGraphPlugin<SphericalJoint>>()
+            .disable::<avian3d::dynamics::joints::joint_graph::JointGraphPlugin<FixedJoint>>()
+            .disable::<avian3d::dynamics::joints::joint_graph::JointGraphPlugin<RevoluteJoint>>()
+            .disable::<avian3d::dynamics::joints::joint_graph::JointGraphPlugin<PrismaticJoint>>()
+            .disable::<avian3d::dynamics::joints::joint_graph::JointGraphPlugin<DistanceJoint>>()
+            .disable::<avian3d::dynamics::joints::joint_graph::JointGraphPlugin<SphericalJoint>>()
             .add(WorldFoundation)
             // The per-frame transition order (Input → Stream → Present) by which the loading
             // screen covers a teleport the frame it happens.

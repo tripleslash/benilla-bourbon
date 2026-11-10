@@ -46,7 +46,7 @@ use bevy::render::renderer::{
     render_system, RenderAdapter, RenderContext, RenderDevice, ViewQuery,
 };
 use bevy::render::sync_world::MainEntity;
-use bevy::render::view::{ExtractedView, ViewDepthTexture, ViewTarget};
+use bevy::render::view::{ExtractedView, ViewDepthStencilTexture, ViewTarget};
 use bevy::render::{Render, RenderApp, RenderSystems};
 use windows_core::Interface;
 
@@ -909,6 +909,7 @@ fn present_marker(phase: bevy::render::renderer::present_hook::Phase) {
 
 /// The main world's frame index, handed to the render world.
 #[derive(Resource, Clone, Copy, Default, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 struct SlFrame(u32);
 
 /// `First`: Reflex's mode when it moved ([`Reflex`], on while DLSS-G runs), then this frame's
@@ -1084,7 +1085,7 @@ fn prepare_hudless(
 /// input in the read state the tags declare, which Streamline relies on at present.
 fn hudless_pass(
     world: &World,
-    view: ViewQuery<(&FsrState, &DlssHudless, &ViewDepthTexture)>,
+    view: ViewQuery<(&FsrState, &DlssHudless, &ViewDepthStencilTexture)>,
     held: Res<FsrHeld>,
     mut render_context: RenderContext,
 ) {
@@ -1113,7 +1114,7 @@ fn hudless_pass(
     let mv = fsr.motion_vectors().texture();
     render_context.command_encoder().transition_resources(
         std::iter::empty(),
-        [read(&depth.texture), read(mv), read(&hudless.texture)].into_iter(),
+        [read(depth.texture()), read(mv), read(&hudless.texture)].into_iter(),
     );
 }
 
@@ -1200,7 +1201,7 @@ fn frame_inputs(
         &ExtractedCamera,
         &FsrState,
         &crate::fsr::FsrView,
-        &ViewDepthTexture,
+        &ViewDepthStencilTexture,
         Option<&DlssHudless>,
     )>,
 ) {
@@ -1333,7 +1334,12 @@ fn frame_inputs(
         height: s.y,
     };
     let mv_view = fsr.motion_vectors();
-    let mut depth_res = describe(&depth.texture, depth.view(), &adapter, true);
+    let mut depth_res = describe(
+        depth.texture(),
+        depth.attachment.depth_stencil_views().attachment_view(),
+        &adapter,
+        true,
+    );
     let mut mv_res = describe(mv_view.texture(), mv_view, &adapter, false);
     let mut hudless_res = describe(&hudless.texture, &hudless.view, &adapter, false);
     let tag = |resource: &mut Resource, kind, extent| ResourceTag {

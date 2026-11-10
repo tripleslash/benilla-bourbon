@@ -144,14 +144,14 @@ fn flush_unit_edits_elsewhere(world: &mut World) {
             let (exclusive, users): (Vec<_>, Vec<_>) = graph
                 .systems
                 .iter()
-                .filter(|(key, system, _)| {
-                    accesses.get(key).is_some_and(|a| {
-                        system.is_exclusive() || names_read(a.combined_access(), edits)
-                    })
+                .filter(|(key, _, _)| {
+                    accesses
+                        .get(key)
+                        .is_some_and(|a| a.exclusive || names_read(a.combined_access(), edits))
                 })
-                .filter_map(|(_, system, _)| {
+                .filter_map(|(key, system, _)| {
                     let set: InternedSystemSet = system.default_system_sets().into_iter().next()?;
-                    Some((system.is_exclusive(), set))
+                    Some((accesses.get(&key)?.exclusive, set))
                 })
                 .partition(|(exclusive, _)| *exclusive);
             if users.is_empty() {
@@ -167,17 +167,59 @@ fn flush_unit_edits_elsewhere(world: &mut World) {
     }
 }
 
-/// Every system's declared access in `schedule`, read back by initializing each again: 0.19
-/// keeps the stored access private, and a function system's `initialize` keeps its state and
-/// only recomputes the access.
+/// A system's declared access: the filtered set (for an exclusive system, the write-everything
+/// set `SystemAccess::to_filtered_access_set` gives, as 0.19's exclusive `initialize` returned) and
+/// whether it is exclusive, which bevy 0.20 says only through its `SystemAccess`.
+pub(crate) struct Declared {
+    set: FilteredAccessSet,
+    /// The system takes the whole world (`SystemAccess::Exclusive`).
+    pub(crate) exclusive: bool,
+}
+
+impl Declared {
+    /// What `access` declares.
+    pub(crate) fn of(access: &bevy::ecs::system::SystemAccess) -> Self {
+        Self {
+            set: access.to_filtered_access_set().into_owned(),
+            exclusive: access.is_exclusive(),
+        }
+    }
+
+    /// The access `system` declares on `world`, by initializing it.
+    pub(crate) fn initialize<S: System + ?Sized>(system: &mut S, world: &mut World) -> Self {
+        Self::of(&System::initialize(system, world))
+    }
+
+    /// The filtered set, owned.
+    pub(crate) fn into_set(self) -> FilteredAccessSet {
+        self.set
+    }
+}
+
+impl std::ops::Deref for Declared {
+    type Target = FilteredAccessSet;
+    fn deref(&self) -> &FilteredAccessSet {
+        &self.set
+    }
+}
+
+impl std::ops::DerefMut for Declared {
+    fn deref_mut(&mut self) -> &mut FilteredAccessSet {
+        &mut self.set
+    }
+}
+
+/// Every system's declared access in `schedule`, as the schedule stores it once its systems are
+/// initialized (bevy 0.20 keeps it on each node, `SystemWithAccess::access`).
 pub(crate) fn system_accesses(
     schedule: &mut Schedule,
     world: &mut World,
-) -> HashMap<SystemKey, FilteredAccessSet> {
+) -> HashMap<SystemKey, Declared> {
     let systems = &mut schedule.graph_mut().systems;
+    systems.initialize(world);
     let keys: Vec<SystemKey> = systems.iter().map(|(key, _, _)| key).collect();
     keys.into_iter()
-        .filter_map(|key| Some((key, System::initialize(systems.get_mut(key)?, world))))
+        .filter_map(|key| Some((key, Declared::of(systems.get(key)?.access()))))
         .collect()
 }
 
@@ -186,8 +228,9 @@ pub(crate) fn system_accesses(
 /// 0.18's resource access never counted those.
 pub(crate) fn names_read(access: &Access, id: ComponentId) -> bool {
     access
-        .try_reads_and_writes()
-        .is_ok_and(|set| set.contains(id))
+        .reads()
+        .as_finite_set()
+        .is_some_and(|set| set.contains(id))
 }
 
 /// The host's append-only sinks, which it and their other users share by `&self`: the chat log,
@@ -232,7 +275,7 @@ pub(crate) fn order_the_pass(world: &mut World, label: impl ScheduleLabel) -> Ve
     if !world.resource::<Schedules>().contains(label) {
         return Vec::new();
     }
-    let host = System::initialize(
+    let host = Declared::initialize(
         &mut IntoSystem::into_system(|_: crate::script_calls::ScriptCallHost| {}),
         world,
     );
@@ -300,11 +343,11 @@ pub(crate) fn order_the_pass(world: &mut World, label: impl ScheduleLabel) -> Ve
         let joins: Vec<Joins> = graph
             .systems
             .iter()
-            .map(|(key, system, _)| {
+            .map(|(key, _, _)| {
                 let Some(declared) = accesses.get(&key) else {
                     return Joins::No;
                 };
-                if system.is_exclusive() {
+                if declared.exclusive {
                     return if placed[index[&key]] {
                         Joins::Always
                     } else {
@@ -943,7 +986,7 @@ mod tests {
                         .iter()
                         .filter_map(|(key, system, _)| {
                             let access = accesses.get(&key).expect("initialized");
-                            let kind = if system.is_exclusive() {
+                            let kind = if access.exclusive {
                                 Kind::Exclusive
                             } else if System::system_type(&**system) == flush {
                                 Kind::Flush
@@ -1007,9 +1050,9 @@ mod tests {
             graph
                 .systems
                 .iter()
-                .filter(|(key, system, _)| {
+                .filter(|(key, _, _)| {
                     let combined = accesses.get(key).expect("initialized").combined_access();
-                    !system.is_exclusive()
+                    !accesses.get(key).expect("initialized").exclusive
                         && sinks.iter().any(|id| super::names_read(combined, *id))
                 })
                 .map(|(key, _, _)| key)

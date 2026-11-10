@@ -21,7 +21,7 @@ use bevy::render::render_resource::binding_types::{
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::texture::GpuImage;
-use bevy::render::view::{ExtractedView, Msaa, ViewDepthTexture, ViewTarget};
+use bevy::render::view::{ExtractedView, Msaa, ViewDepthStencilTexture, ViewTarget};
 use bevy::render::{Render, RenderSystems};
 use bevy::shader::ShaderDefVal;
 use std::ops::Range;
@@ -98,6 +98,7 @@ pub(crate) struct GxCellDraw {
 /// buffer the water then bends a 20-yard ray through; the trade taken here buys the whole of
 /// the common shot — a shore, its trees and its buildings across a lake — for no CPU at all.
 #[derive(Component, Clone, Copy, Default, ExtractComponent)]
+#[extract_app(bevy::render::RenderApp)]
 pub(crate) struct StaticGxView {
     /// Is this the view [`prepare_static_gx`] takes its pipeline key from? True on the world
     /// camera, false on the mirror.
@@ -148,6 +149,7 @@ pub(crate) struct GxSel {
 /// The published half the render world clones each frame. Regions sit behind `Arc`, so the clones
 /// are refcount bumps and the kill scan, the one writer, copies a region on write.
 #[derive(Clone, Default, Resource, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub(crate) struct GxWorld {
     pub cells: HashMap<(i32, i32), std::sync::Arc<GxCellDraw>>,
     /// This frame's doodad-phase draw list, near-first across cells and prop regions.
@@ -579,6 +581,7 @@ fn prepare_static_gx(
                             pipes.light_layout.clone(),
                         ],
                         vertex: VertexState {
+                            constants: Default::default(),
                             shader: shader.clone(),
                             shader_defs: defs.clone(),
                             entry_point: Some("prepass_vertex".into()),
@@ -586,6 +589,7 @@ fn prepare_static_gx(
                         },
                         // Every variant keeps a fragment stage: the farclip wall is per pixel.
                         fragment: Some(FragmentState {
+                            constants: Default::default(),
                             shader: shader.clone(),
                             shader_defs: defs.clone(),
                             entry_point: Some("prepass_fragment".into()),
@@ -639,12 +643,14 @@ fn prepare_static_gx(
                     ),
                     layout,
                     vertex: VertexState {
+                        constants: Default::default(),
                         shader: shader.clone(),
                         shader_defs: vertex_defs,
                         entry_point: Some("vertex".into()),
                         buffers: vec![vertex_layout()],
                     },
                     fragment: Some(FragmentState {
+                        constants: Default::default(),
                         shader: shader.clone(),
                         shader_defs: defs,
                         entry_point: Some("fragment".into()),
@@ -1346,7 +1352,7 @@ pub(crate) fn static_gx_pass(
     world: &World,
     view: ViewQuery<(
         &ViewTarget,
-        &ViewDepthTexture,
+        &ViewDepthStencilTexture,
         &MeshViewBindGroup,
         // The world camera and the water's planar mirror — a booth bake must never receive
         // world cells (see the marker).

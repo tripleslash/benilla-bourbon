@@ -885,10 +885,10 @@ impl ResourceAccess {
                         .get_info(*id)
                         .is_some_and(|info| !info.is_send_and_sync())
             };
-            if let Ok(rw) = access.try_reads_and_writes() {
+            if let Some(rw) = access.reads().as_finite_set() {
                 out.reads.extend(rw.iter().filter(keep));
             }
-            if let Ok(w) = access.try_writes() {
+            if let Some(w) = access.writes().as_finite_set() {
                 out.writes.extend(w.iter().filter(keep));
             }
         }
@@ -956,9 +956,8 @@ fn applied_by_the_unit_edits(world: &World) -> Vec<ComponentId> {
 
 /// The call host's own state, which every system that lends it holds: what a call touches.
 fn call_host_access(world: &mut World) -> ResourceAccess {
-    use bevy::ecs::system::System;
     let mut host = IntoSystem::into_system(|_: crate::script_calls::ScriptCallHost| {});
-    let set = System::initialize(&mut host, world);
+    let set = crate::vm_pass::Declared::initialize(&mut host, world);
     ResourceAccess::of(world, &set)
 }
 
@@ -1262,7 +1261,7 @@ fn every_handler_queue_a_feed_takes_is_on_a_lane_or_listed() {
                 if !in_feed(NodeId::System(key)) {
                     continue;
                 }
-                if system.is_exclusive() {
+                if accesses.get(&key).is_some_and(|a| a.exclusive) {
                     exclusive.insert(name);
                     continue;
                 }
@@ -1467,9 +1466,10 @@ fn lane_pushes_off_handler_queues() -> Option<LanePushes> {
                 let Some(access) = accesses.get(&key) else {
                     continue;
                 };
+                let exclusive = access.exclusive;
                 let access = &ResourceAccess::of(world, access);
                 let fires = vm.is_some_and(|vm| access.has_resource_write(vm));
-                if system.is_exclusive() {
+                if exclusive {
                     continue;
                 }
                 let name = system.name().to_string();
@@ -1701,9 +1701,10 @@ fn the_systems_unordered_against_the_drain_meet_it_only_on_a_pure_cache() {
             graph
                 .systems
                 .iter()
-                .filter_map(|(k, system, _)| {
+                .filter_map(|(k, _, _)| {
                     let access = accesses.remove(&k)?;
-                    Some((k, (access, system.is_exclusive())))
+                    let exclusive = access.exclusive;
+                    Some((k, (access.into_set(), exclusive)))
                 })
                 .collect()
         });
@@ -1832,9 +1833,8 @@ fn every_view_push_of_what_a_handler_writes_is_listed() {
     let mut app = headless_client();
     let written = handler_written(app.world());
     let host: Vec<FilteredAccess> = {
-        use bevy::ecs::system::System;
         let mut host = IntoSystem::into_system(|_: crate::script_calls::ScriptCallHost| {});
-        System::initialize(&mut host, app.world_mut())
+        crate::vm_pass::Declared::initialize(&mut host, app.world_mut())
             .filtered_accesses()
             .to_vec()
     };
@@ -1861,14 +1861,15 @@ fn every_view_push_of_what_a_handler_writes_is_listed() {
             for (key, system, _) in graph.systems.iter() {
                 let name = system.name().to_string();
                 systems.insert(name.clone());
-                if system.is_exclusive() {
-                    continue;
-                }
                 let Some(declared) = accesses.get(&key) else {
                     continue;
                 };
+                if declared.exclusive {
+                    continue;
+                }
                 let writes_vm = |vm| {
-                    (declared.combined_access().try_writes()).is_ok_and(|set| set.contains(vm))
+                    (declared.combined_access().writes().as_finite_set())
+                        .is_some_and(|set| set.contains(vm))
                 };
                 if !vm.is_some_and(writes_vm) {
                     continue;
@@ -1975,12 +1976,11 @@ fn every_view_push_of_what_a_handler_writes_is_listed() {
 fn every_cvar_write_reaches_the_mirror_before_a_packet() {
     use bevy::ecs::query::{FilteredAccess, FilteredAccessSet};
     use bevy::ecs::schedule::SystemKey;
-    use bevy::ecs::system::System;
     use std::collections::HashSet;
     let mut app = headless_client();
     let host = {
         let mut host = IntoSystem::into_system(|_: crate::script_calls::ScriptCallHost| {});
-        System::initialize(&mut host, app.world_mut())
+        crate::vm_pass::Declared::initialize(&mut host, app.world_mut())
     };
     let registry = app
         .world()
@@ -2002,16 +2002,19 @@ fn every_cvar_write_reaches_the_mirror_before_a_packet() {
         }
         own.iter().any(|o| {
             o.access()
-                .try_writes()
-                .is_ok_and(|set| set.contains(registry))
+                .writes()
+                .as_finite_set()
+                .is_some_and(|set| set.contains(registry))
         })
     };
     let handlers = app.world().resource::<crate::net::handlers::NetHandlers>();
     // The control: the handlers that lend the host hold the registry through it.
     assert!(
-        handlers.accesses().iter().any(
-            |(_, a)| (a.combined_access().try_writes()).is_ok_and(|set| set.contains(registry))
-        ),
+        handlers
+            .accesses()
+            .iter()
+            .any(|(_, a)| (a.combined_access().writes().as_finite_set())
+                .is_some_and(|set| set.contains(registry))),
         "no handler reaches the registry, even through the host: the scan below reads nothing"
     );
     let handlers: Vec<&str> = handlers
@@ -2035,8 +2038,10 @@ fn every_cvar_write_reaches_the_mirror_before_a_packet() {
             graph
                 .systems
                 .iter()
-                .filter(|(_, system, _)| !system.is_exclusive())
-                .filter_map(|(k, _, _)| Some((k, accesses.get(&k)?.clone())))
+                .filter_map(|(k, _, _)| {
+                    let declared = accesses.get(&k)?;
+                    (!declared.exclusive).then(|| (k, (**declared).clone()))
+                })
                 .filter(|(_, access)| past_the_host(access))
                 .collect()
         });

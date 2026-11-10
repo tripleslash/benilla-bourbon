@@ -99,7 +99,7 @@ pub(super) fn furnish_tile_cells(
             };
             // The Aabb is computed here: the mesh is `RENDER_WORLD`-only, so `calculate_bounds`
             // may find it already extracted, and the exterior cull fails open on a missing Aabb.
-            let aabb = mesh.compute_aabb();
+            let aabb = mesh.get_aabb();
             let handle = meshes.add(mesh);
             commands.entity(root).with_children(|cells| {
                 let mut cell = cells.spawn((

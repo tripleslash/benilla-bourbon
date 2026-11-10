@@ -326,7 +326,7 @@ fn build_entry(
             }
             let geo = &submeshes[e.stat.len()].geometry;
             let mesh = submesh_to_static_mesh(geo);
-            let aabb = mesh.compute_aabb();
+            let aabb = mesh.get_aabb();
             *verts += geo.positions.len();
             e.stat.push((meshes.add(mesh), aabb));
             built += 1;

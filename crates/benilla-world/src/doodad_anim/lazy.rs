@@ -95,7 +95,7 @@ pub(super) fn promote_lazy_rig(
             continue;
         };
         mesh.0 = twin.skinned.clone();
-        tag.0 = crate::mesh_tag::with_rig(tag.0, slot);
+        tag.value = crate::mesh_tag::with_rig(tag.value, slot);
     }
     true
 }
@@ -107,7 +107,7 @@ fn demote_lazy_rig(commands: &mut Commands, root: Entity, lazy: &LazyRig, parts:
             continue;
         };
         mesh.0 = twin.stat.clone();
-        tag.0 = crate::mesh_tag::with_rig(tag.0, 0);
+        tag.value = crate::mesh_tag::with_rig(tag.value, 0);
     }
     // A host despawned this frame already freed its slot; `entity(root)` would panic.
     commands.queue(move |world: &mut bevy::ecs::world::World| {
@@ -183,7 +183,7 @@ mod tests {
             .world_mut()
             .spawn((
                 Mesh3d(stat.clone()),
-                MeshTag(crate::mesh_tag::alpha_bits(1.0)),
+                MeshTag::new(crate::mesh_tag::alpha_bits(1.0)),
                 SkinnedTwin {
                     skinned,
                     stat: stat.clone(),
@@ -242,7 +242,7 @@ mod tests {
         let e = app.world().entity(part);
         (
             e.get::<Mesh3d>().unwrap().0.clone(),
-            crate::mesh_tag::rig_of(e.get::<MeshTag>().unwrap().0),
+            crate::mesh_tag::rig_of(e.get::<MeshTag>().unwrap().value),
         )
     }
 
@@ -407,7 +407,7 @@ mod bound_survives_the_twin_swap {
 
     /// A 1 yd cube, the skinned twin's bind-pose bound.
     fn tiny_mesh() -> Mesh {
-        Mesh::from(bevy::math::primitives::Cuboid::new(1.0, 1.0, 1.0))
+        Mesh::from(bevy::shape::Cuboid::new(1.0, 1.0, 1.0))
     }
 
     /// The authored all-animation bound: a bird's 67 yd circuit around that 1 yd body.

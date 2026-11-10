@@ -60,7 +60,7 @@ fn fire_node_probe(world: &mut World) {
         let comps: Vec<String> = world.inspect_entity(e).map_or_else(
             |_| Vec::new(),
             |it| {
-                it.map(|c| c.name().shortname().to_string())
+                it.map(|(_, c)| c.name().shortname().to_string())
                     .filter(|n| {
                         // Drop the plumbing components.
                         !matches!(

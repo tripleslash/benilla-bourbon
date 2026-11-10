@@ -323,6 +323,7 @@ impl FroxelFog {
 /// This frame's volumetrics, extracted for the render world: the mode, the grid, and the packed
 /// block tail (`FroxelFog` then the cloud grid).
 #[derive(Resource, Clone, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct ModernVolume {
     pub mode: FogMode,
     pub grid: UVec3,
@@ -348,6 +349,7 @@ impl Default for ModernVolume {
 /// oblique near plane does not read as sky to the composite, which fogged the mirror's whole sky to
 /// the horizon haze, and the composite was a full-screen pass over a buffer the waves then blur.
 #[derive(Component, Clone, Copy, ExtractComponent)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct ModernFogView;
 
 pub(super) fn plugin(app: &mut App) {

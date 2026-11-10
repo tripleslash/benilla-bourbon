@@ -1374,9 +1374,9 @@ fn apply_unit_mat_alpha(
         if anim.current <= 0.0 {
             culled += 1;
         }
-        let bits = benilla_world::mesh_tag::with_alpha(tag.0, anim.current);
-        if tag.0 != bits {
-            tag.0 = bits;
+        let bits = benilla_world::mesh_tag::with_alpha(tag.value, anim.current);
+        if tag.value != bits {
+            tag.value = bits;
         }
     }
     // Logged once, the first frame a unit batch reaches the `A <= 0` cull; the debug panel's

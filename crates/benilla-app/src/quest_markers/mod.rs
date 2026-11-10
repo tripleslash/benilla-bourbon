@@ -344,7 +344,7 @@ fn build_markers(
                                     .unwrap_or_default(),
                             ),
                             MeshMaterial3d(material),
-                            MeshTag(spawn_tag(0, 1.0)),
+                            MeshTag::new(spawn_tag(0, 1.0)),
                             Transform::IDENTITY,
                             BillboardCard::new(info, Transform::IDENTITY)
                                 .with_seq_translation(seq_loop(info, ANIM_MARKER_LOW), arm_ms),
@@ -370,7 +370,7 @@ fn build_markers(
                         .spawn((
                             Mesh3d(mesh),
                             MeshMaterial3d(material),
-                            MeshTag(spawn_tag(marker_slot, 1.0)),
+                            MeshTag::new(spawn_tag(marker_slot, 1.0)),
                             Transform::IDENTITY,
                             unmirrored(),
                         ))

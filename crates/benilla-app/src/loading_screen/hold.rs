@@ -32,7 +32,7 @@ use bevy::render::camera::SortedCameras;
 use bevy::render::extract_resource::{extract_resource, ExtractResource};
 use bevy::render::render_resource::SurfaceTexture;
 use bevy::render::renderer::render_system;
-use bevy::render::view::ExtractedWindows;
+use bevy::render::view::ExtractedWindow;
 use bevy::render::{ExtractSchedule, Render, RenderApp, RenderSystems};
 use bevy::window::{CursorMoved, PrimaryWindow, WindowEvent};
 
@@ -40,6 +40,7 @@ use bevy::window::{CursorMoved, PrimaryWindow, WindowEvent};
 /// a snap that reloads the world ([`crate::player::Player::holds_the_frame`]), and extracted with
 /// the frame it decides.
 #[derive(Resource, Clone, Copy, Default, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub(crate) struct PresentHold {
     held: bool,
 }
@@ -102,13 +103,13 @@ struct Acquired(Vec<Entity>);
 struct Withheld(Vec<(Entity, SurfaceTexture)>);
 
 /// Render world, before `render_system`: note which windows hold a texture to present.
-fn note_acquired(windows: Res<ExtractedWindows>, mut acquired: ResMut<Acquired>) {
+fn note_acquired(windows: Query<(Entity, &ExtractedWindow)>, mut acquired: ResMut<Acquired>) {
     acquired.0.clear();
     acquired.0.extend(
         windows
             .iter()
             .filter(|(_, w)| w.swap_chain_texture.is_some())
-            .map(|(&e, _)| e),
+            .map(|(e, _)| e),
     );
 }
 
@@ -118,14 +119,14 @@ fn note_acquired(windows: Res<ExtractedWindows>, mut acquired: ResMut<Acquired>)
 fn withhold_present(
     hold: Option<Res<PresentHold>>,
     mut sorted: ResMut<SortedCameras>,
-    mut windows: ResMut<ExtractedWindows>,
+    mut windows: Query<(Entity, &mut ExtractedWindow)>,
     mut withheld: ResMut<Withheld>,
 ) {
     if !hold.is_some_and(|h| h.held) {
         return;
     }
     sorted.0.clear();
-    for (&entity, window) in windows.windows.iter_mut() {
+    for (entity, mut window) in &mut windows {
         if let Some(texture) = window.swap_chain_texture.take() {
             withheld.0.push((entity, texture));
         }
@@ -135,7 +136,7 @@ fn withhold_present(
 /// Render world, after `render_system`: a window that held a texture and holds none presented it;
 /// one withheld did not.
 fn count_presents(
-    windows: Res<ExtractedWindows>,
+    windows: Query<&ExtractedWindow>,
     acquired: Res<Acquired>,
     withheld: Res<Withheld>,
     presents: Res<Presents>,
@@ -146,8 +147,8 @@ fn count_presents(
         .filter(|&&e| !withheld.0.iter().any(|&(w, _)| w == e))
         .any(|e| {
             windows
-                .get(e)
-                .is_some_and(|w| w.swap_chain_texture.is_none())
+                .get(*e)
+                .is_ok_and(|w| w.swap_chain_texture.is_none())
         });
     if presented {
         presents.0.fetch_add(1, Ordering::Relaxed);
@@ -157,9 +158,9 @@ fn count_presents(
 /// Render world, after `render_system`: hand the textures back, so each window keeps its texture
 /// into the next frame (`prepare_windows` acquires none), which draws over it. Never dropped
 /// unpresented: Vulkan's discard is a no-op that leaves the image acquired.
-fn restore_withheld(mut windows: ResMut<ExtractedWindows>, mut withheld: ResMut<Withheld>) {
+fn restore_withheld(mut windows: Query<&mut ExtractedWindow>, mut withheld: ResMut<Withheld>) {
     for (entity, texture) in withheld.0.drain(..) {
-        if let Some(window) = windows.windows.get_mut(&entity) {
+        if let Ok(mut window) = windows.get_mut(entity) {
             window.swap_chain_texture = Some(texture);
         }
     }
@@ -381,7 +382,10 @@ pub(super) fn build(app: &mut App) {
         .insert_resource(presents)
         .init_resource::<Acquired>()
         .init_resource::<Withheld>()
-        .add_systems(ExtractSchedule, extract_resource::<PresentHold, ()>)
+        .add_systems(
+            ExtractSchedule,
+            extract_resource::<PresentHold, RenderApp, ()>,
+        )
         .add_systems(
             Render,
             (

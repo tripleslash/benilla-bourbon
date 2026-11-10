@@ -30,6 +30,7 @@ use benilla_assets::materials::WowModelMaterial;
 /// The realized materials whose marker says additive, so their draws must bind `(ONE, ONE)`;
 /// kept from the main world's asset events and extracted as an `Arc` clone each frame.
 #[derive(Resource, Clone, Default, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub(crate) struct AdditiveMaterials(pub(crate) Arc<HashSet<AssetId<WowModelMaterial>>>);
 
 /// Draws this frame whose bound blend state contradicted their material's additive marker.

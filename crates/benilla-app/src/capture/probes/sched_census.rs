@@ -71,7 +71,7 @@ fn dump_schedule(
     name: &str,
     sched: &bevy::ecs::schedule::Schedule,
 ) {
-    let Ok(systems) = sched.systems() else {
+    let Ok(systems) = sched.systems_with_access() else {
         println!(
             "SCHED_CENSUS world={world_tag} vantage={vantage} schedule={name} \
              n={} uninitialized=1",
@@ -81,14 +81,15 @@ fn dump_schedule(
     };
     let (mut n, mut nonsend, mut exclusive, mut deferred) = (0u32, 0u32, 0u32, 0u32);
     let mut rows: Vec<String> = Vec::new();
-    for (_, sys) in systems {
+    for (_, entry) in systems {
+        let sys = entry.system();
         n += 1;
         let mut flags = String::new();
         if !sys.is_send() {
             nonsend += 1;
             flags.push('N');
         }
-        if sys.is_exclusive() {
+        if entry.access().is_exclusive() {
             exclusive += 1;
             flags.push('X');
         }

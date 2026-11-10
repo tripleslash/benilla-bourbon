@@ -140,7 +140,7 @@ impl PoseSource {
 mod tests {
     use super::*;
     use bevy::animation::animation_curves::AnimatableKeyframeCurve;
-    use bevy::math::curve::Curve;
+    use bevy::curve::Curve;
 
     #[test]
     fn track_matches_the_bevy_keyframe_curve() {

@@ -303,10 +303,10 @@ mod tests {
     /// A camera at the origin looking down −Z (view = identity): rigs at −Z are in frame, rigs
     /// at +Z are behind it.
     fn spawn_camera(app: &mut App) {
-        let clip_from_world = Mat4::perspective_rh(1.2, 1.0, 0.1, 1000.0);
+        let clip_from_world = bevy::math::proj::perspective(1.2, 1.0, 0.1, 1000.0);
         app.world_mut().spawn((
             WorldCamera,
-            Frustum(bevy::math::primitives::ViewFrustum::from_clip_from_world(
+            Frustum(bevy::shape::ViewFrustum::from_clip_from_world(
                 &clip_from_world,
             )),
         ));

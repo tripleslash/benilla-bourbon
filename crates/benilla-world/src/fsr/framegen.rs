@@ -468,12 +468,14 @@ impl SpecializedRenderPipeline for FgPresentPipeline {
             label: Some("fsr_fg_present".into()),
             layout: vec![self.layout.clone()],
             vertex: VertexState {
+                constants: Default::default(),
                 shader: self.shader.clone(),
                 shader_defs: vec![],
                 entry_point: Some("vs_main".into()),
                 buffers: vec![],
             },
             fragment: Some(FragmentState {
+                constants: Default::default(),
                 shader: self.shader.clone(),
                 shader_defs: vec![],
                 entry_point: Some("fs_main".into()),
@@ -516,6 +518,7 @@ pub(super) fn init_pipelines(
     let queue =
         |label: &'static str, layout: &BindGroupLayoutDescriptor, shader: &Handle<Shader>| {
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                constants: Default::default(),
                 label: Some(label.into()),
                 layout: vec![layout.clone()],
                 immediate_size: 0,
@@ -927,7 +930,7 @@ mod tests {
     /// projection, and a cleared 0 stays finite.
     #[test]
     fn the_depth_factors_invert_reverse_z() {
-        let proj = Mat4::perspective_infinite_reverse_rh(1.0, 1.6, 0.2);
+        let proj = bevy::math::proj::perspective_infinite_reverse(1.0, 1.6, 0.2);
         let ([x, y, tan_x, tan_y], tan_half_fov) = depth_factors(proj);
         for dist in [0.5_f32, 7.0, 300.0] {
             let clip = proj * Vec4::new(0.0, 0.0, -dist, 1.0);

@@ -133,7 +133,7 @@ impl ColliderChanges {
             .copied()
             .unwrap_or(GlobalTransform::IDENTITY)
             .to_scale_rotation_translation();
-        self.note(collider.aabb(translation, rotation));
+        self.note(collider.aabb(translation, rotation, 0.0));
     }
 
     /// Did the set change within `reach` yards (XZ) of `at`, or with no camera to measure from?
@@ -155,7 +155,7 @@ impl ColliderChanges {
 
 /// Records where a collider leaves the world ([`ColliderChanges`]), by its last world box.
 pub(crate) fn note_collider_removal(
-    removed: On<Remove, Collider>,
+    removed: On<Remove<Collider>>,
     boxes: Query<&ColliderAabb>,
     mut changes: ResMut<ColliderChanges>,
 ) {
@@ -497,7 +497,7 @@ fn sync_child_collider_poses(
             continue;
         };
         position.set_if_neq(Position(body_pos.0 + body_rot * local.translation));
-        rotation.set_if_neq((body_rot.0 * local.rotation.0).normalize().into());
+        rotation.set_if_neq((body_rot.0 * local.rotation).normalize().into());
     }
 }
 
@@ -526,10 +526,10 @@ fn drop_avian_child_sync(world: &mut bevy::ecs::world::World) {
     });
 }
 
-/// avian's `update_moved_collider_aabbs`, refitting only colliders whose pose or shape changed:
-/// avian's fans a task-pool walk over every collider, twice a frame with the transport chain's
-/// run, to read three change ticks. The filter still reads those ticks row by row, serially. `F`
-/// narrows it to the colliders a caller moved itself.
+/// avian's `update_moved_collider_aabbs` (avian 0.8, `collider_tree/update.rs`), refitting only
+/// colliders whose pose or shape changed: avian's fans a task-pool walk over every collider, twice a
+/// frame with the transport chain's run, to read three change ticks. The filter still reads those
+/// ticks row by row, serially. `F` narrows it to the colliders a caller moved itself.
 #[allow(clippy::type_complexity)]
 pub fn refit_changed_collider_aabbs<F: bevy::ecs::query::QueryFilter + 'static>(
     mut colliders: Query<
@@ -539,7 +539,8 @@ pub fn refit_changed_collider_aabbs<F: bevy::ecs::query::QueryFilter + 'static>(
             &Rotation,
             &mut ColliderAabb,
             &mut avian3d::collision::collider::EnlargedAabb,
-            &Collider,
+            &mut avian3d::collision::collider::ColliderAabbMargin,
+            bevy::ecs::change_detection::Ref<Collider>,
             Option<&CollisionMargin>,
             &avian3d::collider_tree::ColliderTreeProxyKey,
         ),
@@ -563,17 +564,42 @@ pub fn refit_changed_collider_aabbs<F: bevy::ecs::query::QueryFilter + 'static>(
     >,
 ) {
     use avian3d::collider_tree::ColliderTreeType;
-    // avian's `AABB_MARGIN`, scaled the same way.
-    let margin = length_unit.0 * 0.05;
+    use avian3d::collision::collider::{ColliderAabbMargin, ColliderContext};
+    // avian's contact tolerance, the growth of every AABB and the margin of the static trees.
     let tolerance = length_unit.0 * narrow_phase.contact_tolerance;
     moved.clear();
-    for (entity, pos, rot, mut aabb, mut enlarged, collider, collision_margin, key) in
-        &mut colliders
+    for (
+        entity,
+        pos,
+        rot,
+        mut aabb,
+        mut enlarged,
+        mut aabb_margin,
+        collider,
+        collision_margin,
+        key,
+    ) in &mut colliders
     {
-        let growth = Vec3::splat(tolerance + collision_margin.map_or(0.0, |m| m.0));
-        *aabb = collider
-            .aabb_with_context(pos.0, *rot, AabbContext::new(entity, &*context))
-            .grow(growth);
+        let growth = tolerance + collision_margin.map_or(0.0, |m| m.0);
+        *aabb = collider.aabb_with_context(
+            pos.0,
+            *rot,
+            growth,
+            ColliderContext::new(entity, &*context),
+        );
+        // avian recomputes the size-relative margin when the shape changes.
+        if bevy::ecs::change_detection::DetectChanges::is_changed(&collider) {
+            *aabb_margin = ColliderAabbMargin::from_bounding_radius(
+                collider.bounding_radius_with_context(ColliderContext::new(entity, &*context)),
+                length_unit.0,
+            );
+        }
+        // Dynamic and kinematic trees take the size-relative margin, static and standalone the
+        // contact tolerance alone, as avian does.
+        let margin = match key.tree_type() {
+            ColliderTreeType::Dynamic | ColliderTreeType::Kinematic => aabb_margin.0,
+            ColliderTreeType::Static | ColliderTreeType::Standalone => tolerance,
+        };
         if enlarged.update(&aabb, margin) {
             moved.push((*key, enlarged.get()));
         }
@@ -588,8 +614,14 @@ pub fn refit_changed_collider_aabbs<F: bevy::ecs::query::QueryFilter + 'static>(
         if count == 0 {
             continue;
         }
-        // avian's split: refit up from a few moved leaves, or once over the tree past 10%.
-        let whole = count as f32 >= 0.1 * tree.proxies.len() as f32;
+        // avian's split: refit up from a few moved leaves, or once over the tree past its
+        // threshold, 6% where the nodes are ordered children-after-parents, 30% otherwise.
+        let threshold = if tree.bvh.children_are_ordered_after_parents {
+            0.06
+        } else {
+            0.3
+        };
+        let whole = count as f32 >= threshold * tree.proxies.len().max(1) as f32;
         for (key, enlarged) in moved.iter().filter(|(k, _)| k.tree_type() == tree_type) {
             if whole {
                 tree.set_proxy_aabb(key.id(), (*enlarged).into());

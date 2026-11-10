@@ -565,6 +565,7 @@ pub struct SynthesizedLight;
 /// This frame's grid placement and shadowed set, extracted for the render world (which owns the
 /// binning pass and the atlas render).
 #[derive(Resource, Clone, ExtractResource, Default)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct ModernLights {
     pub on: bool,
     pub tier: LightTier,
@@ -788,7 +789,7 @@ pub fn cube_face_clip(light_pos: Vec3, face: usize, near: f32) -> Mat4 {
         Vec3::new(s.z, up.z, -axis.z),
     );
     let view = Mat4::from_mat3(rot) * Mat4::from_translation(-light_pos);
-    Mat4::perspective_infinite_reverse_rh(std::f32::consts::FRAC_PI_2, 1.0, near) * view
+    bevy::math::proj::perspective_infinite_reverse(std::f32::consts::FRAC_PI_2, 1.0, near) * view
 }
 
 /// The major axis and the face's `s`/`t` directions — the twin of `locallight::cube_face`.

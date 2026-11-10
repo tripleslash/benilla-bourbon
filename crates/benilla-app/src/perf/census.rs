@@ -563,7 +563,7 @@ pub(super) mod res_census {
             census.frames += 1;
             let changed: Vec<ComponentId> = world
                 .iter_resources()
-                .map(|(info, _)| info.id())
+                .map(|(id, _, _)| id)
                 .filter(|&id| {
                     world
                         .get_resource_change_ticks_by_id(id)

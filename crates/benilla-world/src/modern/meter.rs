@@ -68,6 +68,7 @@ fn init(
         ),
     );
     let pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        constants: Default::default(),
         label: Some("modern_meter".into()),
         layout: vec![layout.clone()],
         immediate_size: 0,
@@ -171,7 +172,11 @@ fn readback(meter: Option<Res<Meter>>, device: Res<RenderDevice>) {
         }
         READY => {
             let mean = {
-                let view = m.staging.slice(..).get_mapped_range();
+                let view = m
+                    .staging
+                    .slice(..)
+                    .get_mapped_range()
+                    .expect("a mapped staging buffer reads");
                 let cells: &[f32] = bytemuck::cast_slice(&view);
                 cells.iter().sum::<f32>() / cells.len().max(1) as f32
             };

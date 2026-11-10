@@ -19,7 +19,7 @@ use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery
 use bevy::render::storage::GpuShaderBuffer;
 use bevy::render::texture::GpuImage;
 use bevy::render::view::{
-    Msaa, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
+    Msaa, ViewDepthStencilTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
 };
 use bevy::render::{Render, RenderStartup, RenderSystems};
 use bevy::shader::ShaderDefVal;
@@ -118,6 +118,7 @@ fn init_pipelines(
                    path: &'static str,
                    entry: &'static str| {
         pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            constants: Default::default(),
             label: Some(label.into()),
             layout: vec![layout.clone()],
             immediate_size: 0,
@@ -147,6 +148,7 @@ fn init_pipelines(
         let mut shader_defs = crate::static_gx::rt_scene::shader_defs(1);
         shader_defs.push(ShaderDefVal::from("RT_FROXEL"));
         pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            constants: Default::default(),
             label: Some("modern_froxel_scatter_rt".into()),
             layout: vec![scatter_layout.clone(), crate::static_gx::rt_scene::layout()],
             immediate_size: 0,
@@ -523,6 +525,7 @@ fn specialize_composites(
                 layout: vec![layout.clone()],
                 vertex: fullscreen_shader.to_vertex_state(),
                 fragment: Some(FragmentState {
+                    constants: Default::default(),
                     shader: pipes.composite_shader.clone(),
                     shader_defs: shader_defs.clone(),
                     entry_point: Some(entry.to_owned().into()),
@@ -610,7 +613,7 @@ pub(crate) fn froxel_pass(
 /// The fullscreen fog passes' view query: both draw over the view target with the same bindings.
 type FogPassQuery = (
     &'static ViewTarget,
-    &'static ViewDepthTexture,
+    &'static ViewDepthStencilTexture,
     &'static ViewUniformOffset,
     &'static Msaa,
     &'static ModernFogView,
@@ -666,7 +669,7 @@ fn run_fog_pass(
     }
     // Armed a frame after the latch (a reallocation); binding it earlier is a validation error.
     if !depth
-        .texture
+        .texture()
         .usage()
         .contains(TextureUsages::TEXTURE_BINDING)
     {
@@ -707,7 +710,7 @@ fn run_fog_pass(
         &pipeline_cache.get_bind_group_layout(layout),
         &BindGroupEntries::sequential((
             view_binding,
-            depth.view(),
+            depth.attachment.depth_stencil_views().attachment_view(),
             &volume.texture_view,
             &volume.sampler,
             block.buffer.as_entire_binding(),

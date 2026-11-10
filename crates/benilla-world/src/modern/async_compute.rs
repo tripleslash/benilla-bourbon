@@ -63,7 +63,10 @@ impl SystemBuffer for FlushMainQueueState {
         if !std::mem::take(&mut self.0) {
             return;
         }
-        let buffers = world.resource_mut::<PendingCommandBuffers>().take();
+        let buffers: Vec<_> = world
+            .resource_mut::<PendingCommandBuffers>()
+            .finish()
+            .collect();
         if !buffers.is_empty() {
             world.resource::<RenderQueue>().submit(buffers);
         }

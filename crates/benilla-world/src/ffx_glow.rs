@@ -20,7 +20,7 @@ use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::sync_world::MainEntity;
 use bevy::render::texture::{CachedTexture, TextureCache};
-use bevy::render::view::{ExtractedView, ViewDepthTexture, ViewTarget};
+use bevy::render::view::{ExtractedView, ViewDepthStencilTexture, ViewTarget};
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
 use crate::final_pass::FinalPassTarget;
@@ -28,6 +28,7 @@ use crate::view::WorldCamera;
 
 /// A camera running the FFXGlow pass: the frame's one gamma→linear decode, plus the glow add.
 #[derive(Component, Clone, Copy, ExtractComponent)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct FfxGlow {
     /// The per-view multiplier on the zone glow weight; `0.0` keeps the decode, drops the glow.
     pub(crate) gain_scale: f32,
@@ -90,6 +91,7 @@ impl Default for FfxGlow {
 /// its main pass as the gamma byte ([`ffx_transparent_pass_2d`]). That world view runs no combine
 /// of its own, and runs `CameraOutputMode::Skip`, since its main texture is read unflipped.
 #[derive(Component, Clone, Copy, Default, ExtractComponent)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct FfxBackdrop {
     /// The world camera drawing this frame (main-world entity). While `None` the camera's own
     /// clear is the ground; the component stays so its pipelines compile before any world exists.
@@ -101,11 +103,13 @@ pub struct FfxBackdrop {
 
 /// The glow weight `w`: the live `LightParams.glow`, synced every frame by [`sync_gain`].
 #[derive(Resource, Clone, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct FfxGlowGain(pub f32);
 
 /// The FFXDeath gate, the combine's `y`: `1.0` while the player is a released ghost (`0x5de9c0`,
 /// off `PLAYER_FLAGS_GHOST`), else `0.0`, with no ramp on either edge.
 #[derive(Resource, Clone, Default, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct FfxDeathFade(pub f32);
 
 /// The three switches the reference's FFX pass reads every frame, as the `ffx`, `ffxGlow` and
@@ -115,6 +119,7 @@ pub struct FfxDeathFade(pub f32);
 /// `CFFXGlow` (`0x6cc5a0`) reads `ffxGlow` (`0x6cc5a8`), `CFFXDeath` (`0x6cded0`) reads `ffxDeath`
 /// (`0x6cdf10`). A pass that does not run is not replaced by the other one: the slot holds one.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct FfxSwitches {
     /// `ffx`, the master.
     pub master: bool,
@@ -147,6 +152,7 @@ impl FfxSwitches {
 /// death or glow pass and pins `LightParams.glow` (`[0x6d48b0()+0x110]`) to a constant: both
 /// combines' blur² weight, which the death combine packs as its alpha byte (`0x6cb930`).
 #[derive(Resource, Clone, Copy, Default, PartialEq, Eq, Debug, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub enum GlueFfx {
     /// A glue model widget is shown and nothing has re-pinned it: login, create, and a character
     /// select with no characters. The widget's OnShow (`0x46fa60`) installs the glue glow pass and
@@ -191,6 +197,7 @@ impl GlueFfx {
 /// (`0x6cb134`/`0x6cb599`): `max(min(drunkByte, 100)/100, submerged ? 84/255 : 0)`, submerged
 /// being the camera eye in any liquid (`0x672470` not `0xf`).
 #[derive(Resource, Clone, Default, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct FfxHazeMix(pub f32);
 
 /// The reference's byte 84 in the colour `z` lane while the eye is submerged, drunk or sober.
@@ -220,6 +227,7 @@ fn sync_haze(
 /// which displaces the combine's two samples through a sine bump map. The guard compares the
 /// eye-liquid byte `[0xc7f288]` with `0xf` (dry) alone (`0x6cc644`): lava and slime warp too.
 #[derive(Resource, Clone, Copy, Default, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct FfxWave {
     /// `(t mod 3174)/3174`, the u-axis phase.
     phase1: f32,
@@ -395,6 +403,7 @@ impl SpecializedRenderPipeline for FfxCombinePipeline {
             layout: vec![self.layout.clone()],
             vertex: self.fullscreen.to_vertex_state(),
             fragment: Some(FragmentState {
+                constants: Default::default(),
                 shader: self.shader.clone(),
                 shader_defs: if key.gamma_out {
                     vec!["GAMMA_OUT".into()]
@@ -507,6 +516,7 @@ fn init_pipelines(
             layout: vec![layout.clone()],
             vertex: fullscreen_shader.to_vertex_state(),
             fragment: Some(FragmentState {
+                constants: Default::default(),
                 shader: shader.clone(),
                 shader_defs: vec![],
                 entry_point: Some(entry.into()),
@@ -1124,7 +1134,7 @@ pub fn ffx_transparent_pass_2d(
         &ExtractedCamera,
         &ExtractedView,
         &ViewTarget,
-        &ViewDepthTexture,
+        &ViewDepthStencilTexture,
         Option<&FfxBackdropView>,
     )>,
     transparent_phases: Res<ViewSortedRenderPhases<Transparent2d>>,

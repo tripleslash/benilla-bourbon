@@ -57,6 +57,7 @@ pub(crate) fn region_bytes() -> u64 {
 
 /// The clip table by `MeshTag` rig slot; generation-stamped, so a dry world uploads nothing.
 #[derive(Resource, Clone, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct WaterClips {
     slots: Arc<Vec<ClipWord>>,
     generation: u64,
@@ -357,7 +358,7 @@ pub(crate) fn sync_straddle_twins(
                 let mut t = commands.spawn((
                     Mesh3d(mesh.0.clone()),
                     MeshMaterial3d(far_h.clone()),
-                    MeshTag(tag.0),
+                    MeshTag::new(tag.value),
                     Transform::IDENTITY,
                     StraddleTwinOf(part),
                     ChildOf(part),
@@ -388,8 +389,8 @@ pub(crate) fn sync_straddle_twins(
         let Ok((_, ptag, pmesh, pmat, ..)) = parts.get(of.0) else {
             continue; // the batch is going away, and the child with it
         };
-        if tag.0 != ptag.0 {
-            tag.0 = ptag.0;
+        if tag.value != ptag.value {
+            tag.value = ptag.value;
         }
         if mesh.0 != pmesh.0 {
             mesh.0 = pmesh.0.clone();

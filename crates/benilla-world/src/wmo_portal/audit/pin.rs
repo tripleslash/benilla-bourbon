@@ -3,7 +3,7 @@
 //! regressions pinned at such spots.
 
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
-use bevy::math::{Mat4, Vec3};
+use bevy::math::Vec3;
 
 use super::super::seed::down_ray_claim;
 use super::super::EXTERIOR_LIT;
@@ -351,8 +351,8 @@ fn wmo_pin_probe() {
     };
     let fovy = scalar("WOW_WMO_PIN_FOVY", crate::view::CAM_FOVY);
     let aspect = scalar("WOW_WMO_PIN_ASPECT", 16.0 / 9.0);
-    let clip = Mat4::perspective_rh(fovy, aspect, 0.1, 1000.0)
-        * Mat4::look_at_rh(eye_bevy, look_bevy, Vec3::Y);
+    let clip = bevy::math::proj::perspective(fovy, aspect, 0.1, 1000.0)
+        * glam::camera::rh::view::look_at_mat4(eye_bevy, look_bevy, Vec3::Y);
 
     let model = &subject.model;
     println!(
@@ -523,8 +523,8 @@ fn shadowfang_courtyard_leaves_the_far_room_on_the_scene_fog() {
     let look_bevy = placed
         .world_from_local
         .transform_point3(wow_to_bevy(to_local(look_world)));
-    let clip = Mat4::perspective_rh(crate::view::CAM_FOVY, 16.0 / 9.0, 0.1, 1000.0)
-        * Mat4::look_at_rh(eye_bevy, look_bevy, Vec3::Y);
+    let clip = bevy::math::proj::perspective(crate::view::CAM_FOVY, 16.0 / 9.0, 0.1, 1000.0)
+        * glam::camera::rh::view::look_at_mat4(eye_bevy, look_bevy, Vec3::Y);
     let pvs = crate::wmo_portal::compute_pvs_traced(
         &subject.model,
         eye,
@@ -581,8 +581,8 @@ fn shadowfang_courtyard_leaves_the_far_room_on_the_scene_fog() {
     let inside_bevy = placed
         .world_from_local
         .transform_point3(wow_to_bevy(inside));
-    let inside_clip = Mat4::perspective_rh(crate::view::CAM_FOVY, 16.0 / 9.0, 0.1, 1000.0)
-        * Mat4::look_at_rh(inside_bevy, eye_bevy, Vec3::Y);
+    let inside_clip = bevy::math::proj::perspective(crate::view::CAM_FOVY, 16.0 / 9.0, 0.1, 1000.0)
+        * glam::camera::rh::view::look_at_mat4(inside_bevy, eye_bevy, Vec3::Y);
     let inside_pvs = crate::wmo_portal::compute_pvs_traced(
         &subject.model,
         inside,
@@ -619,8 +619,8 @@ fn shadowfang_sees_true_interiors_that_are_off_the_fog_chain() {
         .world_from_local
         .transform_point3(wow_to_bevy(inside));
     let look_bevy = placed.world_from_local.transform_point3(wow_to_bevy(look));
-    let clip = Mat4::perspective_rh(crate::view::CAM_FOVY, 16.0 / 9.0, 0.1, 1000.0)
-        * Mat4::look_at_rh(inside_bevy, look_bevy, Vec3::Y);
+    let clip = bevy::math::proj::perspective(crate::view::CAM_FOVY, 16.0 / 9.0, 0.1, 1000.0)
+        * glam::camera::rh::view::look_at_mat4(inside_bevy, look_bevy, Vec3::Y);
     let pvs = crate::wmo_portal::compute_pvs_traced(
         &subject.model,
         inside,
@@ -774,8 +774,8 @@ fn darnassus_pass_two_walks_on_from_the_window() {
         }
         let eye_bevy = placed.world_from_local.transform_point3(wow_to_bevy(eye));
         let look_bevy = placed.world_from_local.transform_point3(wow_to_bevy(look));
-        let clip = Mat4::perspective_rh(crate::view::CAM_FOVY, 16.0 / 9.0, 0.1, 1000.0)
-            * Mat4::look_at_rh(eye_bevy, look_bevy, Vec3::Y);
+        let clip = bevy::math::proj::perspective(crate::view::CAM_FOVY, 16.0 / 9.0, 0.1, 1000.0)
+            * glam::camera::rh::view::look_at_mat4(eye_bevy, look_bevy, Vec3::Y);
         let mut tap = WalkOn::default();
         let pvs = crate::wmo_portal::compute_pvs_traced(
             &subject.model,

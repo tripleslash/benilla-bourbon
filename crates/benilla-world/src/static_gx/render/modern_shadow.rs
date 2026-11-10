@@ -287,12 +287,14 @@ impl EntityShadowPipelines {
             label: Some(label.into()),
             layout,
             vertex: VertexState {
+                constants: Default::default(),
                 shader: self.shader.clone(),
                 shader_defs: defs.clone(),
                 entry_point: Some("vertex".into()),
                 buffers: vec![vertex_layout],
             },
             fragment: (cutout || clip).then(|| FragmentState {
+                constants: Default::default(),
                 shader: self.shader.clone(),
                 shader_defs: defs,
                 entry_point: Some("fragment".into()),
@@ -579,6 +581,7 @@ fn init_shadow_pipelines(
             label: Some(label.into()),
             layout: vec![view_layout.clone(), pipes.cell_layout.clone()],
             vertex: VertexState {
+                constants: Default::default(),
                 shader: shader.clone(),
                 shader_defs: defs.clone(),
                 entry_point: Some("vertex".into()),
@@ -587,6 +590,7 @@ fn init_shadow_pipelines(
             // Opaque casters need no fragment stage; cutout ones alpha-key their texture, and the
             // lamp atlas's discard its light's fixture.
             fragment: (cutout || clip).then(|| FragmentState {
+                constants: Default::default(),
                 shader: shader.clone(),
                 shader_defs: defs,
                 entry_point: Some("fragment".into()),
@@ -651,6 +655,7 @@ fn init_shadow_pipelines(
         label: Some("modern_shadow_tile_fill".into()),
         layout: vec![],
         vertex: VertexState {
+            constants: Default::default(),
             shader: asset_server.load("embedded://benilla_world/shaders/modern/depth_fill.wgsl"),
             shader_defs: vec![],
             entry_point: Some("fill_vertex".into()),
@@ -688,12 +693,14 @@ fn init_shadow_pipelines(
         label: Some("modern_shadow_restore".into()),
         layout: vec![restore_layout.clone()],
         vertex: VertexState {
+            constants: Default::default(),
             shader: fill_shader.clone(),
             shader_defs: vec![],
             entry_point: Some("restore_vertex".into()),
             buffers: vec![],
         },
         fragment: Some(FragmentState {
+            constants: Default::default(),
             shader: fill_shader,
             shader_defs: vec![],
             entry_point: Some("restore_fragment".into()),
@@ -1028,6 +1035,7 @@ fn queue_terrain_shadow_pipelines(
             label: Some("modern_shadow_terrain".into()),
             layout: vec![pipes.view_layout.clone()],
             vertex: VertexState {
+                constants: Default::default(),
                 shader: pipes.shader.clone(),
                 shader_defs: vec![],
                 entry_point: Some("vertex".into()),

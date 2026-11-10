@@ -1045,7 +1045,7 @@ fn compute_pvs_traced<T: FloodTrace>(
     // the flood's per-group callback without the recursion). Both legs run it: the camera-outside
     // seed `0x6b3dd0` forks on the same bit. Every arm frustum-tests the MOGI AABB first
     // (`0x6b3d9d`, `0x6b3f2d`, `call 0x682f60`).
-    let base = Frustum(bevy::math::primitives::ViewFrustum::from_clip_from_world(
+    let base = Frustum(bevy::shape::ViewFrustum::from_clip_from_world(
         clip_from_world,
     ));
     for (gi, g) in nav.iter().enumerate() {
@@ -1468,12 +1468,12 @@ mod tests {
         let model = portal_model();
         let info = &model.portal_infos[0];
         // WoW (−0.05, 0, 0) → Bevy (0, 0, 0.05); looking along WoW +x <=> Bevy −z.
-        let view = Mat4::look_at_rh(
+        let view = glam::camera::rh::view::look_at_mat4(
             bevy::math::Vec3::new(0.0, 0.0, 0.05),
             bevy::math::Vec3::new(0.0, 0.0, -10.0),
             bevy::math::Vec3::Y,
         );
-        let clip = Mat4::perspective_rh(0.9, 16.0 / 9.0, 0.1, 1000.0) * view;
+        let clip = bevy::math::proj::perspective(0.9, 16.0 / 9.0, 0.1, 1000.0) * view;
         let rect = portal_screen_rect(&model, info, &clip, &Affine3A::IDENTITY)
             .expect("a doorway ahead must keep a rect");
         let inter = intersect_rect(FULL_SCREEN, rect).expect("must overlap the screen");
@@ -1485,12 +1485,12 @@ mod tests {
         let model = portal_model();
         let info = &model.portal_infos[0];
         // Camera 5 yd past the doorway (WoW +x is Bevy −z), looking on along −z.
-        let view = Mat4::look_at_rh(
+        let view = glam::camera::rh::view::look_at_mat4(
             bevy::math::Vec3::new(0.0, 0.0, -5.0),
             bevy::math::Vec3::new(0.0, 0.0, -10.0),
             bevy::math::Vec3::Y,
         );
-        let clip = Mat4::perspective_rh(0.9, 16.0 / 9.0, 0.1, 1000.0) * view;
+        let clip = bevy::math::proj::perspective(0.9, 16.0 / 9.0, 0.1, 1000.0) * view;
         assert!(portal_screen_rect(&model, info, &clip, &Affine3A::IDENTITY).is_none());
     }
 
@@ -1502,12 +1502,12 @@ mod tests {
         // Eye 3 yd back from the doorway, WoW (-3, 0, 1) = Bevy (0, 1, 3), looking along WoW +x
         // (Bevy −z), straight through the opening.
         let eye_local = [-3.0, 0.0, 1.0];
-        let view = Mat4::look_at_rh(
+        let view = glam::camera::rh::view::look_at_mat4(
             bevy::math::Vec3::new(0.0, 1.0, 3.0),
             bevy::math::Vec3::new(0.0, 1.0, -10.0),
             bevy::math::Vec3::Y,
         );
-        let clip = Mat4::perspective_rh(0.9, 16.0 / 9.0, 0.1, 1000.0) * view;
+        let clip = bevy::math::proj::perspective(0.9, 16.0 / 9.0, 0.1, 1000.0) * view;
         let pvs = compute_pvs_traced(&model, eye_local, None, &clip, &Affine3A::IDENTITY, &mut ());
 
         assert_eq!(
@@ -1564,12 +1564,12 @@ mod tests {
         model.group_nav[3].flags |= CALLBACK_PASS;
         // Aim at g3, 30 yd off-axis, so the full frustum holds it: WoW (2..6, 30..34) is Bevy
         // x ∈ [-34,-30], z ∈ [-6,-2].
-        let view = Mat4::look_at_rh(
+        let view = glam::camera::rh::view::look_at_mat4(
             bevy::math::Vec3::new(0.0, 1.0, 3.0),
             bevy::math::Vec3::new(-32.0, 1.0, -4.0),
             bevy::math::Vec3::Y,
         );
-        let clip = Mat4::perspective_rh(0.9, 16.0 / 9.0, 0.1, 1000.0) * view;
+        let clip = bevy::math::proj::perspective(0.9, 16.0 / 9.0, 0.1, 1000.0) * view;
         let pvs = compute_pvs_traced(
             &model,
             [-3.0, 0.0, 1.0],
@@ -1594,8 +1594,8 @@ mod tests {
         );
 
         // The control: Pass 3 is still a frustum test, so facing away darkens g3.
-        let away = Mat4::perspective_rh(0.9, 16.0 / 9.0, 0.1, 1000.0)
-            * Mat4::look_at_rh(
+        let away = bevy::math::proj::perspective(0.9, 16.0 / 9.0, 0.1, 1000.0)
+            * glam::camera::rh::view::look_at_mat4(
                 bevy::math::Vec3::new(0.0, 1.0, 3.0),
                 bevy::math::Vec3::new(32.0, 1.0, 10.0),
                 bevy::math::Vec3::Y,
@@ -1641,12 +1641,12 @@ mod tests {
         model.group_nav[0].ref_count = 0;
         model.group_nav[1].ref_count = 0;
         model.group_nav[0].flags |= EXTERIOR_LIT;
-        let view = Mat4::look_at_rh(
+        let view = glam::camera::rh::view::look_at_mat4(
             bevy::math::Vec3::new(0.0, 1.0, 3.0),
             bevy::math::Vec3::new(-32.0, 1.0, -4.0),
             bevy::math::Vec3::Y,
         );
-        let clip = Mat4::perspective_rh(0.9, 16.0 / 9.0, 0.1, 1000.0) * view;
+        let clip = bevy::math::proj::perspective(0.9, 16.0 / 9.0, 0.1, 1000.0) * view;
         let pvs_from = |model: &WmoModel| {
             compute_pvs_traced(
                 model,
@@ -1698,12 +1698,12 @@ mod tests {
     fn an_open_air_street_keeps_the_shells_windows() {
         let mut model = doorway_model();
         model.group_nav[0].flags |= EXTERIOR_LIT;
-        let view = Mat4::look_at_rh(
+        let view = glam::camera::rh::view::look_at_mat4(
             bevy::math::Vec3::new(0.0, 1.0, 3.0),
             bevy::math::Vec3::new(0.0, 1.0, -10.0),
             bevy::math::Vec3::Y,
         );
-        let clip = Mat4::perspective_rh(0.9, 16.0 / 9.0, 0.1, 1000.0) * view;
+        let clip = bevy::math::proj::perspective(0.9, 16.0 / 9.0, 0.1, 1000.0) * view;
         let street = compute_pvs_traced(
             &model,
             [-3.0, 0.0, 1.0],

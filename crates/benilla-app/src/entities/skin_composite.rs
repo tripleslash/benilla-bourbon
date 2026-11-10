@@ -16,8 +16,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-#[cfg(not(target_arch = "wasm32"))]
-use anyhow::Context;
 use benilla_assets::{repeat_texture_authored, LockRecover, SpatialCache};
 #[cfg(not(target_arch = "wasm32"))]
 use benilla_formats::blp_bytes_to_mip_chain;
@@ -359,9 +357,11 @@ fn read_texture(chain: &Mutex<Chain>, path: &str) -> anyhow::Result<BlpMipChain>
             drop(locked);
             archive.read_file(&name).map_err(anyhow::Error::from)
         }
-    }
-    .with_context(|| format!("reading texture '{name}'"))?;
-    blp_bytes_to_mip_chain(&bytes).with_context(|| format!("decoding texture '{name}'"))
+    };
+    let bytes = anyhow::Context::with_context(bytes, || format!("reading texture '{name}'"))?;
+    anyhow::Context::with_context(blp_bytes_to_mip_chain(&bytes), || {
+        format!("decoding texture '{name}'")
+    })
 }
 
 /// Land every finished composite before this frame's bodies ask for theirs.

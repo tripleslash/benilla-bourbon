@@ -25,7 +25,6 @@
 //! character file's existence is the character-set state, as in the reference.
 
 use bevy::input::keyboard::KeyboardInput;
-use bevy::input::mouse::MouseScrollUnit;
 use bevy::input::ButtonState;
 use bevy::prelude::*;
 
@@ -589,12 +588,13 @@ pub(crate) fn sync_dispatch(
 pub(crate) const WAYLAND_PIXEL_SCROLL: bool = cfg!(target_os = "linux");
 
 /// The physical pixels of a trackpad's travel that make one notch. On Wayland it is 10 axis units,
-/// 10 logical pixels, as SDL, GLFW and Xwayland take one step; elsewhere Bevy's conversion factor.
+/// 10 logical pixels, as SDL, GLFW and Xwayland take one step; elsewhere Bevy's default pixels
+/// per line (`MouseScrollPixelsPerLine`, 100, 0.19's `SCROLL_UNIT_CONVERSION_FACTOR`).
 pub(crate) fn pixels_per_notch(scale_factor: f32, wayland: bool) -> f32 {
     if wayland {
         10.0 * scale_factor
     } else {
-        MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR
+        *bevy::input::mouse::MouseScrollPixelsPerLine::default()
     }
 }
 
@@ -1240,7 +1240,7 @@ mod tests {
                 .write_message(bevy::window::WindowEvent::MouseWheel(
                     bevy::input::mouse::MouseWheel {
                         phase: bevy::input::touch::TouchPhase::Moved,
-                        unit: MouseScrollUnit::Line,
+                        unit: bevy::input::mouse::MouseScrollUnit::Line,
                         x: 0.0,
                         y: notches.signum() as f32,
                         window: Entity::PLACEHOLDER,

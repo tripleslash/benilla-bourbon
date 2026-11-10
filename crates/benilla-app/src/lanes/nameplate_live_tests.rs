@@ -461,7 +461,7 @@ fn framed_client(look: &str) -> App {
     world.init_resource::<crate::player::CameraControl>();
     let mut camera = Camera::default();
     camera.computed.clip_from_view =
-        Mat4::perspective_infinite_reverse_rh(1.2, 1024.0 / 768.0, 0.1);
+        bevy::math::proj::perspective_infinite_reverse(1.2, 1024.0 / 768.0, 0.1);
     camera.computed.target_info = Some(bevy::camera::RenderTargetInfo {
         physical_size: UVec2::new(1024, 768),
         scale_factor: 1.0,

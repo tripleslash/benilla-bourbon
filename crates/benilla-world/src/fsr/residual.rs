@@ -87,6 +87,7 @@ pub(super) fn init(
         ),
     );
     let pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        constants: Default::default(),
         label: Some("fsr_residual".into()),
         layout: vec![layout.clone()],
         immediate_size: 0,
@@ -227,7 +228,11 @@ pub(super) fn readback(residual: Option<Res<Residual>>, device: Res<RenderDevice
         }
         READY => {
             let sums: [u32; 3] = {
-                let view = r.staging.slice(..).get_mapped_range();
+                let view = r
+                    .staging
+                    .slice(..)
+                    .get_mapped_range()
+                    .expect("a mapped staging buffer reads");
                 let words: &[u32] = bytemuck::cast_slice(&view);
                 [words[0], words[1], words[2]]
             };

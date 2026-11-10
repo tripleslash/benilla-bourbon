@@ -199,6 +199,7 @@ pub fn cascade_splits(quality: LightingQuality) -> &'static [f32] {
 
 /// This frame's cascades, extracted for the render world. `count == 0` = no modern shadow.
 #[derive(Resource, Clone, Default, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct ModernCascades {
     pub count: u32,
     pub clip_from_world: [Mat4; MAX_CASCADES],
@@ -227,6 +228,7 @@ pub type TerrainCaster = (AssetId<Mesh>, Vec3, Vec3, u32);
 /// that hold it are redrawn with the coarse terrain the camera sees. Collected in `Last`; empty in
 /// a classic session.
 #[derive(Resource, Clone, Default, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct ModernTerrainCasters {
     pub cells: Vec<TerrainCaster>,
     /// Bumped whenever `cells` changes, so a reader keyed on the set skips re-hashing it.
@@ -256,6 +258,7 @@ pub struct EntityCaster {
 
 /// Every casting entity-lane part this frame. Collected in `Last`; empty in a classic session.
 #[derive(Resource, Clone, Default, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct ModernEntityCasters {
     pub parts: Vec<EntityCaster>,
 }
@@ -432,14 +435,14 @@ fn create_shadow_assets(
     // P6: the local-light grid sits between them (`lights::BLOCK_LIGHT_BYTES`), which is what puts
     // both writable sub-ranges — the grid's cells and the probe field — on 256-byte offsets.
     let mut block = ShaderBuffer::with_size(
-        CASCADES_BYTES
+        (CASCADES_BYTES
             + super::volumetrics::BLOCK_TAIL_BYTES
             + super::gi::GI_PARAMS_BYTES
             + super::lights::BLOCK_LIGHT_BYTES
-            + super::gi::BLOCK_PROBE_BYTES,
+            + super::gi::BLOCK_PROBE_BYTES) as u64,
         RenderAssetUsages::RENDER_WORLD,
     );
-    block.buffer_description.usage |= BufferUsages::COPY_DST;
+    block.buffer_usage |= BufferUsages::COPY_DST;
     let _ = buffers.insert(MODERN_SHADOW_CASCADES.id(), block);
 }
 
@@ -829,7 +832,7 @@ pub fn narrowed_cull(clip_from_world: &Mat4, corners: &[Vec3A; 8], pad: f32) -> 
 /// The texel-snapped reverse-Z orthographic light clip around a sphere.
 pub fn cascade_from_sphere(center: Vec3, radius: f32, dir: Vec3, size: u32) -> CascadeFit {
     let up = if dir.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
-    let light_rot = Mat4::look_to_rh(Vec3::ZERO, dir, up);
+    let light_rot = glam::camera::rh::view::look_to_mat4(Vec3::ZERO, dir, up);
     let texel = 2.0 * radius / size as f32;
     let c = light_rot.transform_point3(center);
     let snapped = Vec3::new(
@@ -841,7 +844,8 @@ pub fn cascade_from_sphere(center: Vec3, radius: f32, dir: Vec3, size: u32) -> C
     // Reverse-Z: the plane `CASTER_REACH` beyond the sphere toward the sun maps to 1, the sphere's
     // far side to 0.
     let reach = caster_reach();
-    let proj = Mat4::orthographic_rh(-radius, radius, -radius, radius, radius, -(radius + reach));
+    let proj =
+        bevy::math::proj::orthographic(-radius, radius, -radius, radius, radius, -(radius + reach));
     CascadeFit {
         clip_from_world: proj * light_view,
         texel_world: texel,

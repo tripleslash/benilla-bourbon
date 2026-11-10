@@ -590,9 +590,9 @@ fn author_cards(
         // From the animation's own factor, not the tag, so the card's alpha animation survives and
         // the release lands on the card's own value.
         let authored = anim.map_or(1.0, |a| a.current);
-        let bits = benilla_world::mesh_tag::with_alpha(tag.0, authored * alpha);
-        if tag.0 != bits {
-            tag.0 = bits;
+        let bits = benilla_world::mesh_tag::with_alpha(tag.value, authored * alpha);
+        if tag.value != bits {
+            tag.value = bits;
         }
     }
 }
@@ -624,9 +624,9 @@ fn author_descendants(
                 fade_alpha(f.from, f.to, t)
             });
             let combined = alpha * anim.map_or(1.0, |a| a.current) * ramp;
-            let bits = benilla_world::mesh_tag::with_alpha(tag.0, combined);
-            if tag.0 != bits {
-                tag.0 = bits;
+            let bits = benilla_world::mesh_tag::with_alpha(tag.value, combined);
+            if tag.value != bits {
+                tag.value = bits;
             }
             // The instance alpha alone picks the pass; the far-side-of-water axis composes on top.
             let want = benilla_world::model_render::far_resolved(

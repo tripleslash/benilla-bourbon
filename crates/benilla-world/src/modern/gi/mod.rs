@@ -313,6 +313,7 @@ pub fn gi_gain() -> f32 {
 /// follow the camera deterministically, and the clipmap's follow it with hysteresis, so both are
 /// derived where the data they address lives.
 #[derive(Resource, Clone, Copy, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct ModernGi {
     pub on: bool,
     pub tier: GiTier,

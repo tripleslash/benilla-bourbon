@@ -66,7 +66,7 @@ impl StoredCard {
             self.part,
             crate::model_render::EntityPathWhy(self.why),
             crate::interact::PickMesh(self.pick.clone()),
-            MeshTag(self.tag.0),
+            MeshTag::new(self.tag.value),
             self.card.clone(),
             self.fade.clone(),
         ));
@@ -229,7 +229,7 @@ mod tests {
             },
             why: "test",
             pick: crate::static_gx::testkit::tri([0.0; 3]),
-            tag: MeshTag(0),
+            tag: MeshTag::new(0),
             card: BillboardCard::new(&info, Transform::from_translation(pivot)),
             aabb: None,
             pivot,

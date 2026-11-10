@@ -223,7 +223,7 @@ pub(super) fn inspect_ui(
     let tag_line = mouseover
         .entity
         .and_then(|e| stores.tags.get(e).ok())
-        .map(|t| format!("tag {}", benilla_world::mesh_tag::describe(t.0)));
+        .map(|t| format!("tag {}", benilla_world::mesh_tag::describe(t.value)));
     // Every live part naming this object and how many drew; a doodad has one per render batch,
     // so a doubled placement shows twice that.
     let parts_line = {
@@ -240,7 +240,7 @@ pub(super) fn inspect_ui(
                     // alpha, and the material word. Additive is `clutter_fade.z` bit 2, which keys
                     // the (ONE, ONE) blend and the shader's alpha fold.
                     let scale = gt.compute_transform().scale.x;
-                    let alpha = tag.map_or(-1.0, |t| benilla_world::mesh_tag::alpha_of(t.0));
+                    let alpha = tag.map_or(-1.0, |t| benilla_world::mesh_tag::alpha_of(t.value));
                     let m = mat.and_then(|m| stores.model_mats.get(&m.0));
                     let state = match m {
                         Some(m) => {

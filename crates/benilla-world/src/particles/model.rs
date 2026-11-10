@@ -124,7 +124,7 @@ pub(super) fn update_model_particles(
                             Transform::IDENTITY,
                             Visibility::Hidden,
                             NoFrustumCulling,
-                            MeshTag(crate::mesh_tag::alpha_bits(1.0)),
+                            MeshTag::new(crate::mesh_tag::alpha_bits(1.0)),
                             ChildDraw,
                         ))
                         .id();
@@ -179,7 +179,7 @@ pub(super) fn update_model_particles(
                     if *vis != Visibility::Inherited {
                         *vis = Visibility::Inherited;
                     }
-                    *tag = MeshTag(crate::mesh_tag::alpha_bits(rgba[3]));
+                    *tag = MeshTag::new(crate::mesh_tag::alpha_bits(rgba[3]));
                 }
                 if let Some(mut m) = materials.get_mut(mat) {
                     m.extension.tint = Vec4::new(rgba[0], rgba[1], rgba[2], 1.0);

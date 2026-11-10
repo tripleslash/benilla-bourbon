@@ -1406,11 +1406,10 @@ mod tests {
             far: 5000.0,
             ..default()
         });
-        let frustum = bevy::camera::primitives::Frustum(
-            bevy::math::primitives::ViewFrustum::from_clip_from_world(
+        let frustum =
+            bevy::camera::primitives::Frustum(bevy::shape::ViewFrustum::from_clip_from_world(
                 &(projection.get_clip_from_view() * GlobalTransform::from(seat).affine().inverse()),
-            ),
-        );
+            ));
         app.world_mut().spawn((
             crate::view::WorldCamera,
             GlobalTransform::from(seat),
@@ -1484,11 +1483,10 @@ mod tests {
             far: 5000.0,
             ..default()
         });
-        let frustum = bevy::camera::primitives::Frustum(
-            bevy::math::primitives::ViewFrustum::from_clip_from_world(
+        let frustum =
+            bevy::camera::primitives::Frustum(bevy::shape::ViewFrustum::from_clip_from_world(
                 &(projection.get_clip_from_view() * GlobalTransform::from(seat).affine().inverse()),
-            ),
-        );
+            ));
         app.world_mut().spawn((
             crate::view::WorldCamera,
             GlobalTransform::from(seat),
@@ -1547,11 +1545,10 @@ mod tests {
             far: 5000.0,
             ..default()
         });
-        let frustum = bevy::camera::primitives::Frustum(
-            bevy::math::primitives::ViewFrustum::from_clip_from_world(
+        let frustum =
+            bevy::camera::primitives::Frustum(bevy::shape::ViewFrustum::from_clip_from_world(
                 &(projection.get_clip_from_view() * GlobalTransform::from(seat).affine().inverse()),
-            ),
-        );
+            ));
         app.world_mut().spawn((
             crate::view::WorldCamera,
             GlobalTransform::from(seat),
@@ -1613,11 +1610,10 @@ mod tests {
             far: 5000.0,
             ..default()
         });
-        let frustum = bevy::camera::primitives::Frustum(
-            bevy::math::primitives::ViewFrustum::from_clip_from_world(
+        let frustum =
+            bevy::camera::primitives::Frustum(bevy::shape::ViewFrustum::from_clip_from_world(
                 &(projection.get_clip_from_view() * GlobalTransform::from(seat).affine().inverse()),
-            ),
-        );
+            ));
         app.world_mut().spawn((
             crate::view::WorldCamera,
             GlobalTransform::from(seat),

@@ -22,7 +22,7 @@ use crate::view::WorldCamera;
 
 /// A spawned billboard card: world pivot, per-axis scale, bone-flag arm and scale pulse. It needs
 /// a [`MeshTag`] as a world root: a per-model alpha (the self-model fade) reaches it through its
-/// own tag, and the default `MeshTag(0)` is the shader's untagged, opaque sentinel.
+/// own tag, and the default `MeshTag::new(0)` is the shader's untagged, opaque sentinel.
 #[derive(Component, Clone)]
 #[require(Transform, Visibility, MeshTag)]
 pub struct BillboardCard {
@@ -514,7 +514,7 @@ pub(crate) fn face_billboards(
                                 &format!(
                                     "card={entity} owner={owner} scale={:.3?} a={:.2} pivot={:.2?}",
                                     card.scale,
-                                    tag.map_or(-1.0, |t| crate::mesh_tag::alpha_of(t.0)),
+                                    tag.map_or(-1.0, |t| crate::mesh_tag::alpha_of(t.value)),
                                     card.world_pivot
                                 ),
                             );

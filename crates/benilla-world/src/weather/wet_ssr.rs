@@ -42,6 +42,7 @@ use crate::liquid::{LiquidScreenTargets, LiquidScreenView};
 /// What the pass needs from the main world: whether it runs, and the colour a ray that finds
 /// nothing reflects.
 #[derive(Resource, Clone, Copy, Default, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub(crate) struct WetReflections {
     /// Mirrors [`EnvFrame::wet_ssr`]: terrain tags exactly while this is set.
     live: bool,
@@ -165,6 +166,7 @@ fn specialize_pipelines(
             layout: vec![pipelines.layout.clone()],
             vertex: fullscreen_shader.to_vertex_state(),
             fragment: Some(FragmentState {
+                constants: Default::default(),
                 shader: pipelines.shader.clone(),
                 shader_defs: vec![],
                 entry_point: Some("fs_reflect".into()),

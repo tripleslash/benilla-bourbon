@@ -471,8 +471,8 @@ fn nearest_hit(subject: &Subject, orig: [f32; 3], dir: [f32; 3], max_t: f32) -> 
 fn clip_from_world(eye_local: [f32; 3], target_local: [f32; 3]) -> Mat4 {
     let eye = wow_to_bevy(eye_local);
     let target = wow_to_bevy(target_local);
-    let proj = Mat4::perspective_rh(0.9, 16.0 / 9.0, 0.1, 1000.0);
-    let view = Mat4::look_at_rh(eye, target, Vec3::Y);
+    let proj = bevy::math::proj::perspective(0.9, 16.0 / 9.0, 0.1, 1000.0);
+    let view = glam::camera::rh::view::look_at_mat4(eye, target, Vec3::Y);
     proj * view
 }
 

@@ -202,7 +202,7 @@ impl MergedFormsCache {
             .collect();
         let merged = concat_geometry(&first.geometry, &rest);
         let stat = benilla_assets::submesh_to_static_mesh(&merged);
-        let aabb = stat.compute_aabb();
+        let aabb = stat.get_aabb();
         // Skinned only when every member skins and the joints survived the concatenation.
         let skinned = (group
             .members

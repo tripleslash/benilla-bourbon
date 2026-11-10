@@ -64,7 +64,7 @@ use bevy::render::render_resource::binding_types::{
 };
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderDevice, RenderQueue};
-use bevy::render::view::{ExtractedView, RetainedViewEntity, ViewDepthTexture};
+use bevy::render::view::{ExtractedView, RetainedViewEntity, ViewDepthStencilTexture};
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 use bevy::shader::ShaderDefVal;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
@@ -200,7 +200,10 @@ impl GpuCounters {
                 }
                 MAPPED => {
                     let stats: [u32; 4] = {
-                        let bytes = r.buffer.get_mapped_range(..);
+                        let bytes = r
+                            .buffer
+                            .get_mapped_range(..)
+                            .expect("a mapped stats buffer reads");
                         bytemuck::pod_read_unaligned(&bytes[..STATS_SIZE as usize])
                     };
                     r.buffer.unmap();
@@ -521,6 +524,7 @@ fn init_gpu_cull(
                  defs: &[&'static str],
                  entry: &'static str| {
         pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            constants: Default::default(),
             label: Some(label.into()),
             layout: vec![layout.clone()],
             immediate_size: 0,
@@ -589,7 +593,7 @@ fn init_gpu_cull(
 /// the depth textures, the indirect buffers and the region table are prepared.
 pub(super) fn prepare_gpu_cull(
     mut hiz: ResMut<GxHiZ>,
-    views: Query<(&ExtractedView, &ViewDepthTexture, &StaticGxView)>,
+    views: Query<(&ExtractedView, &ViewDepthStencilTexture, &StaticGxView)>,
     indirect: Res<GxIndirect>,
     shared: Option<Res<GxBindless>>,
     device: Res<RenderDevice>,
@@ -605,7 +609,7 @@ pub(super) fn prepare_gpu_cull(
     let buffers = indirect.cull_buffers();
     let table = shared.as_deref().and_then(GxBindless::table_buffer);
     for (view, depth, marker) in &views {
-        let texture = &depth.texture;
+        let texture = depth.texture();
         if !texture.usage().contains(TextureUsages::TEXTURE_BINDING) {
             continue;
         }
@@ -622,7 +626,7 @@ pub(super) fn prepare_gpu_cull(
             continue;
         };
         let generation = state.generation;
-        let depth_view = depth.view();
+        let depth_view = depth.attachment.depth_stencil_views().attachment_view();
         if state
             .reduce
             .as_ref()
@@ -779,7 +783,7 @@ impl<'w> GxCullPass<'w> {
     pub(super) fn new(
         world: &'w World,
         view: &ExtractedView,
-        depth: &ViewDepthTexture,
+        depth: &ViewDepthStencilTexture,
         prepassed: bool,
     ) -> Option<Self> {
         if !prepassed {
@@ -788,7 +792,13 @@ impl<'w> GxCullPass<'w> {
         let hiz = world.get_resource::<GxHiZ>()?;
         let state = hiz.views.get(&view.retained_view_entity)?;
         let (depth_id, _, reduce_bind) = state.reduce.as_ref()?;
-        if *depth_id != depth.view().id() {
+        if *depth_id
+            != depth
+                .attachment
+                .depth_stencil_views()
+                .attachment_view()
+                .id()
+        {
             return None;
         }
         let (_, _, cull_bind) = state.cull.as_ref()?;

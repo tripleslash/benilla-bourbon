@@ -201,6 +201,7 @@ fn init_pipelines(
                    path: &'static str,
                    entry: &'static str| {
         pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            constants: Default::default(),
             label: Some(label.into()),
             layout: vec![layout.clone()],
             immediate_size: 0,
@@ -234,6 +235,7 @@ fn init_pipelines(
         let mut shader_defs = crate::static_gx::rt_scene::shader_defs(1);
         shader_defs.push(bevy::shader::ShaderDefVal::from("RT_SHADOWS"));
         pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            constants: Default::default(),
             label: Some("modern_gi_trace".into()),
             layout: vec![trace_layout.clone(), crate::static_gx::rt_scene::layout()],
             immediate_size: 0,
@@ -280,6 +282,7 @@ fn init_pipelines(
             shader_defs.push(bevy::shader::ShaderDefVal::from("RT_SHADOWS"));
         }
         pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            constants: Default::default(),
             label: Some("modern_gi_trace_rt".into()),
             layout: vec![trace_layout.clone(), crate::static_gx::rt_scene::layout()],
             immediate_size: 0,

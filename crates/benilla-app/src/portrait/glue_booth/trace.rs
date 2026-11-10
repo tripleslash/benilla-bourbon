@@ -61,7 +61,7 @@ struct GlueDrawWatch {
     scene: Vec<Entity>,
 }
 
-impl ExtractResource for GlueDrawWatch {
+impl ExtractResource<bevy::render::RenderApp> for GlueDrawWatch {
     type Source = GlueDrawWatch;
     fn extract_resource(source: &Self::Source) -> Self {
         source.clone()

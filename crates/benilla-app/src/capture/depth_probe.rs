@@ -24,7 +24,7 @@ use bevy::render::render_resource::{
     TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect, TextureUsages,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, ViewQuery};
-use bevy::render::view::{ExtractedView, ViewDepthTexture};
+use bevy::render::view::{ExtractedView, ViewDepthStencilTexture};
 use bevy::render::{Render, RenderApp, RenderSystems};
 
 use super::probes::ProbeClock;
@@ -118,7 +118,7 @@ struct DepthWatch {
     armed: bool,
 }
 
-impl ExtractResource for DepthWatch {
+impl ExtractResource<bevy::render::RenderApp> for DepthWatch {
     type Source = DepthWatch;
     fn extract_resource(source: &Self::Source) -> Self {
         source.clone()
@@ -149,7 +149,7 @@ struct QuadProbe {
 #[derive(Resource, Clone, Default)]
 struct QuadProbes(Vec<QuadProbe>);
 
-impl ExtractResource for QuadProbes {
+impl ExtractResource<bevy::render::RenderApp> for QuadProbes {
     type Source = QuadProbes;
     fn extract_resource(source: &Self::Source) -> Self {
         source.clone()
@@ -240,6 +240,7 @@ fn parse_bones(spec: Option<&str>) -> Option<Vec<u16>> {
 
 /// Marks the one view whose depth to read; the UI camera shares the world camera's depth texture.
 #[derive(Component, Clone, Copy, ExtractComponent)]
+#[extract_app(bevy::render::RenderApp)]
 struct DepthProbeView;
 
 /// The staging buffer, kept across frames so a 24-frame burst allocates once.
@@ -287,7 +288,7 @@ fn arm(
 /// Allocate the staging buffer to match the view's depth texture, before the graph runs.
 fn prepare_staging(
     watch: Option<Res<DepthWatch>>,
-    view: Query<&ViewDepthTexture, With<DepthProbeView>>,
+    view: Query<&ViewDepthStencilTexture, With<DepthProbeView>>,
     staging: Option<Res<DepthStaging>>,
     device: Res<RenderDevice>,
     mut commands: Commands,
@@ -297,7 +298,7 @@ fn prepare_staging(
         return;
     }
     let Ok(depth) = view.single() else { return };
-    let size = depth.texture.size();
+    let size = depth.texture().size();
     // `Depth32Float` is 4 bytes a texel; a buffer copy's row stride is 256-byte aligned.
     let bytes_per_row = RenderDevice::align_copy_bytes_per_row(size.width as usize * 4) as u32;
     if staging.is_some_and(|s| s.bytes_per_row == bytes_per_row && s.height == size.height) {
@@ -319,7 +320,7 @@ fn prepare_staging(
 /// it also holds depth the transparent pass wrote, from something that tracks the camera.
 fn depth_readback_pass(
     world: &World,
-    view: ViewQuery<(&ViewDepthTexture, &DepthProbeView)>,
+    view: ViewQuery<(&ViewDepthStencilTexture, &DepthProbeView)>,
     mut render_context: RenderContext,
 ) {
     let (depth, _) = view.into_inner();
@@ -342,17 +343,17 @@ fn depth_readback_pass(
         {
             return;
         }
-        let size = depth.texture.size();
+        let size = depth.texture().size();
         // `COPY_SRC` lands only on the texture allocated after `arm`, so the first armed frame
         // still has the old one.
-        if !depth.texture.usage().contains(TextureUsages::COPY_SRC) {
+        if !depth.texture().usage().contains(TextureUsages::COPY_SRC) {
             return;
         }
         // Depth-stencil formats reject partial copies (wgpu-core `validate_texture_copy_range`), so
         // the whole texture goes across.
         render_context.command_encoder().copy_texture_to_buffer(
             TexelCopyTextureInfo {
-                texture: &depth.texture,
+                texture: depth.texture(),
                 mip_level: 0,
                 origin: Origin3d::ZERO,
                 aspect: TextureAspect::DepthOnly,
@@ -385,7 +386,7 @@ fn read_depth(
     view: Query<&ExtractedView, With<DepthProbeView>>,
     device: Res<RenderDevice>,
     staging: Option<Res<DepthStaging>>,
-    depth: Query<&ViewDepthTexture, With<DepthProbeView>>,
+    depth: Query<&ViewDepthStencilTexture, With<DepthProbeView>>,
     mut read: ResMut<DepthFramesRead>,
 ) {
     let (Some(watch), Some(staging)) = (watch, staging) else {
@@ -403,10 +404,10 @@ fn read_depth(
         return;
     };
     // Mirrors the node's own skip: no copy was encoded this frame, so there is nothing to map.
-    if !depth.texture.usage().contains(TextureUsages::COPY_SRC) {
+    if !depth.texture().usage().contains(TextureUsages::COPY_SRC) {
         return;
     }
-    let size = depth.texture.size();
+    let size = depth.texture().size();
     let slice = staging.buffer.slice(..);
     slice.map_async(MapMode::Read, |_| {});
     // Block, so a frame's numbers never arrive under a later frame's index.
@@ -430,7 +431,9 @@ fn read_depth(
     }
     let view_from_clip = view.clip_from_view.inverse();
     {
-        let data = slice.get_mapped_range();
+        let data = slice
+            .get_mapped_range()
+            .expect("a mapped staging buffer reads");
         for &(x, y) in &watch.pixels {
             if x >= size.width || y >= size.height {
                 warn!(
@@ -579,7 +582,7 @@ mod tests {
 
     /// The projection the world camera actually draws with: Bevy's reverse-Z, infinite far.
     fn proj() -> Mat4 {
-        Mat4::perspective_infinite_reverse_rh(
+        bevy::math::proj::perspective_infinite_reverse(
             benilla_world::view::CAM_FOVY,
             3200.0 / 1800.0,
             benilla_world::view::NEARCLIP_DEFAULT,

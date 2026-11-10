@@ -904,6 +904,7 @@ fn compute_rig_palettes(
 
 /// The render-world mirror: `Arc` bumps and the frame's dirty ranges.
 #[derive(Resource, Clone, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub(crate) struct RigPaletteExtract {
     rows: Arc<Vec<[f32; 4]>>,
     table: Arc<Vec<u32>>,
@@ -972,6 +973,7 @@ fn publish_rig_palettes(mut palettes: ResMut<RigPalettes>, mut out: ResMut<RigPa
 
 /// The glue and portrait booths' studio light buffers, which mirror the palette regions.
 #[derive(Resource, Clone, Default, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct RigPaletteMirrors(
     pub std::collections::HashMap<&'static str, bevy::render::render_resource::Buffer>,
 );

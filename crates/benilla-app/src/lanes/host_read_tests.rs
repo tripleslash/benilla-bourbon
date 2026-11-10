@@ -169,14 +169,13 @@ const AFTER_THE_PACKETS_IN_THE_REFERENCE: &[(&str, &[&str], &str)] = &[
 /// first's doc for that state and the kinds.
 fn writers_between(app: &mut App) -> Option<BTreeMap<String, BTreeSet<String>>> {
     let world = app.world_mut();
-    use bevy::ecs::system::System;
     // What the getters read as they run: every live family's access.
     let mut live = IntoSystem::into_system(|_: crate::script_calls::live::LiveReads| {});
-    let live = System::initialize(&mut live, world)
+    let live = crate::vm_pass::Declared::initialize(&mut live, world)
         .filtered_accesses()
         .to_vec();
     let mut host = IntoSystem::into_system(|_: crate::script_calls::ScriptCallHost| {});
-    let host = System::initialize(&mut host, world)
+    let host = crate::vm_pass::Declared::initialize(&mut host, world)
         .filtered_accesses()
         .to_vec();
     // 0.19 keeps resources as components: one set holds both kinds the getters read.
@@ -282,8 +281,9 @@ fn writers_between(app: &mut App) -> Option<BTreeMap<String, BTreeSet<String>>> 
             .systems
             .iter()
             .filter_map(|(k, system, _)| {
-                let access = accesses.remove(&k)?.filtered_accesses().to_vec();
-                Some((k, (access, system.is_exclusive(), system.has_deferred())))
+                let declared = accesses.remove(&k)?;
+                let access = declared.filtered_accesses().to_vec();
+                Some((k, (access, declared.exclusive, system.has_deferred())))
             })
             .collect()
     });

@@ -1309,6 +1309,7 @@ pub(crate) fn init_rt_scene(
         ),
     );
     let repack = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        constants: Default::default(),
         label: Some("modern_rt_repack".into()),
         layout: vec![repack_layout.clone()],
         immediate_size: 0,

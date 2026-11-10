@@ -35,6 +35,7 @@ use crate::static_gx::rt_scene;
 /// **The water's reflection this frame**, decided in the main world with the mirror camera's
 /// (`liquid::reflect`): `on` while the lane stands in for the mirror. Extracted every frame.
 #[derive(Resource, Clone, Copy, Default, PartialEq, Eq, Debug, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub(crate) struct RtReflectLane {
     pub(crate) on: bool,
 }
@@ -54,6 +55,7 @@ impl RtReflectLane {
 /// ([`crate::liquid::WaterDetail::wants_ray_traced_reflection`]), written by [`decide_water_lane`]
 /// and extracted, where `rt_scene::update_rt_tier` reads it beside the ray-tracing options.
 #[derive(Resource, Clone, Copy, Default, PartialEq, Eq, Debug, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub(crate) struct RtWaterTier(pub(crate) bool);
 
 /// Main world, `Update`, after the frame's script calls (the `waterDetail` callback) and the

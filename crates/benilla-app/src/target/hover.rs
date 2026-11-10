@@ -1239,7 +1239,8 @@ mod tests {
         app.finish();
         app.cleanup();
         let mut camera = Camera::default();
-        camera.computed.clip_from_view = Mat4::perspective_infinite_reverse_rh(1.0, 1.0, 0.1);
+        camera.computed.clip_from_view =
+            bevy::math::proj::perspective_infinite_reverse(1.0, 1.0, 0.1);
         camera.computed.target_info = Some(RenderTargetInfo {
             physical_size: UVec2::splat(100),
             scale_factor: 1.0,
@@ -1306,7 +1307,8 @@ mod tests {
         app.cleanup();
         // The camera ten yards up +Z, looking down it, the cursor at the centre.
         let mut camera = Camera::default();
-        camera.computed.clip_from_view = Mat4::perspective_infinite_reverse_rh(1.0, 1.0, 0.1);
+        camera.computed.clip_from_view =
+            bevy::math::proj::perspective_infinite_reverse(1.0, 1.0, 0.1);
         camera.computed.target_info = Some(RenderTargetInfo {
             physical_size: UVec2::splat(100),
             scale_factor: 1.0,
@@ -1401,7 +1403,8 @@ mod tests {
         world.init_resource::<crate::spell::targeting::UnitPick>();
         world.insert_resource(crate::net::Reputations::default());
         let mut camera = Camera::default();
-        camera.computed.clip_from_view = Mat4::perspective_infinite_reverse_rh(1.0, 1.0, 0.1);
+        camera.computed.clip_from_view =
+            bevy::math::proj::perspective_infinite_reverse(1.0, 1.0, 0.1);
         camera.computed.target_info = Some(RenderTargetInfo {
             physical_size: UVec2::splat(100),
             scale_factor: 1.0,

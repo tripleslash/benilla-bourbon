@@ -969,7 +969,7 @@ fn classify_part(
         && !interleave.eye_submerged()
         && !marked
         && !straddling
-        && !tag.is_some_and(|t| clips.straddles(crate::mesh_tag::rig_of(t.0)))
+        && !tag.is_some_and(|t| clips.straddles(crate::mesh_tag::rig_of(t.value)))
         && !twins.to_near.contains_key(&cur)
         && interleave.dry_at(gt.translation())
     {
@@ -1007,7 +1007,7 @@ fn classify_part(
     }
     // A straddler keeps its near identity, clipped to the eye's half, and `sync_straddle_twins`
     // hangs its far twin beside it; the verdict is the word the clip itself reads.
-    let straddles = tag.is_some_and(|t| clips.straddles(crate::mesh_tag::rig_of(t.0)));
+    let straddles = tag.is_some_and(|t| clips.straddles(crate::mesh_tag::rig_of(t.value)));
     if straddles != straddling {
         trace_side(
             if straddles { "straddle" } else { "unstraddle" },

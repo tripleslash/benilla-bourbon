@@ -24,7 +24,6 @@
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Mutex;
 
-use anyhow::Context;
 use bevy::prelude::*;
 #[cfg(not(target_arch = "wasm32"))]
 use bevy::tasks::futures_lite::future;
@@ -1274,9 +1273,9 @@ fn open_bed(chain: &Mutex<Chain>, path: &str) -> anyhow::Result<StreamingSoundDa
     }
     let archive = locked.archive_for(path)?;
     drop(locked);
-    let file = archive
-        .open_file(path)
-        .with_context(|| format!("opening {path} in {}", archive.path().display()))?;
+    let file = anyhow::Context::with_context(archive.open_file(path), || {
+        format!("opening {path} in {}", archive.path().display())
+    })?;
     let len = file.size();
     Ok(mixer::stream_from_source(file, len)?.loop_region(..))
 }
@@ -1303,10 +1302,7 @@ fn land_ambience(
     };
     let ambience_amp = config.category_amp(SoundCategory::Ambience);
     start_bed(zone, opened, ambience_amp, now, |data| {
-        out.mixer
-            .as_mut()
-            .context("the audio device closed")?
-            .play_stream(data)
+        anyhow::Context::context(out.mixer.as_mut(), "the audio device closed")?.play_stream(data)
     });
 }
 

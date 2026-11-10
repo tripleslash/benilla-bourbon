@@ -327,7 +327,7 @@ pub(super) fn spawn_part(
     insert_pick_marker(&mut child, dress.kind);
     // Every part gets a tag, the instance slot and the live alpha: the slot is the instance's
     // identity (the tint reads it), not a skinning detail.
-    child.insert(MeshTag(benilla_world::mesh_tag::spawn_tag(
+    child.insert(MeshTag::new(benilla_world::mesh_tag::spawn_tag(
         dress.inst_slot,
         tag_alpha,
     )));
@@ -437,7 +437,7 @@ fn spawn_billboard_part(
     ));
     insert_pick_marker(&mut card, dress.kind);
     // The unit's instance slot, though the card is never skinned: a tinted unit tints its cards.
-    card.insert(MeshTag(benilla_world::mesh_tag::spawn_tag(
+    card.insert(MeshTag::new(benilla_world::mesh_tag::spawn_tag(
         dress.inst_slot,
         tag_alpha,
     )));
@@ -691,7 +691,7 @@ mod tests {
         )>();
         let found: Vec<_> = q
             .iter(app.world())
-            .map(|(_, t, m, fm, p)| (t.0, m.0.clone(), fm.blend.clone(), p.since))
+            .map(|(_, t, m, fm, p)| (t.value, m.0.clone(), fm.blend.clone(), p.since))
             .collect();
         assert_eq!(found.len(), 1, "one billboard batch, one card");
         assert_eq!(found[0].3, SINCE, "joined the unit's own pending clock");

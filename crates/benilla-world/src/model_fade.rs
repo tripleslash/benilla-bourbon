@@ -476,9 +476,9 @@ pub fn apply_render_fade(
         // `0x707b0b`, `0x707b33`), or death-only geometry shows through the ramp.
         let alpha = fade.alpha_at(t) * anim.map_or(1.0, |a| a.current);
         // `with_alpha` keeps the ground shade and never writes the untagged, opaque `0`.
-        let bits = crate::mesh_tag::with_alpha(tag.0, alpha);
-        if tag.0 != bits {
-            tag.0 = bits;
+        let bits = crate::mesh_tag::with_alpha(tag.value, alpha);
+        if tag.value != bits {
+            tag.value = bits;
         }
         // The cutout ignores `α`; a part without `FadeMaterials` still ramps, never hanging hidden.
         if let Some(fm) = fm {
@@ -823,7 +823,7 @@ fn arm_fade_out(entity: Entity, now: f32, start_alpha: f32, commands: &mut Comma
 
 /// The alpha a part shows, the teardown's `startAlpha`; no tag is opaque, as in the shader.
 fn start_alpha(tag: Option<&MeshTag>) -> f32 {
-    tag.map_or(1.0, |t| crate::mesh_tag::alpha_of(t.0))
+    tag.map_or(1.0, |t| crate::mesh_tag::alpha_of(t.value))
 }
 
 /// Arm every [`FadeMaterials`] part at or under `entity`, recording each visited entity in

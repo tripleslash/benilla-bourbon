@@ -556,7 +556,7 @@ mod tests {
             let now = world.change_tick();
             let resources: Vec<(ComponentId, String)> = world
                 .iter_resources()
-                .map(|(info, _)| (info.id(), info.name().to_string()))
+                .map(|(id, info, _)| (id, info.name().to_string()))
                 .collect();
             for (id, name) in resources {
                 let changed = world

@@ -64,7 +64,7 @@ use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, ViewQuery};
 use bevy::render::texture::GpuImage;
 use bevy::render::view::{
-    Msaa, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
+    Msaa, ViewDepthStencilTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
 };
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 use bevy::shader::ShaderDefVal;
@@ -108,6 +108,7 @@ pub(crate) const REFLECT_MIPS: u32 = 5;
 /// binds them through `AsBindGroup`, which resolves `Handle<Image>` against
 /// `RenderAssets<GpuImage>`. The node below renders *into* those same `GpuImage`s.
 #[derive(Resource, Clone, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub(crate) struct LiquidScreenTargets {
     /// The opaque frame, viewport-sized. Refraction (`samp0`).
     pub(crate) color: Handle<Image>,
@@ -224,6 +225,7 @@ fn filter_for(format: TextureFormat) -> ImageFilterMode {
 /// view in the tree, including the portrait booth's bake cameras, and the last one to run would
 /// leave *its* frame in the shared targets for the water to refract.
 #[derive(Component, Clone, Copy, Default, ExtractComponent)]
+#[extract_app(bevy::render::RenderApp)]
 pub(crate) struct LiquidScreenView;
 
 fn mark_world_camera(
@@ -400,6 +402,7 @@ fn build_variant(
             layout: vec![layout.clone()],
             vertex: fullscreen_shader.to_vertex_state(),
             fragment: Some(FragmentState {
+                constants: Default::default(),
                 shader: shader.clone(),
                 shader_defs: defs.clone(),
                 entry_point: Some(entry.into()),
@@ -448,7 +451,7 @@ pub(crate) fn liquid_screen_pass(
     world: &World,
     view: ViewQuery<(
         &ViewTarget,
-        &ViewDepthTexture,
+        &ViewDepthStencilTexture,
         &ViewUniformOffset,
         &Msaa,
         &LiquidScreenView,
@@ -465,7 +468,7 @@ pub(crate) fn liquid_screen_pass(
         // validation error, which kills the render thread rather than degrading. Skip; the next
         // frame is armed.
         if !depth
-            .texture
+            .texture()
             .usage()
             .contains(TextureUsages::TEXTURE_BINDING)
         {
@@ -514,7 +517,7 @@ pub(crate) fn liquid_screen_pass(
                 &layout,
                 &BindGroupEntries::with_indices((
                     (0, view_binding.clone()),
-                    (1, depth.view()),
+                    (1, depth.attachment.depth_stencil_views().attachment_view()),
                     (2, view_target.main_texture_view()),
                     (3, &color.sampler),
                     (4, blur_src),

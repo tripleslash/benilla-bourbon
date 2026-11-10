@@ -83,7 +83,7 @@ pub(super) fn spawn_menagerie(
     let mut layouts: Vec<(Handle<Mesh>, Option<bevy::camera::primitives::Aabb>, bool)> = Vec::new();
     for colors in [false, true] {
         let stat = benilla_assets::submesh_to_static_mesh(&warm_quad(colors, false, false));
-        let aabb = stat.compute_aabb();
+        let aabb = stat.get_aabb();
         layouts.push((meshes.add(stat), aabb, false));
         let skin = benilla_assets::submesh_to_skinned_mesh(&warm_quad(colors, true, false));
         layouts.push((meshes.add(skin), None, true));
@@ -419,7 +419,7 @@ pub(super) fn spawn_menagerie(
     // at first sight.
     let uv1_static = {
         let mesh = benilla_assets::submesh_to_static_mesh(&warm_quad(false, false, true));
-        let aabb = mesh.compute_aabb();
+        let aabb = mesh.get_aabb();
         (meshes.add(mesh), aabb)
     };
     {
@@ -694,9 +694,11 @@ fn spawn_model_rig(
     mat: &Handle<WowModelMaterial>,
 ) {
     let tag = if skinned {
-        MeshTag(benilla_world::mesh_tag::rig_bits(0) | benilla_world::mesh_tag::alpha_bits(1.0))
+        MeshTag::new(
+            benilla_world::mesh_tag::rig_bits(0) | benilla_world::mesh_tag::alpha_bits(1.0),
+        )
     } else {
-        MeshTag(benilla_world::mesh_tag::alpha_bits(1.0))
+        MeshTag::new(benilla_world::mesh_tag::alpha_bits(1.0))
     };
     let mut e = commands.spawn((
         Mesh3d(mesh.clone()),

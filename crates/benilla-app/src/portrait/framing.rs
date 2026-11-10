@@ -90,7 +90,7 @@ impl CameraProjection for WowPortraitProjection {
     fn get_clip_from_view(&self) -> Mat4 {
         // The client's matrix with Bevy's reverse-z infinite depth; the record's far (27.8 on
         // HumanMale) never clips a model-local portrait.
-        Mat4::perspective_infinite_reverse_rh(self.fovy(), self.aspect, self.near)
+        bevy::math::proj::perspective_infinite_reverse(self.fovy(), self.aspect, self.near)
     }
 
     fn get_clip_from_view_for_sub(&self, _sub_view: &SubCameraView) -> Mat4 {

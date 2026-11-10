@@ -5258,9 +5258,12 @@ mod tests {
     /// cover the call host's, by schedule and name. An exclusive system declares no access and is
     /// left out.
     fn vm_writers_and_the_unhosted(app: &mut App) -> (Vec<String>, Vec<String>) {
-        use bevy::ecs::system::{IntoSystem, System};
+        use bevy::ecs::system::IntoSystem;
         let world = app.world_mut();
-        let host = System::initialize(&mut IntoSystem::into_system(|_: ScriptCallHost| {}), world);
+        let host = crate::vm_pass::Declared::initialize(
+            &mut IntoSystem::into_system(|_: ScriptCallHost| {}),
+            world,
+        );
         let host = host.combined_access();
         // Each system's access with the host's summed in, into one buffer reused across them.
         let mut with_host = bevy::ecs::query::Access::new();
@@ -5287,8 +5290,11 @@ mod tests {
                     };
                     let access = declared.combined_access();
                     // A write by name: an unbounded one names no resource in particular.
-                    if system.is_exclusive()
-                        || !access.try_writes().is_ok_and(|set| set.contains(vm))
+                    if declared.exclusive
+                        || !access
+                            .writes()
+                            .as_finite_set()
+                            .is_some_and(|set| set.contains(vm))
                     {
                         continue;
                     }

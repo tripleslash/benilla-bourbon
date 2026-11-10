@@ -203,7 +203,8 @@ fn aim(app: &mut App) {
     let world = app.world_mut();
     let mut q = world.query_filtered::<(&mut Camera, &GlobalTransform), With<WorldCamera>>();
     let (mut camera, cam_tf) = q.single_mut(world).expect("the world camera");
-    camera.computed.clip_from_view = Mat4::perspective_infinite_reverse_rh(1.0, 4.0 / 3.0, 0.1);
+    camera.computed.clip_from_view =
+        bevy::math::proj::perspective_infinite_reverse(1.0, 4.0 / 3.0, 0.1);
     camera.computed.target_info = Some(RenderTargetInfo {
         physical_size: UVec2::new(1024, 768),
         scale_factor: 1.0,

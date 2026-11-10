@@ -166,7 +166,10 @@ pub(crate) fn measure(world: &mut World) {
                 .unregister_system(id)
                 .expect("a registered handler")
                 .system();
-            accesses.push((name, system.initialize(world)));
+            accesses.push((
+                name,
+                crate::vm_pass::Declared::initialize(&mut *system, world).into_set(),
+            ));
             let again = world.register_boxed_system(system);
             handlers.registered[i].0 = again;
             for list in handlers.by_kind.values_mut() {

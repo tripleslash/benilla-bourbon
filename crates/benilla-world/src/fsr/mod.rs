@@ -86,6 +86,7 @@ pub fn bevy_offset(fsr_jitter: Vec2) -> Vec2 {
 /// the app sets, and the jitter sequence, which [`advance_jitter`] runs. Extracted every frame; its
 /// removal takes the render world's FSR state with it.
 #[derive(Component, Clone, Copy, Debug, ExtractComponent)]
+#[extract_app(bevy::render::RenderApp)]
 #[extract_component_sync_target((
     Self,
     FsrState,
@@ -134,6 +135,7 @@ impl FsrView {
 /// fork: the `rcasSharpness` CVar, the RCAS pass's sharpness on the SDK's `[0, 1]` scale, which
 /// `ffx_fsr3upscaler.cpp` maps to `2 − 2·sharpness` stops; [`RCAS_SHARPNESS_DEFAULT`] as shipped.
 #[derive(Resource, Clone, Copy, PartialEq, Debug, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct RcasSharpness(pub f32);
 
 /// The sharpness the upscaler shipped with, physics-rs's 0.875: a quarter stop.
@@ -155,12 +157,14 @@ impl RcasSharpness {
 /// Render-world flag: this frame is a held frame of frame generation, and no world view renders.
 /// The FSR systems stand down on it so the history advances once per rendered world frame.
 #[derive(Resource, Default, Clone, Copy, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct FsrHeld(pub bool);
 
 /// Render-world flag: this world frame is not followed by a held frame, because the world frame
 /// alone outlasts a held one and the pair would split the interval unevenly ([`cadence`]). It
 /// presents the real frame it rendered and skips the interpolation chain.
 #[derive(Resource, Default, Clone, Copy, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct FgSolo(pub bool);
 
 /// The chain's shaders, built once for this device's formats (`caps`).
@@ -329,7 +333,7 @@ fn debug_views(
         Has<FgState>,
         Has<crate::ffx_glow::FfxBackdrop>,
         Option<&crate::ffx_glow::FfxBackdropView>,
-        Option<&bevy::render::view::ViewDepthTexture>,
+        Option<&bevy::render::view::ViewDepthStencilTexture>,
     )>,
     pipelines: Option<Res<upscaler::FsrPipelines>>,
     pipeline_cache: Res<bevy::render::render_resource::PipelineCache>,
@@ -376,7 +380,7 @@ fn debug_views(
             fsr.is_some(),
             fsr.is_some_and(|f| f.output().is_some()),
             claim.map(|c| c.source_entity()),
-            depth.map(|d| d.texture.usage()),
+            depth.map(|d| d.texture().usage()),
         );
     }
     let [ran, compiling, unbindable] = upscaler::UPSCALE_COUNTS
@@ -593,7 +597,7 @@ mod tests {
     #[test]
     fn the_jitter_sign_matches_fsr() {
         let size = Vec2::new(1280.0, 720.0);
-        let proj = Mat4::perspective_infinite_reverse_rh(1.0, size.x / size.y, 0.2);
+        let proj = bevy::math::proj::perspective_infinite_reverse(1.0, size.x / size.y, 0.2);
         let jitter = Vec2::new(0.3, -0.2);
         let mut jittered = proj;
         TemporalJitter {

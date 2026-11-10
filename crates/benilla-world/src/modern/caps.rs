@@ -139,8 +139,8 @@ fn mesh_shader_capable(features: WgpuFeatures, limits: &WgpuLimits) -> bool {
         && limits.max_task_invocations_per_workgroup >= TASK_MESHLETS
         && limits.max_task_invocations_per_dimension >= TASK_MESHLETS
         && limits.max_task_payload_size >= TASK_PAYLOAD_BYTES
-        && limits.max_task_mesh_workgroups_per_dimension >= MAX_DRAW_TASKS
-        && limits.max_task_mesh_workgroup_total_count >= MAX_DRAW_TASKS
+        && limits.max_task_workgroups_per_dimension >= MAX_DRAW_TASKS
+        && limits.max_task_workgroup_total_count >= MAX_DRAW_TASKS
         && limits.max_bind_groups >= MESH_BIND_GROUPS
         && limits.max_storage_buffers_per_shader_stage >= MESH_STORAGE_BUFFERS
 }
@@ -183,7 +183,7 @@ pub(crate) fn init(
     async_queue: Option<Res<RenderAsyncComputeQueue>>,
 ) {
     let mut caps = HwCaps::from_parts(device.features(), &device.limits());
-    caps.mesh_shader &= emits_mesh_stages(adapter.0.backend);
+    caps.mesh_shader &= emits_mesh_stages(adapter.backend);
     // The queue `async_compute::init` made, which runs first (`plugin`).
     caps.async_compute = async_queue.is_some();
     info!(
@@ -199,8 +199,8 @@ pub(crate) fn init(
         caps.mesh_shader,
         caps.multiview_views,
         caps.multiview_selective,
-        adapter.0.name,
-        adapter.0.backend,
+        adapter.name,
+        adapter.backend,
     );
     commands.insert_resource(caps);
 }
@@ -285,8 +285,8 @@ mod tests {
         limits.max_bind_groups = MESH_BIND_GROUPS;
         // wgpu's recommended minimum dispatch (256 a dimension, 1024 in all) is under the lane's.
         assert!(!HwCaps::from_parts(features, &limits).mesh_shader);
-        limits.max_task_mesh_workgroups_per_dimension = 1 << 22;
-        limits.max_task_mesh_workgroup_total_count = 1 << 22;
+        limits.max_task_workgroups_per_dimension = 1 << 22;
+        limits.max_task_workgroup_total_count = 1 << 22;
         assert_eq!(
             HwCaps::from_parts(features, &limits).mesh_shader,
             !cfg!(target_arch = "wasm32")

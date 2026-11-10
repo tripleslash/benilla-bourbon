@@ -89,7 +89,7 @@ struct PhaseWatch {
     armed: bool,
 }
 
-impl ExtractResource for PhaseWatch {
+impl ExtractResource<bevy::render::RenderApp> for PhaseWatch {
     type Source = PhaseWatch;
     fn extract_resource(source: &Self::Source) -> Self {
         source.clone()

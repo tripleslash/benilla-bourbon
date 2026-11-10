@@ -260,7 +260,7 @@ fn fire_pick(
                 shading_of(resolved),
                 tag.map_or_else(
                     || "<none>".to_string(),
-                    |t| benilla_world::mesh_tag::describe(t.0)
+                    |t| benilla_world::mesh_tag::describe(t.value)
                 ),
             );
         }

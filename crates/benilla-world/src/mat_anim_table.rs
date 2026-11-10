@@ -33,6 +33,7 @@ pub(crate) fn region_bytes() -> u64 {
 /// bind their own light buffer (the UI model tiles) reads `matanim[slot]` from it, so the table is
 /// uploaded there too. The portrait booths are not on it: their zeroed region is the seed pose.
 #[derive(Resource, Clone, Default, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct MatAnimMirrors(
     pub std::collections::HashMap<&'static str, bevy::render::render_resource::Buffer>,
 );
@@ -40,6 +41,7 @@ pub struct MatAnimMirrors(
 /// The live delta table, `Arc`-shared for a cheap extract and generation-stamped so an unchanged
 /// table uploads nothing.
 #[derive(Resource, Clone, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct MatAnimTable {
     rows: Arc<Vec<[f32; 4]>>,
     generation: u64,

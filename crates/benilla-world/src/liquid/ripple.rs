@@ -260,6 +260,7 @@ pub(super) fn pack_sky_rows(
 
 /// The per-frame blob, extracted to the render world for upload.
 #[derive(Resource, Clone, Copy, Default, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub(super) struct RippleData(RippleStd430);
 
 /// The buffer every liquid material binds, written in place each frame.
@@ -268,6 +269,7 @@ pub(super) struct RippleData(RippleStd430);
 /// buffer's rows 20+ are a variable-length point-light table, so there is no free row to take —
 /// only scattered spare lanes in unrelated rows, which is how a layout becomes unreadable.
 #[derive(Resource, Clone, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct RippleBuffer(pub Buffer);
 
 /// Create the shared ripple buffer. Called from the same place the shared light buffer is built, so
@@ -283,6 +285,7 @@ pub fn new_ripple_buffer(device: &RenderDevice) -> RippleBuffer {
 
 /// The two displacement targets and where they are.
 #[derive(Resource, Clone, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub(crate) struct RippleField {
     /// What the water material binds and what the wave step reads.
     pub(crate) map: Handle<Image>,
@@ -622,6 +625,7 @@ fn init_pipeline(
             layout: vec![layout.clone()],
             vertex: fullscreen_shader.to_vertex_state(),
             fragment: Some(FragmentState {
+                constants: Default::default(),
                 shader,
                 shader_defs: vec![],
                 entry_point: Some("fs_propagate".into()),

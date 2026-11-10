@@ -75,6 +75,7 @@ pub struct HeldFrame;
 /// A camera that still draws on a held frame: the player-UI camera and the dev overlay.
 /// Extracted, since [`hold_cameras`] reads it in the render world.
 #[derive(Component, Clone, Copy, Default, ExtractComponent)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct PresentsHeldFrames;
 
 /// Whether frame generation is wanted: the `frameGeneration` CVar, which the app writes. On by
@@ -488,6 +489,7 @@ pub fn take_cadence() -> Option<(f64, f64, f64)> {
 /// generation multiplier less one once the cadence holds ([`FgCadence::next_native`]), else 0.
 /// Native only; the web holds whole updates instead.
 #[derive(Resource, Clone, Copy, Default, Debug, PartialEq, Eq, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct FgHolds(pub u32);
 
 /// The frame generation multiplier asked for (`frameGenerationMultiplier`): presented frames per

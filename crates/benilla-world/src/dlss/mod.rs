@@ -112,6 +112,7 @@ pub struct UpscalerChoice(pub Upscaler);
 /// What this machine runs, resolved once: Super Resolution when the render device opened
 /// (`DlssPlugin::finish`), frame generation at boot (Streamline loaded and DLSS-G supported).
 #[derive(Resource, Clone, Copy, Default, Debug, PartialEq, Eq, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct DlssSupport {
     pub super_resolution: bool,
     pub frame_generation: bool,
@@ -127,12 +128,14 @@ pub struct DlssSupport {
 /// DLSS Frame Generation on this frame: the app's resolution of `upscaler`, `frameGeneration` and
 /// [`DlssSupport::frame_generation`]. Streamline's options follow it in the render world.
 #[derive(Resource, Clone, Copy, Default, Debug, PartialEq, Eq, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct DlssFrameGeneration(pub bool);
 
 /// The frames DLSS-G generates per rendered frame while it runs (`numFramesToGenerate`): the
 /// `frameGenerationMultiplier` less one, clamped to [`DlssSupport::frame_generation_max`]. The app
 /// resolves it.
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct DlssgFrames(pub u32);
 
 impl Default for DlssgFrames {

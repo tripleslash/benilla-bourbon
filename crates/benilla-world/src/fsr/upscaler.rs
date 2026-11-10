@@ -29,7 +29,7 @@ use bevy::render::render_resource::binding_types::{
 };
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
-use bevy::render::view::{ExtractedView, Msaa, ViewDepthTexture, ViewTarget};
+use bevy::render::view::{ExtractedView, Msaa, ViewDepthStencilTexture, ViewTarget};
 use bytemuck::{Pod, Zeroable};
 
 use super::caps::Formats;
@@ -559,6 +559,7 @@ pub(super) fn init_pipelines(
     let queue =
         |label: &'static str, layout: &BindGroupLayoutDescriptor, shader: &Handle<Shader>| {
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                constants: Default::default(),
                 label: Some(label.into()),
                 layout: vec![layout.clone()],
                 immediate_size: 0,
@@ -818,7 +819,12 @@ pub(super) fn fsr_opaque_copy(
 /// reactive mask), FSR's input preparation only while FSR frame generation reads it, then DLSS's
 /// evaluate into the same output; none of FSR's passes 2–7 run.
 pub(super) fn fsr_upscale_pass(
-    view: ViewQuery<(&ViewTarget, &ViewDepthTexture, &FsrView, &mut FsrState)>,
+    view: ViewQuery<(
+        &ViewTarget,
+        &ViewDepthStencilTexture,
+        &FsrView,
+        &mut FsrState,
+    )>,
     pipelines: Option<Res<FsrPipelines>>,
     pipeline_cache: Res<PipelineCache>,
     held: Res<FsrHeld>,
@@ -835,7 +841,7 @@ pub(super) fn fsr_upscale_pass(
     let (target, depth, fsr_view, mut state) = view.into_inner();
     // The depth is read by two passes, so it must be sampleable.
     if !depth
-        .texture
+        .texture()
         .usage()
         .contains(TextureUsages::TEXTURE_BINDING)
     {
@@ -884,7 +890,7 @@ pub(super) fn fsr_upscale_pass(
         &layout(&l.motion),
         &BindGroupEntries::sequential((
             params.clone(),
-            depth.view(),
+            depth.attachment.depth_stencil_views().attachment_view(),
             &t.velocity,
             color,
             opaque,
@@ -896,7 +902,7 @@ pub(super) fn fsr_upscale_pass(
         &layout(&l.prepare_inputs),
         &BindGroupEntries::sequential((
             params.clone(),
-            depth.view(),
+            depth.attachment.depth_stencil_views().attachment_view(),
             &t.mv,
             color,
             &t.dilated_mv,
@@ -932,7 +938,7 @@ pub(super) fn fsr_upscale_pass(
         let ok = {
             let inputs = crate::dlss::sr::Inputs {
                 color,
-                depth: depth.view(),
+                depth: depth.attachment.depth_stencil_views().attachment_view(),
                 motion: &mv,
                 output: &output,
                 jitter: state.jitter,
@@ -1129,7 +1135,7 @@ pub(super) fn fsr_upscale_pass(
             encoder,
             super::residual::Inputs {
                 params: state.params.as_entire_binding(),
-                depth: depth.view(),
+                depth: depth.attachment.depth_stencil_views().attachment_view(),
                 velocity: &t.velocity,
                 color: target.main_texture(),
                 color_view: target.main_texture_view(),
@@ -1150,7 +1156,7 @@ mod tests {
     use super::*;
 
     fn reverse_z(aspect: f32) -> Mat4 {
-        Mat4::perspective_infinite_reverse_rh(1.0, aspect, 0.2)
+        bevy::math::proj::perspective_infinite_reverse(1.0, aspect, 0.2)
     }
 
     /// A static point reprojects to where it was: through the camera-relative matrices, a world

@@ -85,8 +85,8 @@ pub(crate) fn cast_move(
     let (dir, len) = Dir3::new_and_length(movement).unwrap_or((Dir3::X, 0.0));
     let max_toi = len + skin_width;
 
-    let a0 = shape.aabb(from, Quat::IDENTITY);
-    let a1 = shape.aabb(from + movement, Quat::IDENTITY);
+    let a0 = shape.aabb(from, Quat::IDENTITY, 0.0);
+    let a1 = shape.aabb(from + movement, Quat::IDENTITY, 0.0);
     let swept = ColliderAabb {
         min: a0.min.min(a1.min) - Vec3::splat(skin_width),
         max: a0.max.max(a1.max) + Vec3::splat(skin_width),
@@ -429,7 +429,7 @@ fn for_each_contact(
         return; // a zero velocity has nothing to clip
     };
     let band = Band::new(shape, position, motion_dir, sweep_len);
-    let a = shape.aabb(position, Quat::IDENTITY);
+    let a = shape.aabb(position, Quat::IDENTITY, 0.0);
     let grown = ColliderAabb {
         min: a.min - Vec3::splat(prediction),
         max: a.max + Vec3::splat(prediction),
@@ -620,7 +620,7 @@ impl Band {
     /// The band of `shape` at `center` sweeping `len` along `dir`, floored at 1/36 yd
     /// (`[0x7ff9d0]`) as `0x632ba0` floors its sweep.
     fn new(shape: &Collider, center: Vec3, dir: Dir3, len: f32) -> Self {
-        let aabb = shape.aabb(center, Quat::IDENTITY);
+        let aabb = shape.aabb(center, Quat::IDENTITY, 0.0);
         let r = 0.5 * (aabb.max.x - aabb.min.x).max(aabb.max.z - aabb.min.z);
         let feet = Vec3::new(center.x, aabb.min.y, center.z);
         Self::of_volume(feet, r, aabb.max.y - aabb.min.y, *dir, len)

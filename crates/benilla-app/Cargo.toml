@@ -226,10 +226,11 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_Input_KeyboardAndMouse",
 ] }
 
-# The shader translation test writes the backend this platform renders with, through the naga
-# bevy already builds (`shaders.rs`): Bevy 0.19's wgpu 29 builds naga 29.
+# The shader translation test parses what bevy's shader cache composes (WGSL text since 0.20) and
+# writes the backend this platform renders with, through the naga bevy already builds
+# (`shaders.rs`): Bevy 0.20.1's wgpu 30 builds naga 30.
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-naga = { version = "30", features = ["msl-out"] }
+naga = { version = "30", features = ["wgsl-in", "msl-out"] }
 
 [target.'cfg(not(target_os = "macos"))'.dev-dependencies]
-naga = { version = "30", features = ["spv-out"] }
+naga = { version = "30", features = ["wgsl-in", "spv-out"] }

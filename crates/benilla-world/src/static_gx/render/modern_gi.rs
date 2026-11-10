@@ -230,6 +230,7 @@ fn init_gi_pipelines(
         &BindGroupLayoutEntries::single(ShaderStages::VERTEX, uniform_buffer::<HeightView>(true)),
     );
     let clear = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        constants: Default::default(),
         label: Some("modern_gi_voxel_clear".into()),
         layout: vec![view_layout.clone(), store_layout.clone()],
         immediate_size: 0,
@@ -756,12 +757,14 @@ fn prepare_gi_voxels(
                     pipes.store_layout.clone(),
                 ],
                 vertex: VertexState {
+                    constants: Default::default(),
                     shader: pipes.voxel_shader.clone(),
                     shader_defs: defs.clone(),
                     entry_point: Some("vertex".into()),
                     buffers: vec![vertex_layout()],
                 },
                 fragment: Some(FragmentState {
+                    constants: Default::default(),
                     shader: pipes.voxel_shader.clone(),
                     shader_defs: defs,
                     entry_point: Some("fragment".into()),
@@ -851,6 +854,7 @@ fn prepare_gi_voxels(
                 label: Some("modern_gi_heightfield".into()),
                 layout: vec![pipes.height_layout.clone()],
                 vertex: VertexState {
+                    constants: Default::default(),
                     shader: pipes.height_shader.clone(),
                     shader_defs: vec![],
                     entry_point: Some("vertex".into()),
