@@ -2366,7 +2366,7 @@ impl crate::Device for super::Device {
             unsafe { self.raw.CreateFence(0, Direct3D12::D3D12_FENCE_FLAG_NONE) }
                 .inspect_err(|e| log::warn!("async compute: no idle fence ({e})"))
                 .ok()?;
-        let idle_event = super::Event::create(false, false).ok()?;
+        let idle_event = Event::create(false, false).ok()?;
         Some(super::Queue {
             raw,
             temp_lists: Mutex::new(Vec::new()),
