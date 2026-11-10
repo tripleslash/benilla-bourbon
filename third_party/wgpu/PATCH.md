@@ -1,9 +1,9 @@
-# Vendored wgpu 29.0.4: benilla's local patch
+# Vendored wgpu 30.0.1: benilla's local patch
 
-This is the crates.io `wgpu` **29.0.4** source, unmodified except for the hunks below: **two entries added to one
-table and the two enum names those entries need**, the browser WGSL fix-ups, the device's
+This is the crates.io `wgpu` **30.0.1** source, unmodified except for the hunks below: **two entries added to one
+table**, the browser WGSL fix-ups, the device's
 limits and features read once, async pipeline creation and the per-frame labels. It is wired in through `[patch.crates-io]` in
-the root `Cargo.toml`. Bevy 0.19.1 asks for `^29.0.3`, which this satisfies. The upstream
+the root `Cargo.toml`. Bevy 0.20.1 asks for `^30`, which this satisfies. The upstream
 `README.md` is kept alongside this file.
 
 All four lines serve the WebGPU (browser) backend alone. The native backends go through
@@ -19,9 +19,9 @@ All four lines serve the WebGPU (browser) backend alone. The native backends go 
 A WebGPU feature missing from it is invisible to the first two and cannot be requested through the
 safe API.
 
-**`src/backend/webgpu/webgpu_sys/gen_GpuFeatureName.rs`.** The vendored bindings predate both names
-below, so the string enum gains `Subgroups = "subgroups"` and
-`TextureFormatsTier1 = "texture-formats-tier1"`. wgpu 30's bindings have them.
+The bindings name both features since wgpu 30 (`webgpu_sys::GpuFeatureName::Subgroups`,
+`TextureFormatsTier1`), so the 29 fork's `gen_GpuFeatureName.rs` hunk is gone; wgpu 30's table still
+maps neither.
 
 ## 1. `"subgroups"`
 
@@ -57,7 +57,7 @@ build instead of silently requesting the wrong feature.
 
 ## Browser WGSL (`src/backend/webgpu.rs`, `browser_wgsl`)
 
-A module Bevy hands over as naga IR is written back to WGSL for the browser by naga 29's writer.
+A module Bevy hands over as naga IR is written back to WGSL for the browser by naga 30's writer.
 Two things it writes, the browser's compiler rejects, so `browser_wgsl` post-processes the text:
 
 - `f32::MAX` comes out as `340282350000000000000000000000000000000f`, a decimal above the largest
@@ -156,7 +156,7 @@ wgpu 30 has the bindings, but still lacks the mappings as of 30.0.1.
 ## Verifying diff
 
 ```
-diff -ru <crates.io wgpu-29.0.4> third_party/wgpu
+diff -ru <crates.io wgpu-30.0.1> third_party/wgpu
 ```
 
 The diff shows only the hunks above, plus this file and the removed `Cargo.lock`.
