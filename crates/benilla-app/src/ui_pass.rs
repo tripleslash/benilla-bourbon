@@ -506,6 +506,10 @@ fn spawn_ui_camera(mut commands: Commands) {
         PlayerUiCamera,
         Name::new("player-UI camera"),
         Camera2d,
+        // Bevy 0.19's 2D default, stated: 0.20 defaults a `Camera2d` to `Linear`, which runs
+        // Bevy's colour grading in its 2D shaders.
+        bevy::core_pipeline::tonemapping::Tonemapping::None,
+        bevy::core_pipeline::tonemapping::DebandDither::Disabled,
         // No MSAA, named because silence means 4×: `Camera` requires `Msaa`, whose default is
         // `Sample4`. The world arrives resolved, and the quads are axis-aligned.
         bevy::render::view::Msaa::Off,

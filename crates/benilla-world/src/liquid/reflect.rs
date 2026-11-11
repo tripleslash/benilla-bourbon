@@ -130,7 +130,7 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::camera::CameraProjection;
 use bevy::camera::Hdr;
 use bevy::camera::{ImageRenderTarget, RenderTarget};
-use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::prelude::*;
 
 use super::screen::LiquidScreenTargets;
@@ -262,7 +262,10 @@ fn spawn_reflection_camera(
         // `scene_blur`, which IS the world camera's target, so the two have to agree or the mirror
         // reads as a differently-exposed picture pasted into the water.
         Hdr,
+        // Both stated: Bevy 0.20 warns on `None` beside `Camera3d`'s default `DebandDither::Enabled`,
+        // which never ran without the tonemapping pass.
         Tonemapping::None,
+        DebandDither::Disabled,
         // **The world camera's sample count, not `Off`** — and it is a pipeline-count decision,
         // not a quality one. Bevy specializes every material pipeline per view sample count, so a
         // mirror at a different count would compile a SECOND copy of every pipeline in the scene.

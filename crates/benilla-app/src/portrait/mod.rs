@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{PerspectiveProjection, Projection, RenderTarget};
-use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
@@ -925,7 +925,10 @@ pub(crate) fn booth_view_shape() -> impl Bundle {
     (
         Camera3d::default(),
         bevy::camera::Hdr,
+        // Both stated: Bevy 0.20 warns on `None` beside `Camera3d`'s default `DebandDither::Enabled`,
+        // which never ran without the tonemapping pass.
         Tonemapping::None,
+        DebandDither::Disabled,
         Msaa::Off,
         // No Bevy light reaches a booth, so one cluster: `Single`, not `None`, whose zero grid
         // sizes Bevy 0.19's GPU-clustering dummy target at 0×0, which WebGPU rejects.

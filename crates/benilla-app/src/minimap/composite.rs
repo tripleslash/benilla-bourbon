@@ -96,6 +96,10 @@ pub(super) fn setup_composite(
         .spawn((
             Name::new("minimap composite camera"),
             Camera2d,
+            // Bevy 0.19's 2D default, stated: 0.20 defaults a `Camera2d` to `Linear`, which runs
+            // Bevy's colour grading in its 2D shaders.
+            bevy::core_pipeline::tonemapping::Tonemapping::None,
+            bevy::core_pipeline::tonemapping::DebandDither::Disabled,
             // No MSAA, like the reference's plain RGBA8 target: multisampling an alpha-tested edge
             // gives partial coverage over the black clear, the grey seam this target removes.
             bevy::render::view::Msaa::Off,

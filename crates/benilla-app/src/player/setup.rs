@@ -3,7 +3,7 @@
 use avian3d::prelude::*;
 use bevy::camera::Hdr;
 use bevy::camera::{CameraOutputMode, PerspectiveProjection, Projection};
-use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::prelude::*;
 
 use benilla_assets::coords::wow_to_bevy;
@@ -37,7 +37,10 @@ fn spawn_fallback_camera(commands: &mut Commands, msaa: Msaa) {
         // The player's level: `Camera` requires `Msaa`, which would default to `Sample4`.
         msaa,
         Hdr,
+        // Both stated: Bevy 0.20 warns on `None` beside `Camera3d`'s default `DebandDither::Enabled`,
+        // which never ran without the tonemapping pass.
         Tonemapping::None,
+        DebandDither::Disabled,
         benilla_world::ffx_glow::FfxGlow::WORLD,
         world_camera_output(),
         Transform::from_xyz(0.0, 50.0, 100.0).looking_at(Vec3::ZERO, Vec3::Y),
@@ -108,7 +111,10 @@ pub(super) fn setup_player(
         // A linear `Rgba16Float` target without tonemapping: the shaders light in clamped gamma
         // space, so the output matches an 8-bit target.
         Hdr,
+        // Both stated: Bevy 0.20 warns on `None` beside `Camera3d`'s default `DebandDither::Enabled`,
+        // which never ran without the tonemapping pass.
         Tonemapping::None,
+        DebandDither::Disabled,
         // FFXGlow, `scene + glow·blur²`: the blur here, the combine in the UI camera's ground pass.
         benilla_world::ffx_glow::FfxGlow::WORLD,
         world_camera_output(),

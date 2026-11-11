@@ -211,6 +211,10 @@ fn spawn_egui_camera(mut commands: Commands) {
         // Named for [`crate::preflight`]'s MSAA check, which reports cameras by name.
         Name::new("egui dev-overlay camera"),
         Camera2d,
+        // Bevy 0.19's 2D default, stated: 0.20 defaults a `Camera2d` to `Linear`, which runs
+        // Bevy's colour grading in its 2D shaders.
+        bevy::core_pipeline::tonemapping::Tonemapping::None,
+        bevy::core_pipeline::tonemapping::DebandDither::Disabled,
         // Set explicitly: `Camera` requires `Msaa`, default `Sample4`, and Bevy keys the 2D depth
         // texture on the target alone, so this must match the player-UI camera's `Msaa::Off` or a
         // pass fails validation. egui feathers its own edges anyway.

@@ -105,6 +105,10 @@ fn spawn_backdrop(
     commands.spawn((
         Name::new("worldview FSR backdrop"),
         Camera2d,
+        // Bevy 0.19's 2D default, stated: 0.20 defaults a `Camera2d` to `Linear`, which runs
+        // Bevy's colour grading in its 2D shaders.
+        bevy::core_pipeline::tonemapping::Tonemapping::None,
+        bevy::core_pipeline::tonemapping::DebandDither::Disabled,
         Msaa::Off,
         // The combine decodes itself: no UI gamma lane follows it here.
         FfxBackdrop {

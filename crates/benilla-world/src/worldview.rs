@@ -5,7 +5,7 @@
 
 use bevy::camera::Hdr;
 use bevy::camera::{PerspectiveProjection, Projection};
-use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
@@ -467,7 +467,10 @@ fn spawn_view_camera(mut commands: Commands, msaa: Res<crate::view::MsaaSetting>
             ..default()
         }),
         Hdr,
+        // Both stated: Bevy 0.20 warns on `None` beside `Camera3d`'s default `DebandDither::Enabled`,
+        // which never ran without the tonemapping pass.
         Tonemapping::None,
+        DebandDither::Disabled,
         crate::ffx_glow::FfxGlow::WORLD,
         // One cluster, as the client's world camera (`view::cpu_light_clusters`).
         bevy::light::cluster::ClusterConfig::Single,
