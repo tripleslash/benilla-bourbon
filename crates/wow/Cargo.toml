@@ -28,7 +28,12 @@ crate-type = ["cdylib"]
 # this crate: without it, `cargo build --target wasm32-unknown-unknown -p wow
 # --no-default-features` would still pull benilla-app's OWN defaults (a path dep gets its own
 # feature resolution), silently linking the dev instruments into the page everyone visits.
-benilla-app = { path = "../benilla-app", default-features = false }
+# fork: pfUI, its Turtle TOCs and Nampower are always in the page (the `pfui`, `pfui-turtle` and
+# `nampower` extensions), as in the desktop client.
+benilla-app = { path = "../benilla-app", default-features = false, features = [
+    "pfui-turtle",
+    "nampower",
+] }
 # Pinned exact (workspace-wide rule, `docs/BENILLA-WASM-SPIKE.md`'s plan): a newer wasm-bindgen
 # crate plus the 0.2.127 CLI Trunk downloads emits broken glue — verified.
 wasm-bindgen = "=0.2.127"

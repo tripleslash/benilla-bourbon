@@ -15,7 +15,12 @@ default = ["dev"]
 dev = ["benilla-app/dev"]
 
 [dependencies]
-benilla-app = { path = "../benilla-app", default-features = false }
+# fork: pfUI, its Turtle TOCs and Nampower are always in the client (the `pfui`, `pfui-turtle` and
+# `nampower` extensions), as in the web page; `build-desktop.sh`'s `--no-default-features` keeps them.
+benilla-app = { path = "../benilla-app", default-features = false, features = [
+    "pfui-turtle",
+    "nampower",
+] }
 # The self-update (`src/update.rs`): the same blocking HTTPS client and rustls roots the pack store
 # fetches with, and the SHA-1 the downloaded exe is checked against.
 sha1.workspace = true
