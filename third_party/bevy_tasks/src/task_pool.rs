@@ -208,10 +208,13 @@ impl TaskPool {
                                 // by name, not the crate's re-export: on wasm that re-export
                                 // is the SPINNING implementation, because the browser's main
                                 // thread may not park (see `lib.rs`). A worker may park, and a
-                                // worker that spun would burn a core doing nothing.
-                                futures_lite::future::block_on(
+                                // worker that spun would burn a core doing nothing. Natively the
+                                // two are one item, so the full path is lint-redundant there.
+                                #[allow(unused_qualifications)]
+                                let ran = futures_lite::future::block_on(
                                     ex.run(tick_forever.or(shutdown_rx.recv())),
-                                )
+                                );
+                                ran
                             });
                             if let Ok(value) = res {
                                 // Use unwrap_err because we expect a Closed error

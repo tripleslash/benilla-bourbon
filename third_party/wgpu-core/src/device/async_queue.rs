@@ -231,7 +231,7 @@ impl AsyncComputeQueue {
         let snatch_guard = device.snatchable_lock.read();
         // wgpu 30 holds the device's fence unlocked; `command_indices`, held until both submits are
         // made, is what orders them against the main queue's own.
-        let mut async_fence = self.fence.write();
+        let async_fence = self.fence.write();
         let mut indices = device.command_indices.write();
         indices.active_submission_index += 1;
         let transit_index = indices.active_submission_index;

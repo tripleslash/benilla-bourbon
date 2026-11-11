@@ -1125,7 +1125,7 @@ impl DrawBatcher {
         vertex_or_index_limit: u64,
         instance_limit: u64,
     ) -> Result<(usize, u64), RenderPassErrorInner> {
-        let src_stride = crate::command::get_src_stride_of_indirect_args(family);
+        let src_stride = get_src_stride_of_indirect_args(family);
         let dst_stride = crate::command::get_dst_stride_of_indirect_args(device.backend(), family);
 
         let (dst_resource_index, dst_offset) = indirect_draw_validation_resources
