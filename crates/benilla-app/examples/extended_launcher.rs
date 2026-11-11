@@ -24,15 +24,14 @@
 //! # `default-features = false`, or `--no-default-features` still builds benilla-app with `dev`.
 //! benilla-app = { git = "https://github.com/samwhosung/benilla", default-features = false }
 //! # benilla's version, adding no features: bevy's defaults bring its audio stack back.
-//! bevy = { version = "0.19.1", default-features = false }
+//! bevy = { version = "0.20.1", default-features = false }
 //!
 //! [build-dependencies]
 //! benilla-buildstamp = { git = "https://github.com/samwhosung/benilla" }
 //!
 //! # Cargo reads `[patch]` and `[profile]` from the root manifest only, so benilla's are repeated:
-//! # without the kira patch the mixer is not benilla's, without the alsa one the lock holds two
-//! # `alsa-sys` and does not resolve, and without the wgpu-hal one a presentation stall past a
-//! # second loses the device on Vulkan.
+//! # without the kira patch the mixer is not benilla's, and without the wgpu-hal one a
+//! # presentation stall past a second loses the device on Vulkan.
 //! [patch.crates-io]
 //! kira = { git = "https://github.com/samwhosung/benilla" }
 //! # fork: the browser build's patches (threads, wasm32 atomics), from this fork.
@@ -44,18 +43,16 @@
 //! event-listener = { git = "https://github.com/tripleslash/benilla-bourbon" }
 //! parking = { git = "https://github.com/tripleslash/benilla-bourbon" }
 //! web-task = { git = "https://github.com/tripleslash/benilla-bourbon" }
-//! # fork: bevy_winit 0.19.1 without the runner's per-event query rebuilds (the browser's frame).
+//! # fork: bevy_winit 0.20.1 without the runner's per-event query rebuilds (the browser's frame).
 //! bevy_winit = { git = "https://github.com/tripleslash/benilla-bourbon" }
-//! # fork: wgpu 29 with WebGPU's `subgroups` and `texture-formats-tier1` mapped, for FSR 3.1.5.
+//! # fork: wgpu 30 with WebGPU's `subgroups` and `texture-formats-tier1` mapped, for FSR 3.1.5.
 //! wgpu = { git = "https://github.com/tripleslash/benilla-bourbon" }
-//! alsa = { git = "https://github.com/samwhosung/benilla" }
 //! wgpu-hal = { git = "https://github.com/samwhosung/benilla" }
 //! # fork: the native-GPU lanes' patches: GPU occlusion culling spares `NoFrustumCulling` meshes,
-//! # DXC from a local copy, DX12 multi-draw-indirect-count, composed mesh and task shaders.
+//! # DXC from a local copy, DX12 multi-draw-indirect-count.
 //! bevy_pbr = { git = "https://github.com/tripleslash/benilla-bourbon" }
 //! mach-dxcompiler-rs = { git = "https://github.com/tripleslash/benilla-bourbon" }
 //! wgpu-core = { git = "https://github.com/tripleslash/benilla-bourbon" }
-//! naga_oil = { git = "https://github.com/tripleslash/benilla-bourbon" }
 //!
 //! [profile.dev]
 //! opt-level = 1
