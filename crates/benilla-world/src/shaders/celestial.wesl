@@ -34,7 +34,7 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> @location(0) vec4<f32> {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
-    let base = alpha_discard(pbr_input.material, pbr_input.material.base_color);
+    let base = alpha_discard(pbr_input.material.flags, pbr_input.material.alpha_cutoff, pbr_input.material.base_color);
 
     var a = base.a;
     if celestial.z < 0.5 {

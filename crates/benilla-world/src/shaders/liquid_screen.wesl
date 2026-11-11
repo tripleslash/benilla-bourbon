@@ -100,7 +100,7 @@ fn fs_blur(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 /// the two is a change of picture, never of sharpness.
 @fragment
 fn fs_blur_reflect(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
-    let frame = vec2<f32>(textureDimensions(blur_src) << vec2<u32>(constants::LIQUID_REFLECT_SHIFTu));
+    let frame = vec2<f32>(textureDimensions(blur_src) << vec2<u32>(constants::LIQUID_REFLECT_SHIFT));
     let o = 3.0 / frame;
     var sum = textureSample(blur_src, src_samp, in.uv + vec2<f32>(-o.x, -o.y));
     sum += textureSample(blur_src, src_samp, in.uv + vec2<f32>(o.x, -o.y));

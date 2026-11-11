@@ -1583,7 +1583,7 @@ fn wow_fragment(in: WowVsOut, is_front: bool) -> WowFragOut {
             faded_alpha = stage_alpha(stage1_preset, faded_alpha, tex1.a);
         }
     }
-    let base = alpha_discard(pbr_input.material, base_color);
+    let base = alpha_discard(pbr_input.material.flags, pbr_input.material.alpha_cutoff, base_color);
 
     // --- Lighting --------------------------------------------------------------------------------
     // The stage-0 modulate: the texel times the lit colour `vertex_light` clamped per vertex.
