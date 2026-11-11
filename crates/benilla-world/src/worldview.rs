@@ -176,9 +176,6 @@ pub fn run_with(build: BuildId, extra: impl FnOnce(&mut App)) -> AppExit {
     app.add_plugins(plugin);
     extra(&mut app);
 
-    // After `AssetPlugin`: the loaders go into the live `AssetServer`, as in the client.
-    benilla_assets::register_asset_loaders(&mut app);
-
     let exit = app.run();
     match check {
         Some(_) => report_check(exit),

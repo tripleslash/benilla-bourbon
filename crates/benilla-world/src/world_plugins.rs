@@ -13,8 +13,10 @@ pub struct WorldPlugins;
 impl PluginGroup for WorldPlugins {
     fn build(self) -> PluginGroupBuilder {
         PluginGroupBuilder::start::<Self>()
-            // The engine's WGSL first: every material below specializes against it, and an
-            // unregistered shader fails silently.
+            // benilla-assets' loaders and the materials' WGSL, then the engine's: bevy 0.20's
+            // `MaterialPlugin::build` loads a material's shaders at once, so an embedded file
+            // registered after it is never found, and an unregistered shader fails silently.
+            .add(benilla_assets::register_asset_loaders)
             .add(crate::shaders::plugin)
             .add(MaterialPlugin::<TerrainMaterial>::default())
             .add(MaterialPlugin::<WowModelMaterial>::default())

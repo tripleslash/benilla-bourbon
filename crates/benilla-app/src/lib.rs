@@ -865,9 +865,6 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
         });
     }
 
-    // benilla-assets' loaders go into the live `AssetServer`, so they register after `AssetPlugin`.
-    benilla_assets::register_asset_loaders(&mut app);
-
     // `ExtractSchedule` runs single-threaded too: bevy_render leaves it multi-threaded, with no
     // non-Send member, and single-threaded measured faster. `WOW_MT_EXTRACT=1` restores it.
     //

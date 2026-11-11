@@ -173,7 +173,8 @@ fn fit_prepass(
 }
 
 /// Compile the five WGSL files into the binary under `embedded://benilla_assets/shaders/…`. Call
-/// after Bevy's `AssetPlugin`, whose registry this fills; [`crate::register_asset_loaders`] does.
+/// after Bevy's `AssetPlugin`, whose registry this fills, and before the `MaterialPlugin`s that
+/// draw with them, which load their shaders as they build; [`crate::register_asset_loaders`] does.
 pub fn register_shaders(app: &mut App) {
     bevy::asset::embedded_asset!(app, "shaders/terrain.wesl");
     bevy::asset::embedded_asset!(app, "shaders/wow_model.wesl");
