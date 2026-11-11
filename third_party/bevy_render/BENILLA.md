@@ -270,8 +270,8 @@ own `first_instance` and `base_vertex` on DX12, so the exclusion goes, and with 
 `build_indirect_params` pipeline keys `MULTI_DRAW_INDIRECT_COUNT_SUPPORTED` on the feature alone,
 so on DX12 the shader compacted batch sets for count draws (skipping their zero-instance
 entries) while this phase drew them without a count. No other bevy 0.19.1 crate tests for DX12
-(`bevy_pbr`, `bevy_core_pipeline` and the rest grepped for `Dx12`). benilla's cameras draw directly
-unless `WOW_ENTITY_GPU_CULL=1` puts the world camera on the indirect lane (`benilla-world`
+(`bevy_pbr`, `bevy_core_pipeline` and the rest grepped for `Dx12`). benilla's world camera draws
+on the indirect lane by default on native (`WOW_ENTITY_GPU_CULL=0` turns it off) (`benilla-world`
 `entity_cull.rs`), so the path runs only there.
 
 ## The fourteenth delta: render-graph systems can record for the async compute queue (native)
