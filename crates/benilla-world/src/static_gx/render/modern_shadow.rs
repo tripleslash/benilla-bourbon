@@ -90,6 +90,8 @@ struct AtlasCache {
     /// fork: per slot, the entity casters its working faces were last drawn with — what
     /// [`dirty_faces`] holds this frame's list against.
     casters_drawn: [Vec<DrawnCaster>; crate::modern::lights::MAX_SHADOWED],
+    /// One slot's casters this frame, refilled per slot rather than allocated per light per frame.
+    now: Vec<DrawnCaster>,
 }
 
 /// fork: one entity caster as a lamp's dynamic phase sees it: which mesh, where it is placed (its
@@ -1908,6 +1910,7 @@ fn draw_local_atlas(
         let AtlasCache {
             slots: slot_state,
             casters_drawn,
+            now,
         } = &mut *atlas;
         for (i, s) in slots.clone().enumerate() {
             let Some(light) = lights.shadowed[s].map(|h| h.light) else {
@@ -1926,10 +1929,11 @@ fn draw_local_atlas(
             } else {
                 DYN_DRAWN
             };
-            let now: Vec<DrawnCaster> = near[i].iter().map(|c| DrawnCaster::of(c)).collect();
+            now.clear();
+            now.extend(near[i].iter().map(|c| DrawnCaster::of(c)));
             let dirty = match slot.dynamic {
-                DYN_STATIC => dirty_faces(light.pos, &[], &now),
-                DYN_DRAWN => dirty_faces(light.pos, &casters_drawn[s], &now),
+                DYN_STATIC => dirty_faces(light.pos, &[], now),
+                DYN_DRAWN => dirty_faces(light.pos, &casters_drawn[s], now),
                 _ => ALL_FACES,
             };
             if dirty == 0 {
@@ -2004,14 +2008,15 @@ fn draw_local_atlas(
         for (i, s) in slots.clone().enumerate() {
             if restore_faces[i] | draw_faces[i] != 0 {
                 slot_state[s].dynamic = keys[i];
-                let now: Vec<DrawnCaster> = near[i].iter().map(|c| DrawnCaster::of(c)).collect();
+                now.clear();
+                now.extend(near[i].iter().map(|c| DrawnCaster::of(c)));
                 let redrawn = if keys[i] == DYN_STATIC {
                     ALL_FACES
                 } else {
                     draw_faces[i]
                 };
                 let light_pos = lights.shadowed[s].map_or(Vec3::ZERO, |h| h.light.pos);
-                casters_drawn[s] = settle_drawn(light_pos, &casters_drawn[s], &now, redrawn);
+                casters_drawn[s] = settle_drawn(light_pos, &casters_drawn[s], now, redrawn);
             }
         }
     }

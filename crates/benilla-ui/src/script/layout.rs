@@ -1982,105 +1982,108 @@ impl UiScript {
         named.sort_unstable();
         named.dedup();
         let mut targets = std::mem::take(&mut scope.targets);
-        let mut at = 0;
-        while at < named.len() {
-            let id = named[at];
-            at += 1;
-            let Some(&n) = scope.node_of.get(id as usize) else {
-                continue; // past every minted id: never a node
-            };
-            let is_region_node = n != u32::MAX && n & REGION_TAG != 0;
-            // A frame: every live frame with an id is a node.
-            if let Some(&h) = id_to_frame.get(&id) {
-                let Some(frame) = arena.frame(h).filter(|_| frame_to_id.get(&h) == Some(&id))
-                else {
-                    if n != u32::MAX {
-                        scope.targets = targets;
-                        return false;
+        // One exit puts the reused buffer back, whichever way the walk ends.
+        let kept = 'walk: {
+            let mut at = 0;
+            while at < named.len() {
+                let id = named[at];
+                at += 1;
+                let Some(&n) = scope.node_of.get(id as usize) else {
+                    continue; // past every minted id: never a node
+                };
+                let is_region_node = n != u32::MAX && n & REGION_TAG != 0;
+                // A frame: every live frame with an id is a node.
+                if let Some(&h) = id_to_frame.get(&id) {
+                    let Some(frame) = arena.frame(h).filter(|_| frame_to_id.get(&h) == Some(&id))
+                    else {
+                        if n != u32::MAX {
+                            break 'walk false;
+                        }
+                        continue;
+                    };
+                    if is_region_node {
+                        break 'walk false;
+                    }
+                    // The derivation's sync of the arena's scale and clamp into the layout input.
+                    let (scale, clamp) = (frame.effective_scale, frame.clamped_to_screen);
+                    let input = layout_inputs.entry(h).or_default();
+                    if input.scale.to_bits() != scale.to_bits() {
+                        layout_force.push(id);
+                    }
+                    input.scale = scale;
+                    input.clamp = clamp;
+                    targets.clear();
+                    targets.extend(input.anchors.iter().map(|a| a.relative_to));
+                    let hash = frame_node_hash(input);
+                    let relinked = if n == u32::MAX {
+                        #[allow(clippy::cast_possible_truncation)]
+                        {
+                            scope.node_of[id as usize] = scope.plan.len() as u32;
+                        }
+                        scope.plan.push((h, id));
+                        scope.relink(id, &targets);
+                        true
+                    } else {
+                        scope.relink(id, &targets)
+                    };
+                    let held = held(layout_hold, arena, id);
+                    scope.note(id, hash, relinked, held);
+                    continue;
+                }
+                // A region: a node while it lives and has an anchor.
+                let live = id_to_region.get(&id).and_then(|&rh| {
+                    let r = arena.region(rh)?;
+                    let data = region_data.get(&rh).filter(|d| !d.anchors.is_empty())?;
+                    Some((rh, r, data))
+                });
+                let Some((rh, r, data)) = live else {
+                    if is_region_node {
+                        // A cleared region leaves the graph, keeping its rect; a dead one drops it.
+                        let row = scope.remove_region(id, n);
+                        if arena.region(row.rh).is_none() || !region_data.contains_key(&row.rh) {
+                            region_resolved.remove(&row.rh);
+                            region_kept.remove(&row.rh);
+                        }
+                    } else if n != u32::MAX {
+                        break 'walk false;
                     }
                     continue;
                 };
-                if is_region_node {
-                    scope.targets = targets;
-                    return false;
+                if n != u32::MAX && !is_region_node {
+                    break 'walk false;
                 }
-                // The derivation's sync of the arena's scale and clamp into the layout input.
-                let (scale, clamp) = (frame.effective_scale, frame.clamped_to_screen);
-                let input = layout_inputs.entry(h).or_default();
-                if input.scale.to_bits() != scale.to_bits() {
-                    layout_force.push(id);
-                }
-                input.scale = scale;
-                input.clamp = clamp;
+                let owner_id = frame_to_id.get(&r.owner).copied();
                 targets.clear();
-                targets.extend(input.anchors.iter().map(|a| a.relative_to));
-                let hash = frame_node_hash(input);
+                targets.extend(data.anchors.iter().map(|a| a.relative_to));
+                targets.extend(owner_id);
+                let hash = region_node_hash(data, owner_id);
+                let row = RegionRow {
+                    rh,
+                    id,
+                    owner: r.owner,
+                    is_fontstring: matches!(r.kind, crate::widget::RegionKind::FontString),
+                };
                 let relinked = if n == u32::MAX {
                     #[allow(clippy::cast_possible_truncation)]
                     {
-                        scope.node_of[id as usize] = scope.plan.len() as u32;
+                        scope.node_of[id as usize] = scope.regions.len() as u32 | REGION_TAG;
                     }
-                    scope.plan.push((h, id));
+                    scope.regions.push(row);
                     scope.relink(id, &targets);
                     true
                 } else {
+                    scope.regions[(n & !REGION_TAG) as usize] = row;
                     scope.relink(id, &targets)
                 };
                 let held = held(layout_hold, arena, id);
                 scope.note(id, hash, relinked, held);
-                continue;
             }
-            // A region: a node while it lives and has an anchor.
-            let live = id_to_region.get(&id).and_then(|&rh| {
-                let r = arena.region(rh)?;
-                let data = region_data.get(&rh).filter(|d| !d.anchors.is_empty())?;
-                Some((rh, r, data))
-            });
-            let Some((rh, r, data)) = live else {
-                if is_region_node {
-                    // A cleared region leaves the graph but keeps its rect; a dead one drops it.
-                    let row = scope.remove_region(id, n);
-                    if arena.region(row.rh).is_none() || !region_data.contains_key(&row.rh) {
-                        region_resolved.remove(&row.rh);
-                        region_kept.remove(&row.rh);
-                    }
-                } else if n != u32::MAX {
-                    scope.targets = targets;
-                    return false;
-                }
-                continue;
-            };
-            if n != u32::MAX && !is_region_node {
-                scope.targets = targets;
-                return false;
-            }
-            let owner_id = frame_to_id.get(&r.owner).copied();
-            targets.clear();
-            targets.extend(data.anchors.iter().map(|a| a.relative_to));
-            targets.extend(owner_id);
-            let hash = region_node_hash(data, owner_id);
-            let row = RegionRow {
-                rh,
-                id,
-                owner: r.owner,
-                is_fontstring: matches!(r.kind, crate::widget::RegionKind::FontString),
-            };
-            let relinked = if n == u32::MAX {
-                #[allow(clippy::cast_possible_truncation)]
-                {
-                    scope.node_of[id as usize] = scope.regions.len() as u32 | REGION_TAG;
-                }
-                scope.regions.push(row);
-                scope.relink(id, &targets);
-                true
-            } else {
-                scope.regions[(n & !REGION_TAG) as usize] = row;
-                scope.relink(id, &targets)
-            };
-            let held = held(layout_hold, arena, id);
-            scope.note(id, hash, relinked, held);
-        }
+            true
+        };
         scope.targets = targets;
+        if !kept {
+            return false;
+        }
         scope.close();
         pre.seed = pre.lap();
         pre.incremental = true;
