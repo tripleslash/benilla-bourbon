@@ -636,6 +636,9 @@ impl super::UiScript {
         explored: Vec<u32>,
         sources: Option<Vec<WorldMapLandmarkSource>>,
     ) {
+        // A ClassicAPI client raises MAP_EXPLORATION_UPDATED after it when an area was explored.
+        #[cfg(feature = "pfui")]
+        let explored_more = self.model_ref().worldmap.explored != explored;
         {
             let mut model = self.model_mut();
             model.worldmap.explored = explored;
@@ -645,6 +648,10 @@ impl super::UiScript {
             model.worldmap.landmarks = build_landmarks(&model);
         }
         self.fire_event("WORLD_MAP_UPDATE", Vec::new());
+        #[cfg(feature = "pfui")]
+        if explored_more {
+            super::pfui_host::maps::exploration_changed(&self.lua);
+        }
     }
 
     /// Pushes the landmark sources and rebuilds the displayed map's list from them; a change to

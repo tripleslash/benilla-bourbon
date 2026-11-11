@@ -196,15 +196,46 @@ impl Loader<'_> {
             let rel_raw = anchor.attr("relativeTo").filter(|r| !r.is_empty());
             let rel_to = rel_raw.map(|r| framexml::resolve_name(r, parent_name));
             let args = (point.to_string(), rel_to, rel_point.to_string());
+            let offset = children_named(anchor, "Offset").next().cloned();
+            // ClassicAPI's `<Anchor x= y=>` is its own offset.
+            #[cfg(feature = "pfui")]
+            let offset =
+                offset.or_else(|| crate::script::pfui_host::xml::anchor_offset(self.lua(), anchor));
             let d = super::XmlAnchor {
                 wrapper: wrapper.clone(),
                 region,
                 args,
-                offset: children_named(anchor, "Offset").next().cloned(),
+                offset,
                 rel_raw: rel_raw.unwrap_or_default().to_string(),
                 dbg: dbg.to_string(),
+                #[cfg(feature = "pfui")]
+                rel_object: anchor.attr("relativeKey").and_then(|key| {
+                    crate::script::pfui_host::xml::relative_key(self.lua(), wrapper, key)
+                }),
             };
+            // A key naming a nested frame has no object yet: `<Layers>` load before `<Frames>`.
+            #[cfg(feature = "pfui")]
+            if let Some(key) = anchor
+                .attr("relativeKey")
+                .filter(|_| d.rel_object.is_none())
+            {
+                self.late_relative_keys.push((d.clone(), key.to_string()));
+            }
             self.apply_anchor(d);
+        }
+    }
+
+    /// Anchors again every `relativeKey` that now resolves, the rest waiting for an outer frame.
+    #[cfg(feature = "pfui")]
+    pub(super) fn apply_late_relative_keys(&mut self) {
+        for (mut d, key) in std::mem::take(&mut self.late_relative_keys) {
+            d.rel_object =
+                crate::script::pfui_host::xml::relative_key(self.lua(), &d.wrapper, &key);
+            if d.rel_object.is_some() {
+                self.apply_anchor(d);
+            } else {
+                self.late_relative_keys.push((d, key));
+            }
         }
     }
 }

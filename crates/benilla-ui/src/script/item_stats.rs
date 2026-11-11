@@ -522,6 +522,11 @@ impl super::UiScript {
         model.item_stat_reads.remove(&item_id);
         model.item_templates.insert(item_id, view);
         model.quest_store.item_landed(item_id);
+        #[cfg(feature = "pfui")]
+        {
+            drop(model);
+            super::pfui_host::item_received(&self.lua, item_id);
+        }
     }
 
     /// Removes an item's template view: the app's cache lost the record to a refusal.

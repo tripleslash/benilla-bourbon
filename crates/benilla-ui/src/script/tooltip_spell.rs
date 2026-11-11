@@ -12,6 +12,10 @@
 //! builder's unit selector asks for: a miss records the id and waits, and a push of the view
 //! re-renders that tooltip. An aura view's miss waits the same way.
 
+#[cfg(feature = "pfui")]
+#[path = "pfui_host/tooltip_auras.rs"]
+pub(crate) mod pfui;
+
 use mlua::{Lua, Table, Value};
 
 use super::binding_abi::{self, flag};
@@ -649,6 +653,8 @@ pub(super) fn set_spell_with_talent(
     if talent.next_desc.is_none() {
         super::talent::ask_next_rank(lua, talent.next_spell);
     }
+    #[cfg(feature = "pfui")]
+    super::pfui_host::tooltip_subjects::set_spell(lua, h, spell_id);
     match spell_view_of(lua, spell_id, false) {
         Some(v) => {
             note_build(lua, h, spell_id, &v.item_misses);
@@ -818,6 +824,8 @@ fn fill_spell(
     fallback_name: Option<String>,
     opts: SpellRenderOpts,
 ) -> mlua::Result<bool> {
+    #[cfg(feature = "pfui")]
+    super::pfui_host::tooltip_subjects::set_spell(lua, h, spell_id);
     let live = match spell_view_of(lua, spell_id, opts.alt_caster) {
         Some(v) => {
             note_build(lua, h, spell_id, &v.item_misses);

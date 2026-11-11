@@ -196,6 +196,7 @@ mod font_block;
 mod frame_enum;
 pub mod origin;
 mod roster_read;
+mod turtle_models;
 pub use char_name::{check_char_name, NameCharsets, NameLists, NoNameLists, CHAR_NAME_SUCCESS};
 mod glue;
 mod glue_addons;
@@ -655,6 +656,9 @@ pub use worn_display::{WornDisplay, WornDisplaySet};
 pub use zone_text::{PlayerFactionMasksQuery, ZonePvp, ZoneTexts};
 
 use mlua::Lua;
+
+#[cfg(feature = "pfui")]
+pub mod pfui_host;
 
 use crate::layout::Rect;
 use crate::order::ZTarget;

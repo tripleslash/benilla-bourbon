@@ -15,6 +15,8 @@ use super::{Model, ScriptCall};
 /// else the group roster, else a silent return), and a macro can observe their order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SelectionRequest {
+    #[cfg(feature = "pfui")]
+    PfuiGuid(u64),
     /// `TargetUnit(unit)` (`0x4899d0`): the unit the token names.
     Unit(String),
     /// `AssistUnit(unit)` (`0x489b80`): the token's own `UNIT_FIELD_TARGET`; a token with no

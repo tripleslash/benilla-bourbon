@@ -169,9 +169,10 @@ fn a_coded_option_asks_for_its_code_and_sends_it() {
     }
 }
 
-/// A slot whose index is -1 is unused (`0x4e235f`), and only 16 slots exist (`0x4e2343`).
+/// A slot whose index is -1 is unused (`0x4e235f`). 1.12.1 holds 16 slots (`0x4e2343`);
+/// tortoise: 32, so a Turtle item menu's 17th option selects and the 33rd sends nothing.
 #[test]
-fn an_unused_slot_and_a_slot_past_sixteen_send_nothing() {
+fn an_unused_slot_and_a_slot_past_thirty_two_send_nothing() {
     let mut c = Client::new(0);
     menu_of(&mut c, vec![option(u32::MAX, false)], true);
     c.sent();
@@ -180,6 +181,13 @@ fn an_unused_slot_and_a_slot_past_sixteen_send_nothing() {
     menu_of(&mut c, (0..17).map(|i| option(i, false)).collect(), true);
     c.sent();
     c.run("SelectGossipOption(17)").unwrap();
+    assert_eq!(
+        c.sent(),
+        [format!(
+            "GossipSelectOption {{ guid: {NPC}, option: 16, code: None }}"
+        )]
+    );
+    c.run("SelectGossipOption(33)").unwrap();
     assert!(c.sent().is_empty());
 }
 

@@ -12,8 +12,9 @@ use super::GossipState;
 use crate::net::{ClientCommand, NetCommands};
 use crate::ui_quest::{row_is_active, row_is_one_click};
 
-/// The option slots the store holds (`0x4e2343`).
-const OPTION_SLOTS: u32 = 16;
+/// The option slots the store holds. Deviation: (tortoise) 32, where 1.12.1 holds 16 (`0x4e2343`),
+/// because the decoder keeps every option and Turtle's client selects past the 16th.
+const OPTION_SLOTS: u32 = 32;
 
 /// The gossip menu and the socket its selects send through.
 #[derive(SystemParam)]

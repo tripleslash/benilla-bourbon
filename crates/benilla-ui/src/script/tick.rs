@@ -331,6 +331,9 @@ pub(crate) fn fire_event_into(lua: &Lua, event: &str, args: Vec<ScriptValue>) {
         super::calls::hold(lua, super::calls::Held::Event(event.to_string(), args));
         return;
     }
+    // A ClassicAPI client's `GetCurrentChatEvent` answers this event while its handlers run.
+    #[cfg(feature = "pfui")]
+    let _chat = super::pfui_host::chat_event::enter(lua, event, &args);
     let globals = lua.globals();
     let saved = globals.get::<mlua::Value>("event").ok();
     if let Ok(name) = lua.create_string(event) {
@@ -397,6 +400,9 @@ impl super::UiScript {
         if self.model_ref().arena.levels_dirty() != 0 {
             super::object::toplevel::refresh_overlap_bits(&mut self.model_mut());
         }
+        // The pass renders the world frame, and with it a ClassicAPI client's timers.
+        #[cfg(feature = "pfui")]
+        super::pfui_host::run_timers(&self.lua);
         self.paint_model_panes();
         self.paint_movies();
         // `WOW_UI_HANDLERS=<secs>`: last, so its report covers everything this tick fired.

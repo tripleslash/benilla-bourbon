@@ -62,14 +62,15 @@ pub(crate) struct DiagnosticLog {
 
 impl DiagnosticLog {
     /// Record one failure, or bump the count of its identical row.
-    pub(crate) fn record(&mut self, kind: DiagnosticKind, message: &str) {
+    /// tortoise: answers whether this call made a new row, `false` when it only counted a repeat.
+    pub(crate) fn record(&mut self, kind: DiagnosticKind, message: &str) -> bool {
         if let Some(row) = self
             .rows
             .iter_mut()
             .find(|r| r.kind == kind && r.message == message)
         {
             row.count = row.count.saturating_add(1);
-            return;
+            return false;
         }
         self.seq += 1;
         if self.rows.len() == DIAGNOSTIC_LOG_CAP {
@@ -81,6 +82,7 @@ impl DiagnosticLog {
             message: message.to_string(),
             count: 1,
         });
+        true
     }
 
     /// Every retained row, oldest first.

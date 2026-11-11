@@ -194,6 +194,12 @@ fn layout_text_quads_inner(
     mut links_out: Option<&mut Vec<LinkSpan>>,
 ) -> Vec<UiQuad> {
     let gradient = font.alpha_gradient;
+    #[cfg(feature = "pfui")]
+    let inlined = e.inline.substitute(text);
+    #[cfg(feature = "pfui")]
+    let text = inlined.as_ref();
+    #[cfg(feature = "pfui")]
+    let mut inline = super::inline_texture::Line::default();
     let r = measure::resolve(e, &font);
     // One pass fills the caches, as `AllGlyphsCached` (`0x5c9fa0`); the layout below is lookups.
     e.ensure_str(r.face, r.ppem, r.bake, text);
@@ -230,6 +236,12 @@ fn layout_text_quads_inner(
     // `+2r` only in the atlas cell (`[font+0x178]`), never the block. A degenerate rect keeps the
     // top.
     let block_h = measure::block_height(render_lines.len(), r);
+    #[cfg(feature = "pfui")]
+    let block_h = block_h
+        + render_lines
+            .iter()
+            .map(|(line, _)| e.inline.extra_height(line, r.ppem, dpi))
+            .sum::<f32>();
     let v_offset = if rect.height() > f32::EPSILON {
         match justify.v {
             JustifyV::Top => 0.0,
@@ -273,6 +285,12 @@ fn layout_text_quads_inner(
     // engine's source count by at most the newline count, a frame or two on the reveal's tail.
     let mut char_index: usize = 0;
     for (line, next) in &render_lines {
+        #[cfg(feature = "pfui")]
+        let grown = e.inline.extra_height(line, r.ppem, dpi) * 0.5;
+        #[cfg(feature = "pfui")]
+        {
+            pen_y += grown;
+        }
         // First pass: lay the line at origin 0.
         let mut pending: Vec<PendingGlyph> = Vec::new();
         // The line's link x-ranges, one per link: a link's runs are contiguous.
@@ -295,6 +313,14 @@ fn layout_text_quads_inner(
             }
             let run_x0 = pen_dev / dpi;
             for ch in run.text.chars() {
+                #[cfg(feature = "pfui")]
+                if let Some(step) =
+                    inline.place(e, r.ppem, r.bake.radius, ch, pen_dev, run.color[3])
+                {
+                    pen_dev += step;
+                    char_index += 1;
+                    continue;
+                }
                 let Some(cc) = e.char_cell(r.face, r.ppem, ch) else {
                     // No face shapes it: it draws and steps nothing, as the measure says.
                     char_index += 1;
@@ -355,6 +381,14 @@ fn layout_text_quads_inner(
                 ..default()
             });
         }
+        #[cfg(feature = "pfui")]
+        inline.emit(
+            &mut quads,
+            origin_dev_x,
+            (pen_y - baseline_in_cell) * dpi,
+            dpi,
+            z_key,
+        );
         // Link hit rects cover the glyph cells: one font height down from baseline minus ascender.
         if let Some(out) = links_out.as_deref_mut() {
             let cell_top = pen_y - baseline_in_cell;
@@ -364,9 +398,19 @@ fn layout_text_quads_inner(
                     link: info.link.clone(),
                     markup: info.markup.clone(),
                 });
+                // A link is hoverable across the whole of a tall texture inside it.
+                #[cfg(feature = "pfui")]
+                if let Some(span) = out.last_mut() {
+                    span.rect.min.y -= grown;
+                    span.rect.max.y += grown;
+                }
             }
         }
         pen_y += pitch;
+        #[cfg(feature = "pfui")]
+        {
+            pen_y += grown;
+        }
     }
 
     quads

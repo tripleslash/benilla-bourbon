@@ -310,11 +310,16 @@ pub(crate) fn execute_buffer_reported(
     match compiled {
         Ok(f) => {
             prepare(&f);
+            // The pfUI build hands an addon file its `(addonName, privateTable)` varargs.
+            #[cfg(feature = "pfui")]
+            let args = super::pfui_host::chunk_args(lua)?;
+            #[cfg(not(feature = "pfui"))]
+            let args = ();
             let mut top = None;
             let ran = with_capture(|| {
                 let r = match error_function(lua) {
-                    Some(h) => f.call_under::<()>(&h, ()),
-                    None => f.call::<()>(()),
+                    Some(h) => f.call_under::<()>(&h, args),
+                    None => f.call::<()>(args),
                 };
                 if let Err(e) = &r {
                     top = Some(stack_text(lua, e));

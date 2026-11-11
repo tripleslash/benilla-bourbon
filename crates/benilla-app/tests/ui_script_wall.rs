@@ -31,7 +31,9 @@ fn family(rel: &str) -> Family {
         Family::Probe
     } else if file == "tests.rs" || file.ends_with("_tests.rs") || rel.contains("/tests/") {
         Family::Test
-    } else if rel.starts_with("ui_") {
+    } else if rel.starts_with("ui_") || rel.starts_with("pfui") || rel.ends_with("/pfui.rs") {
+        // The pfUI extension's layer (the `pfui` feature), `pfui/` and a module's `pfui.rs`:
+        // feed code for its own API.
         Family::Feed
     } else {
         Family::Game

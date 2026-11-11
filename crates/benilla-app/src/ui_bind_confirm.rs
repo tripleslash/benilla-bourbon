@@ -147,6 +147,8 @@ pub(crate) struct BindGate<'w> {
     /// An enchant can soulbind its item, and `0x5da2c0` walks all seven enchant slots; without
     /// client data only the instance flag counts.
     pub(crate) enchants: Option<Res<'w, Enchants>>,
+    #[cfg(feature = "pfui")]
+    pub(crate) pfui_item_use: Option<ResMut<'w, crate::ui_items::pfui::DeferredItemUse>>,
 }
 
 impl BindGate<'_> {
@@ -206,6 +208,10 @@ impl BindGate<'_> {
     /// Files the deferred use and raises `USE_BIND`, with no argument: a second deferred use
     /// replaces the first.
     pub(crate) fn defer_use(&mut self, script: &mut UiScript, pending: PendingUse) {
+        #[cfg(feature = "pfui")]
+        if let Some(state) = self.pfui_item_use.as_mut() {
+            state.clear();
+        }
         debug!(
             "ui_bind_confirm: USE_BIND_CONFIRM for wire {}/{}",
             pending.bag_index, pending.slot

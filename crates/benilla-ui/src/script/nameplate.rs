@@ -10,6 +10,10 @@
 
 use std::collections::{HashSet, VecDeque};
 
+#[cfg(feature = "pfui")]
+#[path = "pfui_host/nameplates.rs"]
+pub(crate) mod pfui;
+
 use mlua::Lua;
 
 use crate::layout::{Anchor, Anchors, Len, Point};
@@ -473,6 +477,8 @@ impl UiScript {
     /// unchanged `geometry` costs nothing.
     pub fn sync_nameplates(&mut self, geometry: PlateGeometry, states: &[PlateState]) {
         let lua = self.lua();
+        #[cfg(feature = "pfui")]
+        pfui::before_sync(lua, states);
         // The constructor's two lookups (`0x7cb3f9`, `0x7cb49b`), for each plate about to be built
         // and none for a built one. Done before the Model is borrowed: a lookup honours an `_G`
         // `__index` (`lua_gettable` at `0x704373`), which may call any verb.
@@ -500,6 +506,8 @@ impl UiScript {
             sync(&mut model, world, geometry, states, &mut fonts)
         };
         effects.apply(lua);
+        #[cfg(feature = "pfui")]
+        pfui::after_sync(lua);
     }
 
     /// Set the level latch (bit `0x4` of `[0xc4da34]`, `0x605550`): the active player's level
@@ -796,6 +804,8 @@ impl UiScript {
     /// clears); the app's every early return owes this, since a widget stays up until hidden.
     pub fn retire_nameplates(&mut self) {
         let lua = self.lua();
+        #[cfg(feature = "pfui")]
+        pfui::before_sync(lua, &[]);
         let effects = {
             let mut model = lua
                 .app_data_mut::<crate::script::ModelCell>()

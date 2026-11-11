@@ -290,6 +290,11 @@ impl RecordAsks<'_, '_> {
                             items.wait(entry, crate::items::RecordCallback::Buyback);
                         }
                     }
+                    // A ClassicAPI client's getter only asks; the landing signals for it.
+                    ItemCallback::Extension => {
+                        #[cfg(feature = "pfui")]
+                        let _ = items.template(entry, owner, Ask::Event(&self.net));
+                    }
                 }
             }
             RecordAsk::QuestCreature(entry) => {

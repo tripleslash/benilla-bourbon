@@ -182,6 +182,10 @@ pub(crate) struct Cvars {
     outbox: Vec<(String, String)>,
     /// A change since the last save; `last_change` drives the one-quiet-second debounce.
     dirty: bool,
+    /// A whole client in a unit test saves nothing: `$BENILLA_HOME` is process-wide, so it would
+    /// write into the folder of whichever test has pinned it.
+    #[cfg(test)]
+    off_disk: bool,
     last_change: Option<Instant>,
     /// Lines the rows' checks and change callbacks printed to the console (`0x63cb50`), which go to the
     /// log, as the reference's go to a console screen nobody has open.
@@ -220,6 +224,8 @@ impl Cvars {
             events: Vec::new(),
             outbox: Vec::new(),
             dirty: false,
+            #[cfg(test)]
+            off_disk: false,
             last_change: None,
             console: Vec::new(),
             lua_created: 0,
@@ -1602,6 +1608,12 @@ fn save_config_when_quiet(mut cvars: ResMut<Cvars>) {
 }
 
 impl Cvars {
+    /// See [`Self::off_disk`].
+    #[cfg(test)]
+    pub(crate) fn keep_off_disk(&mut self) {
+        self.off_disk = true;
+    }
+
     /// `CVar::SaveConfig` (`0x63d980`) on demand, as the reference's callers that save at once do
     /// (`EnterWorld`, `0x46b6f6`): the file written now if anything moved, the quiet second
     /// skipped.
@@ -1622,6 +1634,11 @@ fn save_config_on_exit(mut cvars: ResMut<Cvars>) {
 /// Rewrite `config.toml` atomically from the registry, so a session with no VM saves what it
 /// changed.
 fn write_config(cvars: &mut Cvars) {
+    #[cfg(test)]
+    if cvars.off_disk {
+        cvars.dirty = false;
+        return;
+    }
     let Some(path) = crate::local_state::config_path() else {
         cvars.dirty = false; // hermetic/session-only: nothing to write, stop retrying
         return;
@@ -3314,6 +3331,24 @@ mod tests {
         let mut next = cvar_app_in(&env);
         next.update();
         assert_eq!(res::<Cvars>(&next).get("accountName"), Some("PLAYER"));
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// A whole client, which most tests build without the environment lock, never saves into the
+    /// folder another test has pinned.
+    #[test]
+    fn a_whole_client_saves_nothing_into_a_pinned_folder() {
+        let _env = CvarEnv::hold();
+        let tmp = std::env::temp_dir().join(format!("benilla-cvar-whole-{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _h = EnvGuard::set("BENILLA_HOME", tmp.to_str().unwrap());
+        let mut app = crate::game_plugins::schedule_tests::headless_client();
+        let mut cvars = app.world_mut().resource_mut::<Cvars>();
+        cvars.touch();
+        cvars.save();
+        assert!(!cvars.dirty, "the save ran");
+        assert!(!tmp.join("config.toml").exists());
         std::fs::remove_dir_all(&tmp).ok();
     }
 

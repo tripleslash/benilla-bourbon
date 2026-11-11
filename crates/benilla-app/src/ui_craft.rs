@@ -37,6 +37,8 @@ use crate::ui_tradeskill::SpellFocus;
 pub(crate) struct CraftOpen {
     pub(crate) line: Option<u32>,
     pub(crate) craft_type: u32,
+    /// The book a profession link shows in place of the player's own; a stock client has none.
+    pub(crate) linked: Option<crate::ui_tradeskill::LinkedBook>,
 }
 
 /// A craft getter's lookup of a record in flight, inside its call
@@ -129,6 +131,7 @@ fn craft_bucket(
     d: &benilla_formats::SpellDisplay,
     sla: Option<&benilla_formats::SlaInfo>,
     store: &ObjectStore,
+    linked_rank: Option<u32>,
     known: &std::collections::BTreeSet<u32>,
     pet: Option<&PetView>,
     objects: &impl ItemObjects,
@@ -139,7 +142,10 @@ fn craft_bucket(
             0 => high - 25,
             low => low,
         };
-        let total = skill_total(store, sla.skill_id);
+        let total = linked_rank.map_or_else(
+            || skill_total(store, sla.skill_id),
+            |rank| i32::try_from(rank).unwrap_or(i32::MAX),
+        );
         return if total < low {
             CraftDifficulty::Optimal
         } else if total < (low + high) / 2 {
@@ -194,6 +200,7 @@ fn display_line(
     first: Option<u32>,
     skill_lines: &SkillLines,
     store: &ObjectStore,
+    linked: Option<&crate::ui_tradeskill::LinkedBook>,
 ) -> Option<(String, u32, u32)> {
     let (race, class) = store.race_class();
     let line = skill_lines.catalog.ability(first?, race, class)?.skill_id;
@@ -214,6 +221,9 @@ fn display_line(
         }
     };
     let with_bonus = |v: u32| if v > 0 { v + perm } else { v };
+    if let Some(linked) = linked {
+        return Some((name, linked.rank, linked.max_rank));
+    }
     Some((name, with_bonus(rank), with_bonus(max)))
 }
 
@@ -346,7 +356,12 @@ impl CraftReads<'_, '_> {
     /// a catalog or our player is missing. The list only reads the item cache: the build asks
     /// nothing (`0x4f60c0`), and a reagent or a totem is asked by its getter's call, inside it
     /// (`0x4f75f2`, `0x4f7a0a`).
-    pub(crate) fn state(&self, line: u32, craft_type: u32) -> Option<CraftState> {
+    pub(crate) fn state(
+        &self,
+        line: u32,
+        craft_type: u32,
+        linked: Option<&crate::ui_tradeskill::LinkedBook>,
+    ) -> Option<CraftState> {
         let spells = self.spells.as_deref()?;
         let skill_lines = self.skill_lines.as_deref()?;
         let store = self.player()?;
@@ -355,15 +370,18 @@ impl CraftReads<'_, '_> {
             .line(line)
             .map(|l| l.name.clone())
             .unwrap_or_else(|| format!("Skill {line}"));
-        let listed = self.listed(spells, craft_type);
+        let listed = self.listed(spells, craft_type, linked);
         let (display_line, rank, max_rank) = (craft_type == 3)
-            .then(|| display_line(listed.first().copied(), skill_lines, store))
+            .then(|| display_line(listed.first().copied(), skill_lines, store, linked))
             .flatten()
             .map_or((None, 0, 0), |(n, r, m)| (Some(n), r, m));
         let recipes: Vec<CraftRecipe> = self.with_contexts(spells, skill_lines, store, |ctxs| {
             listed
                 .iter()
-                .filter_map(|&s| self.recipe(s, spells, skill_lines, store, craft_type, ctxs))
+                .filter_map(|&s| {
+                    let rank = linked.map(|linked| linked.rank);
+                    self.recipe(s, spells, skill_lines, store, craft_type, rank, ctxs)
+                })
                 .collect()
         });
         // No sort here: the engine orders the rows by the craft type's own comparator
@@ -383,16 +401,24 @@ impl CraftReads<'_, '_> {
     fn book(&self, open: &CraftOpen) -> Option<Option<CraftState>> {
         self.spells.as_deref()?;
         self.skill_lines.as_deref()?;
-        Some(open.line.and_then(|line| self.state(line, open.craft_type)))
+        Some(
+            open.line
+                .and_then(|line| self.state(line, open.craft_type, open.linked.as_ref())),
+        )
     }
 
     /// The player's list of `craft_type` (`CGPlayer_C + 0x1cd0 + 0x10*type`, `0x5ea330`), in learn
     /// order (`0x5e9e0f`): admitted at the learn (`0x5e9c20`) when known, not a profession spell
     /// (`Attributes & 0x20`) and `castUI` equal to the type; `SkillLineAbility` decides no
-    /// membership.
-    fn listed(&self, spells: &Spells, craft_type: u32) -> Vec<u32> {
-        self.actions
-            .craft_order
+    /// membership. A linked book lists the linker's spells.
+    fn listed(
+        &self,
+        spells: &Spells,
+        craft_type: u32,
+        linked: Option<&crate::ui_tradeskill::LinkedBook>,
+    ) -> Vec<u32> {
+        linked
+            .map_or(&self.actions.craft_order, |linked| &linked.spells)
             .iter()
             .copied()
             .filter(|&s| {
@@ -406,12 +432,18 @@ impl CraftReads<'_, '_> {
     /// `spell_id`'s row as its getters read it at the call, `open_type` the window's type
     /// (`[0xbdcfb8]`, 0 while closed) for the description's pet flag; `None` declines, with a
     /// catalog, our player or the spell's record missing.
-    fn recipe_now(&self, spell_id: u32, open_type: u32) -> Option<CraftRecipe> {
+    fn recipe_now(
+        &self,
+        spell_id: u32,
+        open_type: u32,
+        linked: Option<&crate::ui_tradeskill::LinkedBook>,
+    ) -> Option<CraftRecipe> {
         let spells = self.spells.as_deref()?;
         let skill_lines = self.skill_lines.as_deref()?;
         let store = self.player()?;
+        let rank = linked.map(|linked| linked.rank);
         self.with_contexts(spells, skill_lines, store, |ctxs| {
-            self.recipe(spell_id, spells, skill_lines, store, open_type, ctxs)
+            self.recipe(spell_id, spells, skill_lines, store, open_type, rank, ctxs)
         })
     }
 
@@ -432,11 +464,15 @@ impl CraftReads<'_, '_> {
 
     /// `GetCraftDisplaySkillLine`'s answer past its type test (`0x4f6ce3`); `Some(None)` with no
     /// player, `None` while a catalog is missing.
-    fn display_line_now(&self) -> Option<Option<(String, u32, u32)>> {
+    fn display_line_now(
+        &self,
+        linked: Option<&crate::ui_tradeskill::LinkedBook>,
+    ) -> Option<Option<(String, u32, u32)>> {
         let spells = self.spells.as_deref()?;
         let skill_lines = self.skill_lines.as_deref()?;
         Some(self.player().and_then(|store| {
-            display_line(self.listed(spells, 3).first().copied(), skill_lines, store)
+            let first = self.listed(spells, 3, linked).first().copied();
+            display_line(first, skill_lines, store, linked)
         }))
     }
 
@@ -450,6 +486,7 @@ impl CraftReads<'_, '_> {
         skill_lines: &SkillLines,
         store: &ObjectStore,
         open_type: u32,
+        linked_rank: Option<u32>,
         ctxs: crate::spell::TokenContexts<'_, '_>,
     ) -> Option<CraftRecipe> {
         let d = spells.catalog.get(s)?;
@@ -513,7 +550,15 @@ impl CraftReads<'_, '_> {
             spell_id: s,
             name: d.name.clone(),
             sub_name: d.rank.clone().unwrap_or_default(),
-            difficulty: craft_bucket(d, sla, store, &self.actions.spells, pet.as_ref(), &objects),
+            difficulty: craft_bucket(
+                d,
+                sla,
+                store,
+                linked_rank,
+                &self.actions.spells,
+                pet.as_ref(),
+                &objects,
+            ),
             num_available,
             icon: craft_icon(d),
             description: craft_description(d, &spells.catalog, open_type, ctxs),
@@ -554,9 +599,11 @@ impl crate::script_calls::live::LiveFamily for CraftLive<'_, '_> {
         // The type a close zeroes (`0x4f5fe0`).
         let open_type = open.line.map_or(0, |_| open.craft_type);
         ask.answer(|_: &CraftBookQuery| reads.book(open))
-            || ask.answer(|q: &CraftRecipeQuery| reads.recipe_now(q.0, open_type))
+            || ask.answer(|q: &CraftRecipeQuery| {
+                reads.recipe_now(q.0, open_type, open.linked.as_ref())
+            })
             || ask.answer(|q: &CraftNameQuery| reads.name_now(q.0))
-            || ask.answer(|_: &CraftDisplayLineQuery| reads.display_line_now())
+            || ask.answer(|_: &CraftDisplayLineQuery| reads.display_line_now(open.linked.as_ref()))
     }
 }
 

@@ -158,6 +158,12 @@ pub(super) fn is_bubble(model: &Model, frame: FrameHandle) -> bool {
     model.chat_bubbles.by_frame.contains_key(&frame)
 }
 
+/// The pooled bubble frames in pool order, for the pfUI extension's `C_ChatBubbles`.
+#[cfg(feature = "pfui")]
+pub(super) fn frames(model: &Model) -> Vec<FrameHandle> {
+    model.chat_bubbles.bubbles.iter().map(|b| b.frame).collect()
+}
+
 /// How many new bubbles [`sync`] builds for `states`: the new lines (a key without a live line of
 /// the same number) less the free list and the bubbles whose lines end this frame.
 fn bubbles_to_build(model: &Model, states: &[BubbleState]) -> usize {

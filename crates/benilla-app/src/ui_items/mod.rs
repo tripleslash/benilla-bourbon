@@ -29,6 +29,8 @@ pub(crate) mod live;
 mod lock_openers;
 pub(crate) mod locks;
 mod net;
+#[cfg(feature = "pfui")]
+pub(crate) mod pfui;
 mod requirements;
 mod sets;
 #[cfg(test)]

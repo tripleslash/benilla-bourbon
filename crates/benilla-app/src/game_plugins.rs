@@ -356,7 +356,12 @@ pub(crate) mod schedule_tests {
             },
         );
         more(&mut app);
+        #[cfg(feature = "pfui")]
+        app.add_plugins(crate::pfui::PfuiPlugin);
         app.finish();
+        app.world_mut()
+            .resource_mut::<crate::cvars::Cvars>()
+            .keep_off_disk();
         app
     }
 
@@ -1139,7 +1144,13 @@ pub(crate) mod schedule_tests {
     ///
     /// The fork's tree at 19f75959c (the native-GPU waves, frame generation and the cursor's scale
     /// cache) measures 1,617 (-77).
+    ///
+    /// The pfUI build's optional feeds order stock producers before their consumers, so it has its
+    /// own ratchet: the incoming branch measured +8 over upstream's for it, carried onto the fork's.
+    #[cfg(not(feature = "pfui"))]
     const UPDATE_ACTIONABLE_CEILING: usize = 1_617;
+    #[cfg(feature = "pfui")]
+    const UPDATE_ACTIONABLE_CEILING: usize = 1_625;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
@@ -1677,6 +1688,12 @@ pub(crate) mod schedule_tests {
     /// [`crate::ui_script::UiFeed`], keyed by a suffix of the system's full name, with the
     /// reason.
     const OUTSIDE_THE_FEED_PHASE: &[(&str, &str)] = &[
+        #[cfg(feature = "pfui")]
+        (
+            "::pfui::raise_held_events",
+            "in the lanes' set after their drain: the pfUI feeds' raises made with the VM \
+             alone, run with the host lent after the frame's stock events and ahead of the tick",
+        ),
         (
             "::ui_chat::frames::tee_shown_lines",
             "in the lanes' set after their drain (`lanes::UiLanes`, after `UiFeed` and before the \

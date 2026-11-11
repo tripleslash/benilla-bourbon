@@ -7,6 +7,8 @@ use crate::dbc::{parse, str_at, u32_at};
 use crate::items::ItemDisplay;
 use crate::{read_texture_mip_chain, BlpMipChain, Chain};
 
+mod turtle;
+
 const CHAR_SECTIONS: &str = "DBFilesClient\\CharSections.dbc";
 
 /// CharSections `sectionType` values (facial hair 2 at `0x478660`, hair 3 at `0x4784c0`).

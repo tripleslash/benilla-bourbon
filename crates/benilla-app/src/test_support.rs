@@ -1,6 +1,9 @@
 //! What the crate's structural tests share: source readers over its own code, and a check of
 //! the order its `Update` schedule builds.
 
+#[path = "pfui/source_audit.rs"]
+mod extension_sources;
+
 /// Every `.rs` file under `root`, recursively.
 pub(crate) fn rust_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
@@ -13,7 +16,9 @@ pub(crate) fn rust_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "rs") {
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && extension_sources::is_compiled(&path)
+            {
                 out.push(path);
             }
         }

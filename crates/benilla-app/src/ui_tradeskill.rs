@@ -47,6 +47,19 @@ pub(crate) struct TradeSkillOpens(pub(crate) Vec<u32>);
 #[derive(Resource, Default)]
 pub(crate) struct TradeSkillOpen {
     pub(crate) line: Option<u32>,
+    /// The book a profession link shows in place of the player's own; a stock client has none.
+    pub(crate) linked: Option<LinkedBook>,
+}
+
+/// Another player's book a profession link (`|Htrade:…|h`, the pfUI extension's ClassicAPI links)
+/// shows in place of the player's: the linker's recipes and the linker's rank, which the rows
+/// band on, and maximum. A close keeps it; the player's own opener drops it.
+#[cfg_attr(not(feature = "pfui"), allow(dead_code))]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct LinkedBook {
+    pub(crate) spells: Vec<u32>,
+    pub(crate) rank: u32,
+    pub(crate) max_rank: u32,
 }
 
 /// The repeat count (`[0xbde060]`) a dying VM left, seated in the next: the world-enter init a
@@ -129,7 +142,7 @@ fn on_session_end(
     mut carry: ResMut<TradeSkillRepeatCarry>,
 ) {
     opens.0.clear();
-    open.line = None;
+    *open = TradeSkillOpen::default();
     carry.0 = 0;
 }
 
@@ -584,21 +597,22 @@ impl TradeSkillReads<'_, '_> {
 
     /// The book of `line` as a build reads it: its known recipes, banded against the current rank,
     /// the cooldowns mapped through `clock`, each product looked up with the callback `0x4fc8e0`
-    /// kept for a miss (`0x4fcd4d`); `None` while a catalog or our player is missing.
+    /// kept for a miss (`0x4fcd4d`); `None` while a catalog or our player is missing. A `linked`
+    /// book takes the linker's recipes and rank instead.
     pub(crate) fn state(
         &self,
         line: u32,
+        linked: Option<&LinkedBook>,
         clock: &crate::ui_script::UiClock,
     ) -> Option<TradeSkillState> {
         let spells = self.spells.as_deref()?;
         let skill_lines = self.skill_lines.as_deref()?;
         let store = self.player()?;
         let (race, class) = store.race_class();
-        let (line_name, line_rank, max_rank) = self.line_now(line);
+        let (line_name, line_rank, max_rank) = self.line_now(line, linked);
         // The line's list in learn order (`0x5e9d72`), which the build walks (`0x4fcbb7`).
-        let recipes: Vec<TradeSkillRecipe> = self
-            .actions
-            .profession_order
+        let recipes: Vec<TradeSkillRecipe> = linked
+            .map_or(&self.actions.profession_order, |linked| &linked.spells)
             .iter()
             .filter(|&&s| {
                 spells
@@ -607,7 +621,7 @@ impl TradeSkillReads<'_, '_> {
                     .is_some_and(|d| d.attributes & SPELL_ATTR_IS_TRADESKILL != 0)
                     && skill_lines.catalog.spell_to_line(s, race, class) == Some(line)
             })
-            .filter_map(|&s| self.recipe_of(s, line, true, clock))
+            .filter_map(|&s| self.recipe_of(s, line, linked, true, clock))
             .collect();
         // No sort here: the engine orders the book (`0x4fd180`).
         Some(TradeSkillState {
@@ -624,11 +638,12 @@ impl TradeSkillReads<'_, '_> {
     fn book(
         &self,
         line: Option<u32>,
+        linked: Option<&LinkedBook>,
         clock: &crate::ui_script::UiClock,
     ) -> Option<Option<TradeSkillState>> {
         self.spells.as_deref()?;
         self.skill_lines.as_deref()?;
-        Some(line.and_then(|line| self.state(line, clock)))
+        Some(line.and_then(|line| self.state(line, linked, clock)))
     }
 
     /// `spell_id`'s row of `line`'s book as it stands, the build's lookup of its product made
@@ -637,6 +652,7 @@ impl TradeSkillReads<'_, '_> {
         &self,
         spell_id: u32,
         line: u32,
+        linked: Option<&LinkedBook>,
         build: bool,
         clock: &crate::ui_script::UiClock,
     ) -> Option<TradeSkillRecipe> {
@@ -644,7 +660,7 @@ impl TradeSkillReads<'_, '_> {
         let objects = self.stores.item_objects(&self.objects);
         let recipe = resolve_recipe(
             spell_id,
-            skill_value(store, line),
+            linked.map_or_else(|| skill_value(store, line), |linked| linked.rank),
             self.spells.as_deref()?,
             self.skill_lines.as_deref()?,
             self.focus.as_deref(),
@@ -667,8 +683,9 @@ impl TradeSkillReads<'_, '_> {
     }
 
     /// `GetTradeSkillLine`'s answer for `line` (`0x4fdd40`): its `SkillLine` name, `UNKNOWN` for
-    /// none (`0x4fde92`), and the slot's rank and maximum, 0 and 0 with no player.
-    fn line_now(&self, line: u32) -> (String, u32, u32) {
+    /// none (`0x4fde92`), and the slot's rank and maximum, 0 and 0 with no player; a linked book's
+    /// are the linker's.
+    fn line_now(&self, line: u32, linked: Option<&LinkedBook>) -> (String, u32, u32) {
         let Some(name) = self
             .skill_lines
             .as_deref()
@@ -677,7 +694,10 @@ impl TradeSkillReads<'_, '_> {
         else {
             return ("UNKNOWN".to_string(), 0, 0);
         };
-        let (rank, max) = self.player().map_or((0, 0), |s| skill_rank(s, line));
+        let (rank, max) = match linked {
+            Some(linked) => (linked.rank, linked.max_rank),
+            None => self.player().map_or((0, 0), |s| skill_rank(s, line)),
+        };
         (name, rank, max)
     }
 
@@ -726,10 +746,12 @@ impl crate::script_calls::live::LiveFamily for TradeSkillLive<'_, '_> {
         use benilla_ui::script::{TradeSkillBookQuery, TradeSkillLineQuery, TradeSkillRecipeQuery};
         let unticked = crate::ui_script::UiClock::default();
         let clock = self.clock.as_deref().map_or(&unticked, |c| &c.0);
-        let (line, reads) = (self.open.line, &self.reads);
-        ask.answer(|_: &TradeSkillBookQuery| reads.book(line, clock))
-            || ask.answer(|q: &TradeSkillRecipeQuery| reads.recipe_of(q.0, line?, false, clock))
-            || ask.answer(|_: &TradeSkillLineQuery| Some(reads.line_now(line.unwrap_or(0))))
+        let (line, linked, reads) = (self.open.line, self.open.linked.as_ref(), &self.reads);
+        ask.answer(|_: &TradeSkillBookQuery| reads.book(line, linked, clock))
+            || ask.answer(|q: &TradeSkillRecipeQuery| {
+                reads.recipe_of(q.0, line?, linked, false, clock)
+            })
+            || ask.answer(|_: &TradeSkillLineQuery| Some(reads.line_now(line.unwrap_or(0), linked)))
     }
 }
 
@@ -866,12 +888,78 @@ impl TradeSkillSteps<'_, '_> {
             else {
                 continue;
             };
+            // The player's own opener while a link shows opens the player's list, not closing.
+            self.drop_link(script, craft_type);
             raised |= match craft_type {
                 0 => self.toggle_trade_skill(script, line),
                 _ => self.toggle_craft(script, line, craft_type),
             };
         }
         raised
+    }
+
+    /// A link the window of `craft_type` shows, dropped, the window marked closed so that the
+    /// player's opener opens the player's own list in its place.
+    fn drop_link(&mut self, script: &mut UiScript, craft_type: u32) {
+        let dropped = if craft_type == 0 {
+            self.open.as_deref_mut().and_then(|open| {
+                let linked = open.linked.take()?;
+                open.line = None;
+                Some(linked)
+            })
+        } else {
+            self.craft_open.as_deref_mut().and_then(|open| {
+                let linked = open.linked.take()?;
+                open.line = None;
+                Some(linked)
+            })
+        };
+        #[cfg(feature = "pfui")]
+        if dropped.is_some() {
+            benilla_ui::script::pfui_host::professions::set_linked(
+                script.lua(),
+                craft_type != 0,
+                None,
+            );
+        }
+        #[cfg(not(feature = "pfui"))]
+        let _ = (dropped, script);
+    }
+
+    /// The pfUI extension's open of a profession link: `opener`'s window shows `book` in place of
+    /// the player's list, marked closed first so that a link to the line already open replaces
+    /// it, and the linker `guid` is what `IsTradeSkillLinked` names. Whether it raised anything.
+    #[cfg(feature = "pfui")]
+    pub(crate) fn open_link(
+        &mut self,
+        script: &mut UiScript,
+        opener: u32,
+        guid: u64,
+        book: LinkedBook,
+    ) -> bool {
+        let Some((line, craft_type)) = self.reads.as_ref().and_then(|r| r.opener(opener)) else {
+            return false;
+        };
+        if craft_type == 0 {
+            let Some(open) = self.open.as_deref_mut() else {
+                return false;
+            };
+            (open.line, open.linked) = (None, Some(book));
+        } else {
+            let Some(open) = self.craft_open.as_deref_mut() else {
+                return false;
+            };
+            (open.line, open.linked) = (None, Some(book));
+        }
+        benilla_ui::script::pfui_host::professions::set_linked(
+            script.lua(),
+            craft_type != 0,
+            Some(guid),
+        );
+        match craft_type {
+            0 => self.toggle_trade_skill(script, line),
+            _ => self.toggle_craft(script, line, craft_type),
+        }
     }
 
     /// `0x4fc910`: the pending requests cancelled (`0x4fc913`); the open line closes with
@@ -893,7 +981,11 @@ impl TradeSkillSteps<'_, '_> {
         debug!("ui_tradeskill: the opener opens skill line {line}");
         open.line = Some(line);
         let unticked = crate::ui_script::UiClock::default();
-        let fresh = reads.state(line, self.clock.as_deref().map_or(&unticked, |c| &c.0));
+        let fresh = reads.state(
+            line,
+            open.linked.as_ref(),
+            self.clock.as_deref().map_or(&unticked, |c| &c.0),
+        );
         let (update, show) = script.open_trade_skill(fresh);
         if update {
             script.fire_event("TRADE_SKILL_UPDATE", vec![]);
@@ -926,7 +1018,10 @@ impl TradeSkillSteps<'_, '_> {
         debug!("ui_tradeskill: the opener opens the CraftFrame (line {line}, type {craft_type})");
         (open.line, open.craft_type) = (Some(line), craft_type);
         // With no player to build for (`0x4f6109`), the build leaves before its signal.
-        let fresh = self.craft.as_ref().and_then(|c| c.state(line, craft_type));
+        let fresh = self
+            .craft
+            .as_ref()
+            .and_then(|c| c.state(line, craft_type, open.linked.as_ref()));
         if script.open_craft(craft_type, fresh) {
             script.fire_event("CRAFT_UPDATE", vec![]);
         }
@@ -1378,6 +1473,106 @@ mod tests {
             .resource_mut::<crate::spell::Cooldowns>()
             .start_spell(SPELL, &d, 0, Instant::now(), None);
         assert!(heard(&mut app).is_empty());
+    }
+
+    /// A profession link (the pfUI extension's ClassicAPI links) opens the window on the linker's
+    /// recipes and ranks; the player's own opener then opens the player's book in its place
+    /// instead of closing, and the link is gone.
+    #[cfg(feature = "pfui")]
+    #[test]
+    fn a_link_shows_the_linkers_book_until_the_players_own_opener() {
+        use bevy::ecs::system::RunSystemOnce;
+        const OWN: u32 = 18_560;
+        const THEIRS: u32 = 18_401;
+        const OPENER: u32 = 3908;
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        let mut actions = PlayerActions::default();
+        actions.spells.insert(OWN);
+        actions.profession_order.push(OWN);
+        let recipe = |name: &str| SpellDisplay {
+            name: name.into(),
+            attributes: SPELL_ATTR_IS_TRADESKILL,
+            ..Default::default()
+        };
+        let opener = SpellDisplay {
+            name: "Tailoring".into(),
+            ..Default::default()
+        };
+        app.init_resource::<TradeSkillOpen>()
+            .init_resource::<TradeSkillOpens>()
+            .insert_resource(actions)
+            .init_resource::<crate::net::GuidIndex>()
+            .init_resource::<Items>()
+            .init_resource::<crate::spell::Cooldowns>()
+            .init_resource::<crate::ui_script::UiClock>()
+            .insert_resource(crate::net::NetCommands(tx))
+            .insert_resource(Spells {
+                catalog: benilla_formats::SpellCatalog::from_displays(HashMap::from([
+                    (OWN, recipe("Mooncloth")),
+                    (THEIRS, recipe("Runecloth Bag")),
+                    (OPENER, opener),
+                ])),
+                ..Spells::empty_for_tests()
+            })
+            .insert_resource(SkillLines {
+                catalog: benilla_formats::SkillLineCatalog::from_spell_lines([
+                    (OWN, 197),
+                    (THEIRS, 197),
+                    (OPENER, 197),
+                ])
+                .with_line_names([(197, "Tailoring")]),
+            });
+        app.world_mut()
+            .spawn((ObjectStore(Default::default()), SelfPlayer));
+        app.insert_non_send(UiScript::new().unwrap());
+        let book = |app: &mut App| {
+            app.update();
+            let script = app.world().non_send::<UiScript>();
+            let names = script
+                .eval::<Vec<String>>(
+                    "local names = {} for i = 1, GetNumTradeSkills() do \
+                     local name, kind = GetTradeSkillInfo(i) \
+                     if kind ~= 'header' then table.insert(names, name) end end return names",
+                )
+                .unwrap();
+            let rank = script
+                .eval::<u32>("local _, rank = GetTradeSkillLine() return rank")
+                .unwrap();
+            let linked = benilla_ui::script::pfui_host::professions::linked(script.lua(), false);
+            (names, rank, linked)
+        };
+        let book_of_theirs = LinkedBook {
+            spells: vec![THEIRS],
+            rank: 120,
+            max_rank: 150,
+        };
+        app.world_mut()
+            .run_system_once(
+                move |mut steps: TradeSkillSteps, mut script: NonSendMut<UiScript>| {
+                    assert!(steps.open_link(&mut script, OPENER, 0xC0FFEE, book_of_theirs.clone()));
+                },
+            )
+            .expect("the open runs");
+        assert_eq!(
+            book(&mut app),
+            (vec!["Runecloth Bag".to_string()], 120, Some(0xC0FFEE))
+        );
+
+        app.world_mut()
+            .resource_mut::<TradeSkillOpens>()
+            .0
+            .push(OPENER);
+        app.world_mut()
+            .run_system_once(
+                |mut steps: TradeSkillSteps, mut script: NonSendMut<UiScript>| {
+                    steps.toggle_opens(&mut script);
+                },
+            )
+            .expect("the toggle runs");
+        assert_eq!(book(&mut app), (vec!["Mooncloth".to_string()], 0, None));
+        let open = app.world().resource::<TradeSkillOpen>();
+        assert_eq!((open.line, open.linked.is_none()), (Some(197), true));
     }
 
     /// The build refills the array from the line's list in learn order (`0x5e9d72` appends,

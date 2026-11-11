@@ -449,6 +449,7 @@ fn geometry_answers_within_the_call_stack_that_moved_it() {
 /// `GetWidth`/`GetHeight` (`0x7a1e00`, `0x7a2030`) answer the size the object was given, whatever
 /// its anchors span; only a zero size answers the rect's span, which is not divided by the
 /// effective scale (`0x41ad70`/`0x41ae40` only, where `GetLeft` divides at `0x7a1a63`), else 0.
+#[cfg(not(feature = "pfui"))] // ClassicAPI divides the span by the scale.
 #[test]
 fn get_width_answers_the_set_size_else_the_rect_span_unscaled() {
     let mut s = script();

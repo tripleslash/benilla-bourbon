@@ -90,10 +90,32 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     set_shared(lua, m, Side::Region, "GetWidth", |lua, this: Table| {
         region_size_read(lua, &this, true)
     })?;
+    // ClassicAPI's `GetWidth([ignoreRect])`.
+    #[cfg(feature = "pfui")]
+    set_shared(
+        lua,
+        m,
+        Side::Region,
+        "GetWidth",
+        |lua, (this, ignore_rect): (Table, Option<bool>)| {
+            classicapi_region_size_read(lua, &this, true, ignore_rect == Some(true))
+        },
+    )?;
 
     set_shared(lua, m, Side::Region, "GetHeight", |lua, this: Table| {
         region_size_read(lua, &this, false)
     })?;
+    // ClassicAPI's `GetHeight([ignoreRect])`.
+    #[cfg(feature = "pfui")]
+    set_shared(
+        lua,
+        m,
+        Side::Region,
+        "GetHeight",
+        |lua, (this, ignore_rect): (Table, Option<bool>)| {
+            classicapi_region_size_read(lua, &this, false, ignore_rect == Some(true))
+        },
+    )?;
 
     // GetLeft/GetRight/GetTop/GetBottom: the resolved edges over the owner's effective scale,
     // which a region shares, through the getter steps (y up); nil while the valid bit is clear.
@@ -313,5 +335,45 @@ fn region_size_read(lua: &Lua, this: &Table, width: bool) -> mlua::Result<f64> {
         } else {
             units.span(r.bottom, r.top)
         }
+    }))
+}
+
+/// ClassicAPI's size of a region: as [`region_size_read`], the anchored span over the scale, in
+/// `GetTop`'s units; with `ignore_rect` a size that is not set answers 0.
+#[cfg(feature = "pfui")]
+fn classicapi_region_size_read(
+    lua: &Lua,
+    this: &Table,
+    width: bool,
+    ignore_rect: bool,
+) -> mlua::Result<f64> {
+    let rh = region_handle_of(lua, this)?;
+    crate::script::measure::ensure_measured(lua, rh);
+    let (units, text, slot) = {
+        let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+        let text = model
+            .arena
+            .region(rh)
+            .is_some_and(|r| matches!(r.kind, crate::widget::RegionKind::FontString));
+        let slot = crate::script::region::virtual_slot(&model, rh);
+        (model.layout_units(), text, slot)
+    };
+    let stored = (if width { slot.0 } else { slot.1 }) as f32;
+    if stored != 0.0 || text {
+        return Ok(units.load(stored));
+    }
+    if ignore_rect {
+        return Ok(0.0);
+    }
+    crate::script::object::settle_region(lua, rh);
+    let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+    let scale = owner_scale(&model, rh);
+    Ok(model.region_rects.get(&rh).map_or(0.0, |r| {
+        let span = if width {
+            r.right - r.left
+        } else {
+            r.top - r.bottom
+        };
+        units.load(span / scale)
     }))
 }

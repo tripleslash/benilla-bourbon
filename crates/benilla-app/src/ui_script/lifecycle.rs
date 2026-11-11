@@ -218,6 +218,8 @@ fn new_vm<E: std::fmt::Display>(
             }
         }
     }
+    #[cfg(feature = "pfui")]
+    crate::pfui::enable_vm(world, &script);
     script.set_european_numbers(european_numbers);
     // `[0xc0e080]`, which start-up sets once from `Wow.ini`, so every VM answers `GetLocale` alike.
     script.set_locale(super::client_locale().index());
@@ -245,6 +247,13 @@ fn new_vm<E: std::fmt::Display>(
         script.lua().srand(1);
     }
     install_addon_asset_resolvers(world, &mut script);
+    // tortoise: Turtle's `PlayerModel:SetUnit(displayId)`, which its shop previews call; a
+    // 1.12.1 VM keeps the stock binding alone.
+    if flavor.is_turtle() {
+        if let Err(e) = script.enable_turtle_model_previews() {
+            error!("ui_script: Turtle model previews: {e}");
+        }
+    }
     info!("ui_script: new VM, session {}", script.session());
     Some(script)
 }

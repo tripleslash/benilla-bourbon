@@ -953,6 +953,30 @@ impl ScriptCallHost<'_, '_> {
         }
     }
 
+    /// `StartAttack([unit])`, the pfUI extension's ClassicAPI verb: [`Self::attack_at`]'s start leg
+    /// alone, at `target`, else the selection. An attack already running is left as it is, where
+    /// the toggle would stop it.
+    #[cfg(feature = "pfui")]
+    fn start_attack(
+        &mut self,
+        script: &mut UiScript,
+        at: &mut Signalled,
+        target: Option<u64>,
+        may_pick: bool,
+    ) {
+        if self.appliers.attack().toggles_off() {
+            return;
+        }
+        let Some(owed) = self.appliers.attack().pick_attack_at(target, may_pick) else {
+            return;
+        };
+        self.appliers.cursor().bind_parked();
+        self.settle_selection(script, at, owed.into());
+        if let Some(guid) = self.appliers.attack().settle_attack() {
+            self.appliers.attack().start_attack(guid);
+        }
+    }
+
     /// A pet bar press past its dispatcher's gates (`0x4bd1d0`): Attack's validator (`0x4bd40d`)
     /// signals its pick's selection in place, ahead of its latch (`0x4bd42e`) and its
     /// `CMSG_PET_ACTION` (`0x4bd4a4`), and a cast the validator binds to a standing targeting
@@ -1199,6 +1223,13 @@ impl CallHost for ScriptCallHost<'_, '_> {
     fn apply(&mut self, script: &mut UiScript, call: ScriptCall) -> Option<CallTail> {
         #[cfg(debug_assertions)]
         self.census_probe();
+        // Nampower's queue takes a cast its lane cannot start yet, and watches the attempt.
+        #[cfg(feature = "nampower")]
+        let call = crate::pfui::spell_queue::intercept(script, call, &self.appliers.cast())?;
+        #[cfg(all(feature = "pfui", not(feature = "nampower")))]
+        let call = crate::pfui::clicks::normalize_targets(call, &self.appliers.cast())?;
+        #[cfg(feature = "nampower")]
+        let attempt = crate::pfui::spell_queue::before(script, &call, &self.appliers.cast());
         let appliers = &mut self.appliers;
         // The gate's answer for this call, made where the Lua verb ran: its casts start only if
         // tag 2 passed there. The ladder reads it while this call applies.
@@ -1508,6 +1539,73 @@ impl CallHost for ScriptCallHost<'_, '_> {
                 let owed = self.appliers.drop_item().drop_on(script, &token);
                 self.feed_pet(script, &mut at, owed);
             }
+            // pfUI's frame actions: an item use at a unit, and the spell, macro and target steps.
+            #[cfg(feature = "pfui")]
+            ScriptCall::PfuiClick(
+                benilla_ui::script::pfui_host::attributes::ClickAction::Item { guid, target },
+            ) => {
+                if let Some(open) = appliers.item_use().pfui_use_item(script, guid, target) {
+                    tail = appliers.loot().open_item(script, open);
+                }
+            }
+            // ClassicAPI's macro verbs: the attack's legs alone, and an item placed at the cursor.
+            #[cfg(feature = "pfui")]
+            ScriptCall::PfuiClick(
+                benilla_ui::script::pfui_host::attributes::ClickAction::StartAttack {
+                    target,
+                    may_pick,
+                },
+            ) => self.start_attack(script, &mut at, target, may_pick),
+            #[cfg(feature = "pfui")]
+            ScriptCall::PfuiClick(
+                benilla_ui::script::pfui_host::attributes::ClickAction::StopAttack,
+            ) => self.stop_attack(script, &mut at),
+            #[cfg(feature = "pfui")]
+            ScriptCall::PfuiClick(
+                benilla_ui::script::pfui_host::attributes::ClickAction::ItemAtPoint { guid, point },
+            ) => {
+                // A reticle already up is replaced by this use's own.
+                appliers.cursor().stop_targeting();
+                if let Some(open) = appliers.item_use().pfui_use_item(script, guid, None) {
+                    tail = appliers.loot().open_item(script, open);
+                }
+                let mut cast = appliers.cast();
+                if let Some(spell) = cast.ladder.ground.spell() {
+                    crate::pfui::clicks::commit_ground_ladder(&mut cast.ladder, spell, point);
+                }
+            }
+            // A profession link clicked in chat: its window shows the linker's book.
+            #[cfg(feature = "pfui")]
+            ScriptCall::PfuiClick(
+                benilla_ui::script::pfui_host::attributes::ClickAction::OpenTradeLink {
+                    opener,
+                    guid,
+                    spells,
+                    rank,
+                    max_rank,
+                },
+            ) => {
+                let book = crate::ui_tradeskill::LinkedBook {
+                    spells,
+                    rank,
+                    max_rank,
+                };
+                if self
+                    .appliers
+                    .trade_skill()
+                    .open_link(script, opener, guid, book)
+                {
+                    self.at_point(script, &mut at);
+                }
+            }
+            #[cfg(feature = "pfui")]
+            ScriptCall::PfuiClick(action) => {
+                crate::pfui::clicks::apply(script, action, &mut appliers.cast());
+            }
+            // Cargo may unify the UI extension into a client that did not enable its plugin.
+            #[cfg(not(feature = "pfui"))]
+            #[allow(unreachable_patterns)]
+            _ => {}
         }
         self.run_casts(script, &mut at);
         // A profession opener the call cast toggles its window inside the cast (`0x6e4c22`,
@@ -1562,7 +1660,14 @@ impl CallHost for ScriptCallHost<'_, '_> {
         if let Some(owed) = self.appliers.cast().ladder.take_unit_attack() {
             self.unit_attack_tail(script, &mut at, owed);
         }
+        // An extension's ground action commits its point once its cast's cursor is up.
+        #[cfg(feature = "pfui")]
+        crate::pfui::clicks::commit_owed_ground(script, &mut self.appliers.cast());
         self.run_casts(script, &mut at);
+        // Nampower reads the attempt once a press held at the attack pick has gone out, and
+        // before the call's reports are signalled.
+        #[cfg(feature = "nampower")]
+        crate::pfui::spell_queue::after(script, attempt, &self.appliers.cast());
         let appliers = &mut self.appliers;
         // Whatever casts next is the caller's: the engine's own, which asks no gate, or the call
         // whose signal point this call applied at.
@@ -5359,4 +5464,8 @@ mod tests {
             unhosted.join("\n  ")
         );
     }
+
+    // Nampower's cast events around a deferred attack pick, on this module's frame.
+    #[cfg(feature = "nampower")]
+    include!("pfui/spell_queue_deferred_tests.rs");
 }

@@ -182,6 +182,8 @@ pub(crate) enum BinOpr {
     Mul,
     Div,
     Pow,
+    /// pfUI carry: 5.1's `%`, parsed only on a pfUI state.
+    Mod,
     Concat,
     Ne,
     Eq,
@@ -197,6 +199,8 @@ pub(crate) enum BinOpr {
 pub(crate) enum UnOpr {
     Minus,
     Not,
+    /// pfUI carry: 5.1's `#`, parsed only on a pfUI state.
+    Len,
 }
 
 /// 5.1's `BlockCnt`.
@@ -483,6 +487,8 @@ fn set_a(op: &mut Op, r: Reg) {
         | Op::Mul(a, ..)
         | Op::Div(a, ..)
         | Op::Pow(a, ..)
+        | Op::Mod(a, ..)
+        | Op::Len(a, _)
         | Op::AddK(a, ..)
         | Op::SubK(a, ..)
         | Op::MulK(a, ..)
@@ -1250,6 +1256,10 @@ impl<'a> Parser<'a> {
             e1.k = Kind::Reloc(self.code(Op::Pow(0, o1, o2), 1)?);
             return Ok(());
         }
+        if op == BinOpr::Mod {
+            e1.k = Kind::Reloc(self.code(Op::Mod(0, o1, o2), 1)?);
+            return Ok(());
+        }
         if op == BinOpr::Concat {
             e1.k = Kind::Reloc(self.code(Op::Concat(0, o1 as Reg, o2 as Reg), 1)?);
             return Ok(());
@@ -1328,6 +1338,12 @@ impl<'a> Parser<'a> {
                 Ok(())
             }
             UnOpr::Not => self.codenot(e),
+            UnOpr::Len => {
+                let r = self.exp2anyreg(e)?;
+                self.freeexp(e);
+                e.k = Kind::Reloc(self.code(Op::Len(0, r), 1)?);
+                Ok(())
+            }
         }
     }
 
@@ -1337,7 +1353,7 @@ impl<'a> Parser<'a> {
             BinOpr::And => self.goiftrue(v),
             BinOpr::Or => self.goiffalse(v),
             BinOpr::Concat => self.exp2nextreg(v),
-            BinOpr::Add | BinOpr::Sub | BinOpr::Mul | BinOpr::Div | BinOpr::Pow => {
+            BinOpr::Add | BinOpr::Sub | BinOpr::Mul | BinOpr::Div | BinOpr::Pow | BinOpr::Mod => {
                 if v.is_numeral().is_none() {
                     self.exp2rk(v)?;
                 }
@@ -1386,7 +1402,7 @@ impl<'a> Parser<'a> {
                 self.exp2nextreg(e2)?;
                 self.codearith(op, e1, e2)?;
             }
-            BinOpr::Add | BinOpr::Sub | BinOpr::Mul | BinOpr::Div | BinOpr::Pow => {
+            BinOpr::Add | BinOpr::Sub | BinOpr::Mul | BinOpr::Div | BinOpr::Pow | BinOpr::Mod => {
                 self.codearith(op, e1, e2)?
             }
             BinOpr::Eq => self.codecomp(Cmp::Eq, true, e1, e2)?,

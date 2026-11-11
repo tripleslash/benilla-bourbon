@@ -165,6 +165,13 @@ fn raise_slot_changed(model: &mut Model, id: u32) {
 /// and the slot after, as `0x4e62e0` writes the slot past the setter, so the cursor's events read
 /// the slot as it was. Returns whether to repaint.
 pub(crate) fn place_action(lua: &Lua, id: u32) -> mlua::Result<bool> {
+    // The extension owns its cursor tag; the stock packet packer must never transmit it.
+    #[cfg(feature = "pfui")]
+    if lua.app_data_ref::<crate::script::ModelCell>().is_some_and(|model| {
+        crate::script::pfui_host::equipment_actions::held_set(&model).is_some()
+    }) {
+        return Ok(false);
+    }
     // A bar item's state, carried from its source slot, read before the place hops anything.
     let state = match &lua
         .app_data_ref::<crate::script::ModelCell>()

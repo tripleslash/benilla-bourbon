@@ -102,6 +102,8 @@ pub(super) fn emit(
     // A single-line editbox's region holds its window (`0x77d858`), drawn from the line origin,
     // unwrapped and cut at the box edge, focused or not; the focused box's selection goes behind
     // and its caret after.
+    #[cfg(feature = "pfui")]
+    crate::ui_text::inline_texture::set_scale(&mut atlas.lock(), host.scale * host.font_scale);
     let ebox = host.ebox.filter(|u| u.target == host.target);
     let mut draw_text: &str = text;
     let mut draw_rect = host.rect;
@@ -177,6 +179,13 @@ pub(super) fn emit(
             });
         }
     }
+    // The focused EditBox shows inline-texture markup raw, as an unfocused one does.
+    #[cfg(feature = "pfui")]
+    let raw = ebox.map(|_| benilla_ui::script::pfui_host::inline_texture::raw(draw_text));
+    #[cfg(feature = "pfui")]
+    if let Some(raw) = raw.as_deref() {
+        draw_text = raw;
+    }
     // A region FontString whose wrapped text needs more lines than its rect holds draws
     // `prefix + "..."` (`CSimpleFontString` `0x771ec0`); an editbox never truncates and a message
     // line sizes to its text. Before the shadow, which the client draws from the same string.
@@ -234,6 +243,12 @@ pub(super) fn emit(
             shadow_spec,
             seat,
         );
+        // An inline texture casts no shadow.
+        #[cfg(feature = "pfui")]
+        {
+            let e = atlas.lock();
+            sq.retain(|q| !e.inline.owns(q));
+        }
         for q in &mut sq {
             // Markup tints ride the fill only; the alpha is [`shadow_alpha`].
             q.color = [

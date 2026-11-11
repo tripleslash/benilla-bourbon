@@ -57,7 +57,8 @@ pub(crate) use spell_slots::SpellSlots;
 mod weapon_icon;
 
 pub(crate) use cast_fail::report_reaches_pop;
-#[cfg(test)]
+// The pfUI extension's combat log names a failed cast by its text too.
+#[cfg(any(test, feature = "pfui"))]
 pub(crate) use cast_fail::CAST_FAIL_KEYS;
 #[cfg(test)]
 pub(crate) use errors::fire_ui_error_lane;

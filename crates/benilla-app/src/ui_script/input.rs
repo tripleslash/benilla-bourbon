@@ -385,6 +385,9 @@ pub(super) fn feed_ui_input(
                         // press goes to the frame holding a button, else the hover (`0x76637f`),
                         // and in freelook with none held to the world frame (`0x492bd9`); a
                         // release to the capture, or the world frame in freelook (`0x492be5`).
+                        // A ClassicAPI client's GLOBAL_MOUSE_DOWN/UP come first.
+                        #[cfg(feature = "pfui")]
+                        crate::pfui::input::global_mouse(script, name, down);
                         let target = script.mouse_button_to(at.x, at.y, name, down);
                         let took = target == PointerTarget::Ui;
                         if down {

@@ -233,6 +233,22 @@ impl UiScript {
                     }
                     let mut data = data_ref.cloned().unwrap_or_default();
                     region_tex = data.tex.id();
+                    // An EditBox shows inline-texture markup as the bytes it holds; the focused
+                    // box's windowed text is the host's to mark, after its byte window.
+                    #[cfg(feature = "pfui")]
+                    if model.focused_editbox != owner
+                        && owner_frame.is_some_and(|f| {
+                            matches!(f.kind_state, crate::widget::KindState::EditBox(_))
+                        })
+                    {
+                        if let Some(std::borrow::Cow::Owned(raw)) = data
+                            .text
+                            .as_deref()
+                            .map(super::pfui_host::inline_texture::raw)
+                        {
+                            data.text = Some(raw);
+                        }
+                    }
                     // One hop (region combine `0x772180`): the region's alpha times its owner's
                     // byte, which `SetAlpha 0x76a690` already carries down the tree.
                     let alpha = owner_frame.map_or(1.0, |f| crate::color::alpha_f32(f.alpha))

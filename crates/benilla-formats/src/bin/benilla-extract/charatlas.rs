@@ -57,7 +57,7 @@ fn blp_shape(chain: &mut Chain, path: &str) -> Option<(u32, u32, u8)> {
 
 pub fn charatlas(chain: &mut Chain, look: &Look, out: Option<&std::path::Path>) -> Result<()> {
     let catalog = load_item_display_catalog(chain).context("loading ItemDisplayInfo")?;
-    let sections = CharSections::load(chain).context("loading CharSections")?;
+    let sections = CharSections::load_turtle(chain).context("loading CharSections")?;
     let geosets = CharacterGeosets::load(chain).context("loading the customization tables")?;
 
     let worn: Vec<Option<&ItemDisplay>> = look

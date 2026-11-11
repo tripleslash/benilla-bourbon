@@ -35,6 +35,10 @@ pub(super) enum Source {
     /// (`Interface/AddOns/<Folder>/…`), read through the chain, which answers them after its
     /// archives.
     Bundled,
+    /// tortoise: an addon folder inside the player's archives (Turtle WoW's own,
+    /// [`TURTLE_ADDONS`]): read off the chain like [`Self::Chain`], its manifest entries under
+    /// `Interface/AddOns/<Folder>` as a loose addon's are.
+    ChainFolder,
 }
 
 /// One loadable interface: a name, its parsed manifest, and where its files come from.
@@ -88,21 +92,23 @@ impl Addon {
                     .map(String::into_bytes)
             }
             Source::Dir(root) => read_addon_file(root, req),
-            Source::Chain | Source::Bundled => super::reference_ui::read(req),
+            Source::Chain | Source::Bundled | Source::ChainFolder => super::reference_ui::read(req),
         }
     }
 
     /// Whether the files come off the player's patch chain.
     fn is_chain(&self) -> bool {
-        matches!(self.source, Source::Chain)
+        matches!(self.source, Source::Chain | Source::ChainFolder)
     }
 
     /// The base this addon's manifest entries resolve against: `Interface/AddOns/<Folder>` for a
-    /// `Dir`, empty for the shipped flat tree and the chain's full paths.
+    /// `Dir` and a chain folder, empty for the shipped flat tree and the chain's full paths.
     fn prefix(&self) -> String {
         match &self.source {
             Source::Builtin | Source::Chain => String::new(),
-            Source::Dir(_) | Source::Bundled => format!("{ADDONS_PREFIX}{}", self.name),
+            Source::Dir(_) | Source::Bundled | Source::ChainFolder => {
+                format!("{ADDONS_PREFIX}{}", self.name)
+            }
         }
     }
 
@@ -113,7 +119,7 @@ impl Addon {
     fn chunk_name(&self, file: &str, path: &str) -> String {
         match &self.source {
             Source::Builtin => benilla_ui::script::addon_chunk_name(&self.name, file),
-            Source::Dir(_) | Source::Chain | Source::Bundled => {
+            Source::Dir(_) | Source::Chain | Source::Bundled | Source::ChainFolder => {
                 format!("@{}", path.replace('/', "\\"))
             }
         }
@@ -142,10 +148,25 @@ impl Addon {
         files: &[String],
         toc: &mut Status,
     ) -> Vec<String> {
+        #[cfg(feature = "pfui")]
+        let _pfui_scope = match benilla_ui::script::pfui_host::addon_scope(script.lua(), &self.name)
+        {
+            Ok(scope) => scope,
+            Err(error) => return vec![error.to_string()],
+        };
         let mut failures = Vec::new();
         // The `<Include>` / `<Script file=>` provider; `read` is the sandbox.
         let provider = |req: &str| -> Option<Vec<u8>> { self.read(req) };
+        // A ClassicAPI client's per-line conditions and path variables.
+        #[cfg(feature = "pfui")]
+        let locale = crate::pfui::toc::locale(script);
         for file in files {
+            #[cfg(feature = "pfui")]
+            let Some(file) = crate::pfui::toc::file_line(&self.name, file, &locale) else {
+                continue;
+            };
+            #[cfg(feature = "pfui")]
+            let file = &file;
             // Resolved once into the source's path space, for `read` and the loader alike.
             let path = benilla_ui::loader::join_ref(&self.prefix(), file);
             let Some(bytes) = self.read(&path) else {
@@ -156,7 +177,9 @@ impl Addon {
                 // the package's fault, which the reference skips silently, and an ERROR line fails
                 // `smoke.sh`.
                 match self.source {
-                    Source::Builtin | Source::Chain => error!("ui_script: {e}"),
+                    Source::Builtin | Source::Chain | Source::ChainFolder => {
+                        error!("ui_script: {e}")
+                    }
                     Source::Dir(_) | Source::Bundled => warn!("ui_script: {e}"),
                 }
                 // Retained for the player: the commonest way an addon fails with nothing on screen.
@@ -216,7 +239,9 @@ impl Addon {
             for m in &report.missing_files {
                 let e = format!("{}/{file}: {m}", self.name);
                 match self.source {
-                    Source::Builtin | Source::Chain => error!("ui_script: {e}"),
+                    Source::Builtin | Source::Chain | Source::ChainFolder => {
+                        error!("ui_script: {e}")
+                    }
                     Source::Dir(_) | Source::Bundled => warn!("ui_script: {e}"),
                 }
                 script.report_load_failure(&e);
@@ -306,19 +331,20 @@ const TURTLE_ADDONS: [&str; 2] = ["Turtle_General", "Turtle_GroupUI"];
 
 /// The addons the chain carries as registry rows: the Blizzard ones that are LoadOnDemand, for
 /// `UIParentLoadAddOn` (a Blizzard toc that is not is skipped), then, in a Turtle WoW VM, Turtle's
-/// own, which the startup walk loads.
+/// own, which the startup walk loads as [`Source::ChainFolder`] rows: their manifests name files
+/// under their folder, where the Blizzard ones' name full chain paths.
 fn chain_addons(flavor: UiFlavor) -> Vec<Addon> {
     chain_addons_in(flavor, super::reference_ui::read)
 }
 
 /// [`chain_addons`] over a given chain reader.
 fn chain_addons_in(flavor: UiFlavor, chain: impl Fn(&str) -> Option<Vec<u8>>) -> Vec<Addon> {
-    let read = |name: &str| {
+    let read = |name: &str, source: fn() -> Source| {
         let bytes = chain(&format!("Interface/AddOns/{name}/{name}.toc"))?;
         Some(Addon {
             name: name.to_string(),
             toc: Toc::parse(&benilla_ui::source::decode(&bytes)),
-            source: Source::Chain,
+            source: source(),
         })
     };
     let turtle: &[&str] = match flavor {
@@ -327,8 +353,12 @@ fn chain_addons_in(flavor: UiFlavor, chain: impl Fn(&str) -> Option<Vec<u8>>) ->
     };
     BLIZZARD_ADDONS
         .iter()
-        .filter_map(|name| read(name).filter(|a| a.toc.load_on_demand()))
-        .chain(turtle.iter().filter_map(|name| read(name)))
+        .filter_map(|name| read(name, || Source::Chain).filter(|a| a.toc.load_on_demand()))
+        .chain(
+            turtle
+                .iter()
+                .filter_map(|name| read(name, || Source::ChainFolder)),
+        )
         .collect()
 }
 
@@ -503,6 +533,11 @@ fn discover_in(root: &Path) -> Vec<Addon> {
                 return None;
             }
             // A folder with no `<Name>.toc` is not an addon; the reference skips it silently too.
+            // A ClassicAPI client's flavor TOC wins, and makes the folder an addon on its own.
+            #[cfg(feature = "pfui")]
+            let text =
+                crate::pfui::toc::manifest(&dir, &name).or_else(|| manifest_in(&dir, &name))?;
+            #[cfg(not(feature = "pfui"))]
             let text = manifest_in(&dir, &name)?;
             Some(Addon {
                 name,
@@ -533,20 +568,14 @@ fn info_for(addon: &Addon) -> benilla_ui::script::AddOnInfo {
     let mut info = info_from_toc(&addon.name, &addon.toc, addon.is_chain());
     // A bundled addon's `LoadAddOn` reads through the chain too, which answers its folder's paths;
     // it stays INSECURE, since only the player's own chain carries Blizzard's `.sig` files.
-    info.chain = matches!(addon.source, Source::Chain | Source::Bundled);
+    info.chain = matches!(
+        addon.source,
+        Source::Chain | Source::Bundled | Source::ChainFolder
+    );
     // fork: Turtle WoW's own two are its interface, not an option: always on, never listed.
     info.pinned = is_pinned(addon);
     info.url = secure_url(&addon.name, &addon.toc, |req| addon.read(req));
     info
-}
-
-/// fork: whether a row is one of [`TURTLE_ADDONS`] off the player's chain, which the registry
-/// pins on and keeps out of every AddOns list ([`benilla_ui::script::AddOnInfo::pinned`]).
-fn is_pinned(addon: &Addon) -> bool {
-    matches!(addon.source, Source::Chain)
-        && TURTLE_ADDONS
-            .iter()
-            .any(|n| n.eq_ignore_ascii_case(&addon.name))
 }
 
 /// The `.url` file a `## Secure` addon is registered with: `Interface\AddOns\<name>\<name>.url`
@@ -571,6 +600,15 @@ pub(crate) fn secure_url(
         .rposition(|&b| !matches!(b, b'\r' | b'\n' | b' '))
         .map_or(0, |i| i + 1);
     Some(benilla_ui::source::decode(&url[..end]).into_owned())
+}
+
+/// fork: whether a row is one of [`TURTLE_ADDONS`] off the player's chain, which the registry
+/// pins on and keeps out of every AddOns list ([`benilla_ui::script::AddOnInfo::pinned`]).
+fn is_pinned(addon: &Addon) -> bool {
+    matches!(addon.source, Source::ChainFolder)
+        && TURTLE_ADDONS
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(&addon.name))
 }
 
 /// What the signature check `0x6f10f0` answers for an addon, modelled: 3 (the addon is SECURE,
@@ -648,6 +686,10 @@ pub(crate) fn info_from_toc(name: &str, toc: &Toc, chain: bool) -> benilla_ui::s
         saved_enabled: true, // re-stamped from `enabled` at registration
         loaded: false,
         // The version gate's dword: the leading integer, 0 when absent (out of date, not unknown).
+        // A ClassicAPI client reads 11200 from anywhere in a list.
+        #[cfg(feature = "pfui")]
+        interface: crate::pfui::toc::interface(toc),
+        #[cfg(not(feature = "pfui"))]
         interface: toc.interface_version(),
         chain,
     }
@@ -1033,6 +1075,13 @@ impl benilla_ui::script::AddonLoad for Walk<'_> {
             &addon.name,
             script.addon_is_secure(&addon.name),
         ));
+        // `## LoadSavedVariablesFirst: 1`: the saved variables before the files.
+        #[cfg(feature = "pfui")]
+        let saved_first = crate::pfui::toc::saved_variables_first(&addon.toc);
+        #[cfg(feature = "pfui")]
+        if saved_first {
+            script.load_addon_saved_variables(&addon.name);
+        }
         self.failures.extend(addon.load(script, &mut toc));
         let mut own = Status::default();
         let toc_path = status::addon_toc_path(&addon.name);
@@ -1043,6 +1092,10 @@ impl benilla_ui::script::AddonLoad for Walk<'_> {
         // `Bindings.xml` (`0x51f400`), after the files whose functions a binding calls, through
         // the addon's own sandboxed reader; absent is normal.
         let bindings_xml = benilla_ui::loader::join_ref(&addon.prefix(), "Bindings.xml");
+        // A ClassicAPI client's flavor bindings file wins.
+        #[cfg(feature = "pfui")]
+        let bindings_xml = crate::pfui::toc::bindings(&addon.prefix(), |p| addon.read(p).is_some())
+            .unwrap_or(bindings_xml);
         if let Some(bytes) = addon.read(&bindings_xml) {
             match benilla_ui::bindings_xml::parse(&benilla_ui::source::decode(&bytes)) {
                 Ok(bindings) => script.register_addon_bindings(&addon.name, &bindings),
@@ -1056,7 +1109,13 @@ impl benilla_ui::script::AddonLoad for Walk<'_> {
         }
         // The saved variables, account then per-character (`0x51f4b5`, `0x51f53b`): after the
         // files set their defaults, before `ADDON_LOADED`.
-        script.load_addon_saved_variables(&addon.name);
+        #[cfg(feature = "pfui")]
+        let load_saved = !saved_first;
+        #[cfg(not(feature = "pfui"))]
+        let load_saved = true;
+        if load_saved {
+            script.load_addon_saved_variables(&addon.name);
+        }
         script.swap_exec_context(outer);
     }
 
@@ -1317,7 +1376,8 @@ mod tests {
             "the trainer addon is a row: {:?}",
             rows.iter().map(|a| &a.name).collect::<Vec<_>>()
         );
-        for a in &rows {
+        // tortoise: Turtle WoW's own archive addons ride along, walk-loaded, not LoadOnDemand.
+        for a in rows.iter().filter(|a| matches!(a.source, Source::Chain)) {
             assert!(a.toc.load_on_demand(), "{} is LoadOnDemand", a.name);
             assert!(
                 matches!(a.source, Source::Chain),

@@ -27,6 +27,9 @@ use super::{ActionUse, Model, ScriptValue, SelectionRequest, UiScript};
 /// One script call a verb hands the host, in the reference's terms.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ScriptCall {
+    /// Optional frame actions retain their position in the stock ordered call stream.
+    #[cfg(feature = "pfui")]
+    PfuiClick(super::pfui_host::attributes::ClickAction),
     /// `TargetUnit`, `AssistUnit`, `AssistByName` and `TargetLastEnemy`.
     Select {
         request: SelectionRequest,
@@ -471,6 +474,10 @@ pub enum ItemCallback {
     /// reagent `0x52f820` (`0x52eda4`, `0x52f3f4`), whose answer rebuilds the tooltips the VM
     /// keeps waiting on it.
     Tooltip,
+    /// A ClassicAPI client's item getters (`C_Item.GetItemInfo` and the rest): the getter only
+    /// asks, and the record's landing signals `GET_ITEM_INFO_RECEIVED` as every landing does.
+    /// Only the `pfui` extension asks with it.
+    Extension,
 }
 
 /// Make `ask` inside the getter's call. A getter never raises for its lookup: with no host lent,
@@ -591,7 +598,7 @@ pub(crate) enum Held {
 
 impl super::Model {
     /// Hold `call` for the host, with the input events running now; its number.
-    fn queue_call(&mut self, call: ScriptCall) -> u64 {
+    pub(super) fn queue_call(&mut self, call: ScriptCall) -> u64 {
         let input = self.protected.events();
         let seq = self.call_raises.next;
         self.call_raises.next += 1;

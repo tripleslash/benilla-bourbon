@@ -621,6 +621,7 @@ dependencies = [
  "benilla-movie",
  "benilla-mpq",
  "benilla-pack",
+ "benilla-pfui",
  "benilla-protocol",
  "benilla-srp",
  "benilla-ui",
@@ -810,6 +811,23 @@ dependencies = [
  "benilla-pack",
  "clap",
  "rayon",
+]
+
+[[package]]
+name = "benilla-pfui"
+version = "0.3.1"
+dependencies = [
+ "base64",
+ "benilla-dbc",
+ "benilla-formats",
+ "benilla-mlua",
+ "benilla-ui",
+ "ciborium",
+ "miniz_oxide",
+ "roxmltree",
+ "serde",
+ "serde_json",
+ "web-time",
 ]
 
 [[package]]

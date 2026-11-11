@@ -43,6 +43,10 @@ mod manifest;
 
 /// The stock FrameXML this client runs off the player's own patch chain; its header is the rule.
 mod reference_ui;
+#[cfg(feature = "pfui")]
+pub(crate) fn pfui_read(path: &str) -> Option<Vec<u8>> {
+    reference_ui::read(path)
+}
 
 /// What the host remembers per VM, so a seed or change-memo never outlives the VM it was for.
 mod session;

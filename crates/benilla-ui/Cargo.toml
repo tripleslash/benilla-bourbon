@@ -12,6 +12,10 @@ workspace = true
 # `test_support`: the geometry comparisons and the zone guard (`civil::ZoneGuard`) other crates'
 # tests check the UI with. Only their dev-dependencies enable it: the player build has neither.
 test-support = []
+# Fork extension seam; building the feature alone leaves every ordinary VM unchanged.
+pfui = []
+# Nampower's queue-aware frame attributes, on top of `pfui`.
+nampower = ["pfui"]
 
 [dependencies]
 # Wall-clock reads (`SystemTime::now`) go through `web-time`: a re-export of std's on native, and

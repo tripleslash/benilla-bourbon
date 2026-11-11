@@ -20,6 +20,8 @@ pub(crate) fn measure_request(
     r: &MeasureRequest,
 ) -> (f32, f32, f32) {
     let rs = seam * r.scale;
+    #[cfg(feature = "pfui")]
+    super::inline_texture::set_scale(e, rs);
     let spec = request_spec(r, rs);
     let wrap = r.wrap_width.map(|w| w * rs);
     // `GetStringWidth` answers the unwrapped width (the extent measure `0x5c6940`), its line seeded
@@ -71,6 +73,8 @@ pub(crate) fn piece_width(
     max_pieces: usize,
 ) -> f32 {
     let rs = seam * r.scale;
+    #[cfg(feature = "pfui")]
+    super::inline_texture::set_scale(e, rs);
     let spec = request_spec(r, rs);
     let wrap = r.wrap_width.map_or(0.0, |w| w * rs);
     let mut starts = super::line_rows(e, &r.text, wrap, spec).0;

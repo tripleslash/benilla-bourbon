@@ -2,6 +2,9 @@
 //! [`world`] and [`events`] for the world server. SRP6 and the header crypto are `benilla-srp`'s.
 
 pub mod auth;
+// tortoise: login build negotiation for Turtle-derived realms (`turtle_auth.rs`).
+mod turtle_auth;
+pub use turtle_auth::logon_with_pin_async;
 pub mod events;
 pub mod guid;
 pub mod messages;
@@ -425,10 +428,13 @@ pub fn logon_with_pin(
 /// one that asks for one is `pin`'s call) and [`LoginStage::ProofSent`] once the proof is out
 /// (`0x5b1f93`). A redial for a fresh server key (below) is no new state, and a reply that
 /// authenticates with no exchange reports none.
-pub async fn logon_with_pin_async(
+///
+/// tortoise: the challenge presents `build`; [`logon_with_pin_async`] picks it (`turtle_auth.rs`).
+async fn logon_with_pin_build_async(
     realmlist: &str,
     username: &str,
     password: &str,
+    build: u16,
     locale: u32,
     pin: &mut impl AsyncFnMut(&[u8; 10]) -> Result<Vec<u8>>,
     stage: &mut dyn FnMut(LoginStage),
@@ -450,13 +456,8 @@ pub async fn logon_with_pin_async(
             if dial == 0 {
                 stage(LoginStage::Authenticating);
             }
-            auth::write_logon_challenge(
-                &mut stream,
-                &username.to_uppercase(),
-                CLIENT_BUILD,
-                locale,
-            )
-            .context("sending logon challenge")?;
+            auth::write_logon_challenge(&mut stream, &username.to_uppercase(), build, locale)
+                .context("sending logon challenge")?;
             let Some(reply) = auth::read_challenge_reply(&mut stream)
                 .await
                 .context("reading logon challenge reply")?

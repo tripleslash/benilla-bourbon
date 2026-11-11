@@ -888,6 +888,15 @@ const ADDONS_ROOT: &str = "Interface/AddOns/";
 /// anything else FrameXML, each path resolved against the including file's directory. `toc` is
 /// the `.toc`'s load record (`0x6edb90`).
 fn run_files(lua: &Lua, name: &str, read: &Reader, files: &[String], toc: &mut Status) {
+    #[cfg(feature = "pfui")]
+    let _pfui_scope = match super::pfui_host::addon_scope(lua, name) {
+        Ok(scope) => Some(scope),
+        Err(error) => {
+            let message = error.to_string();
+            log_error(lua, &message);
+            return;
+        }
+    };
     let provider = |req: &str| -> Option<Vec<u8>> { read(req) };
     for file in files {
         let path = crate::loader::join_ref(name, file);

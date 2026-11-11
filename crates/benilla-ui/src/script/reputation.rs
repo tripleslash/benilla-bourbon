@@ -24,6 +24,10 @@ use mlua::{Lua, MultiValue, Value};
 use super::binding_abi;
 use super::Model;
 
+#[cfg(feature = "pfui")]
+#[path = "pfui_host/reputation.rs"]
+pub(crate) mod pfui;
+
 /// The synthetic header key for factions the player moved to the inactive bucket.
 const KEY_INACTIVE: i64 = -1;
 

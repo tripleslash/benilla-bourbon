@@ -23,7 +23,7 @@ fn offset_left(lua: &Lua, offset: Option<&Value>) -> Option<i32> {
 /// until `left` matches have passed; then run `SetInventoryItem` there with the header latch armed,
 /// as `0x536080` calls `0x52b650` with p4 = 0, p5 = 1. The number 1, or nil on a miss, which leaves
 /// the tooltip untouched.
-fn compare_against_worn(
+pub(super) fn compare_against_worn(
     lua: &Lua,
     this: &Table,
     h: crate::widget::FrameHandle,
@@ -74,7 +74,7 @@ fn compare_against_worn(
 
 /// A compare's offered template; a miss asks with the tooltip as the answer's cookie (`0x5361ee`),
 /// so the answer rebuilds whatever item the tooltip keeps then.
-fn offered_view(
+pub(super) fn offered_view(
     lua: &Lua,
     h: crate::widget::FrameHandle,
     item_id: u32,

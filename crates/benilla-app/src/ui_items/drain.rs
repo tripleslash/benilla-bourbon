@@ -13,6 +13,10 @@ use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
 use super::{slot_guid, wire_pos};
 use crate::query_cache::Ask;
 
+#[cfg(feature = "pfui")]
+#[path = "../pfui/item_use.rs"]
+pub(super) mod pfui_use;
+
 /// The one auto-equip sender (`AutoEquipCursorItem`, `0x5e1480`, past its question): a projectile,
 /// as the VM decided by its cached record (`0x5e16ff`, `0x5e1704`), loads by its `ammo` entry
 /// with `CMSG_SET_AMMO` and stays in its bag; anything else is `CMSG_AUTOEQUIP_ITEM`. The question
@@ -329,6 +333,10 @@ impl ScriptItemUse<'_, '_> {
         };
         if super::item_use_refused(script, it.guid) {
             debug!("ui_items: bind-on-use confirmed on a locked item — refused");
+            return;
+        }
+        #[cfg(feature = "pfui")]
+        if pfui_use::confirm(script, it, targeting, ladder, gate, ui_errors) {
             return;
         }
         debug!(

@@ -23,6 +23,8 @@ mod call_tests;
 mod feed;
 mod lane;
 mod live;
+#[cfg(feature = "pfui")]
+pub(crate) mod pfui;
 mod query;
 mod steps;
 #[cfg(test)]

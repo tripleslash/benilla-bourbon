@@ -92,6 +92,16 @@ impl ScriptSelect<'_, '_> {
                 }
                 None => info!("TargetLastEnemy: nothing hostile has been targeted yet; no-op"),
             },
+            // pfUI: a unit named by its guid (focus, a frame's unit attribute), committed as a
+            // held unit is.
+            #[cfg(feature = "pfui")]
+            SelectionRequest::PfuiGuid(guid) => {
+                commit.select(guid);
+            }
+            // Cargo may unify the UI extension into a client that did not enable its plugin.
+            #[cfg(not(feature = "pfui"))]
+            #[allow(unreachable_patterns)]
+            _ => {}
         })
     }
 

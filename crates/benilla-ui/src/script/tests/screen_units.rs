@@ -109,6 +109,7 @@ fn a_set_size_and_offset_read_back_through_the_cells() {
 /// 16:9 the right edge is 1706.6666433238222 while `GetScreenWidth` is 1706.6667833808888, as in
 /// 1.12.1, where the screen getter stores `K1/u` as a float and the edge getter does not; the
 /// top agrees with `GetScreenHeight` and the span is not divided by the scale.
+#[cfg(not(feature = "pfui"))] // ClassicAPI divides the span by the scale.
 #[test]
 fn a_full_screen_frame_agrees_with_the_screen_getters() {
     let s = game(1024.0, 768.0);
@@ -160,6 +161,7 @@ fn a_full_screen_frame_agrees_with_the_screen_getters() {
 /// scale, each neighbouring and final edge stored as a float, `scale·offset + edge` at 53 bits)
 /// and its getters (`E`, `C`, the span's `G`): at 16:9, `A` at scale 0.9 hangs off the screen's
 /// top left, `B` spans from `A`'s bottom left to its bottom right.
+#[cfg(not(feature = "pfui"))] // ClassicAPI divides the span by the scale.
 #[test]
 fn an_anchored_frames_edges_answer_the_law() {
     let s = game(1920.0, 1080.0);

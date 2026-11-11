@@ -16,6 +16,9 @@
 mod bind;
 #[cfg(test)]
 mod lua_tests;
+#[cfg(feature = "pfui")]
+#[path = "pfui_host/macros.rs"]
+pub(crate) mod pfui;
 
 pub use bind::{macro_lines, reads_options};
 

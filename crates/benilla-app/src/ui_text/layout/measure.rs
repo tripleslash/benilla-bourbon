@@ -99,6 +99,9 @@ struct EnginePricer<'a> {
     last: Option<GlyphRef>,
     /// A glyphless character after the last glyph: a code the look-ahead steps to.
     code_after: Option<Option<GlyphRef>>,
+    /// The inline textures so far, which draw no glyph and step by their own width.
+    #[cfg(feature = "pfui")]
+    inline_w: f32,
 }
 
 impl<'a> EnginePricer<'a> {
@@ -110,6 +113,8 @@ impl<'a> EnginePricer<'a> {
             first: None,
             last: None,
             code_after: None,
+            #[cfg(feature = "pfui")]
+            inline_w: 0.0,
         }
     }
 
@@ -119,8 +124,12 @@ impl<'a> EnginePricer<'a> {
     /// source character after it, it takes its step to that character, else its ink plus the
     /// outline's growth.
     fn extent(&self, next: Option<char>) -> (f32, Option<GlyphRef>, Option<GlyphRef>) {
+        #[cfg(feature = "pfui")]
+        let inline_w = self.inline_w;
+        #[cfg(not(feature = "pfui"))]
+        let inline_w = 0.0;
         let (Some(first), Some(last)) = (self.first, self.last) else {
-            return (0.0, None, None);
+            return (inline_w, None, None);
         };
         let r = self.r;
         let follow = self
@@ -137,7 +146,7 @@ impl<'a> EnginePricer<'a> {
             .unwrap_or(ink),
             None => ink,
         };
-        (self.inner + tail, Some(first), Some(last))
+        (self.inner + tail + inline_w, Some(first), Some(last))
     }
 }
 
@@ -148,6 +157,10 @@ impl RowPricer for EnginePricer<'_> {
 
     fn push(&mut self, c: char) -> bool {
         let r = self.r;
+        #[cfg(feature = "pfui")]
+        {
+            self.inline_w += self.e.inline.advance_char(c, r.ppem, r.bake.radius);
+        }
         match self.e.char_cell(r.face, r.ppem, c) {
             Some(cell) if !cell.glyphs.is_empty() => {
                 for g in &cell.glyphs {
@@ -201,6 +214,12 @@ fn line_extent_dev(
 /// leave `[ebp-0x10]`), so in its measure each later line opens with the step from the last glyph
 /// before it, kerned as any step, and without the seed.
 pub(crate) fn string_width(e: &mut TextEngine, text: &str, font: FontSpec, shadow_x: f32) -> f32 {
+    // An inline texture measures as it draws, not as the bytes of its markup; text that came
+    // through [`measure_text`] is substituted already, which this leaves as it is.
+    #[cfg(feature = "pfui")]
+    let inlined = e.inline.substitute(text);
+    #[cfg(feature = "pfui")]
+    let text = inlined.as_ref();
     let r = resolve(e, &font);
     e.ensure_metrics(r.face, r.ppem, text);
     let e = &*e;
@@ -285,6 +304,10 @@ pub(crate) fn measure_text(
     wrap_width: Option<f32>,
     font: FontSpec,
 ) -> (f32, f32) {
+    #[cfg(feature = "pfui")]
+    let inlined = e.inline.substitute(text);
+    #[cfg(feature = "pfui")]
+    let text = inlined.as_ref();
     let r = resolve(e, &font);
     // Metrics only: a string measured and never drawn costs no raster.
     e.ensure_metrics(r.face, r.ppem, text);
@@ -303,7 +326,15 @@ pub(crate) fn measure_text(
         }
         _ => (string_width(e, text, font, font.shadow_x), lines.len()),
     };
-    (w, block_height(rows, r))
+    let height = block_height(rows, r);
+    // A texture taller than its line grows the block; counted per source line.
+    #[cfg(feature = "pfui")]
+    let height = height
+        + lines
+            .iter()
+            .map(|line| e.inline.extra_height(line, r.ppem, e.dpi()))
+            .sum::<f32>();
+    (w, height)
 }
 
 /// `text`'s unwrapped height, its lines and the gaps between them ([`measure_text`]'s, without a
@@ -322,9 +353,28 @@ pub(crate) fn measure_wrapped_rows(
     wrap_width: f32,
     font: FontSpec,
 ) -> u16 {
+    #[cfg(feature = "pfui")]
+    let inlined = e.inline.substitute(text);
+    #[cfg(feature = "pfui")]
+    let text = inlined.as_ref();
     let r = resolve(e, &font);
     e.ensure_metrics(r.face, r.ppem, text);
     let rows = wrapped_rows(e, r, text, wrap_width, font.non_space_wrap);
+    // A line grown by a tall texture takes the rows that hold it.
+    #[cfg(feature = "pfui")]
+    let rows = rows
+        + e.inline.extra_rows(
+            wrap_rows(
+                e,
+                r,
+                &fontstring_lines(text, [1.0, 1.0, 1.0, 1.0]),
+                wrap_width,
+                font.non_space_wrap,
+            )
+            .into_iter()
+            .map(|(row, _)| row),
+            r.ppem,
+        );
     rows.clamp(1, usize::from(u16::MAX)) as u16
 }
 
@@ -420,7 +470,15 @@ pub(crate) fn ellipsize_to_fit(
     if let Some(hit) = atlas.ellipsis.get(region, text, box_w, box_h, &font) {
         return hit.clone();
     }
-    let display = ellipsize_text(&mut atlas.lock(), text, box_w, box_h, font);
+    let display = {
+        let mut e = atlas.lock();
+        // A prefix must never end inside an escape, so the walk backs off over placeholders.
+        #[cfg(feature = "pfui")]
+        let inlined = e.inline.substitute(text);
+        #[cfg(feature = "pfui")]
+        let text = inlined.as_ref();
+        ellipsize_text(&mut e, text, box_w, box_h, font)
+    };
     atlas
         .ellipsis
         .put(region, text, box_w, box_h, &font, display.clone());

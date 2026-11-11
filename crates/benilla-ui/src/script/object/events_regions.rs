@@ -14,7 +14,7 @@ use super::{decode_id, draw_layer_from_str, frame_handle_of, publish_global};
 
 /// Append `h` to `event`'s listener list unless it is there (`0x7021a8` → `0x702264`): the walk
 /// (`0x703e50`) follows registration order, and a re-register keeps its place and never fires twice.
-fn register(model: &mut Model, h: FrameHandle, event: &'static str) {
+fn register(model: &mut Model, h: FrameHandle, event: &str) {
     if !model.event_to_frames.contains_key(event) {
         model.event_to_frames.insert(event.to_string(), Vec::new());
     }
@@ -47,10 +47,14 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 .app_data_mut::<crate::script::ModelCell>()
                 .expect("model");
             // A name the VM's event table lacks registers nothing and raises nothing (`0x702140`).
-            let Some(event) = model.vm.event_key(&event) else {
+            let key = model.vm.event_key(&event).map(str::to_string);
+            // The extension's own events are not in the 1.12 table.
+            #[cfg(feature = "pfui")]
+            let key = key.or_else(|| crate::script::pfui_host::extension_event(&model, &event));
+            let Some(event) = key else {
                 return Ok(());
             };
-            register(&mut model, h, event);
+            register(&mut model, h, &event);
             Ok(())
         })?,
     )?;
@@ -63,7 +67,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 .app_data_mut::<crate::script::ModelCell>()
                 .expect("model");
             // Matched as `RegisterEvent` matches (`0x702280`).
-            let Some(event) = model.vm.event_key(&event).map(str::to_string) else {
+            let key = model.vm.event_key(&event).map(str::to_string);
+            // The extension's own events are not in the 1.12 table.
+            #[cfg(feature = "pfui")]
+            let key = key.or_else(|| crate::script::pfui_host::extension_event(&model, &event));
+            let Some(event) = key else {
                 return Ok(());
             };
             if let Some(list) = model.event_to_frames.get_mut(&event) {

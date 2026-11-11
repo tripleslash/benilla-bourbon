@@ -23,6 +23,8 @@ const MAXLISTITEMS: u32 = 0x3ffff;
 /// The client's `LUA_MAXPARSERLEVEL`, 5.0's 200 (`0x6fcc99`, `0x6fd180`): nested syntax levels,
 /// counted from 0 in each chunk (`0x6fc9d0`).
 const MAXPARSERLEVEL: u32 = 200;
+/// pfUI carry: the main chunk's vararg local on a pfUI state ([`Parser::pfui_vararg`]).
+const MAIN_VARARG: &[u8] = b"(vararg)";
 /// 5.1's `UNARY_PRIORITY`.
 const UNARY_PRIORITY: u8 = 8;
 
@@ -63,7 +65,8 @@ struct ConsControl {
 /// `luaY_parser`: a chunk compiled into its main function, which is vararg but declares no
 /// `arg` (only `parlist` does), so `arg` at chunk level is a global.
 pub(crate) fn parse(src: &[u8], chunkname: &[u8], heap: &mut Heap) -> R<Rc<Proto>> {
-    let lx = Lexer::new(src, chunkname)?;
+    // pfUI carry (pfUI's 5.1 dialect): `0x` numerals.
+    let lx = Lexer::new(src, chunkname, heap.pfui_lua51())?;
     let mut p = Parser {
         lx,
         fs: Vec::new(),
@@ -72,6 +75,15 @@ pub(crate) fn parse(src: &[u8], chunkname: &[u8], heap: &mut Heap) -> R<Rc<Proto
         name_hint: None,
     };
     p.fs.push(FuncState::new(Rc::from(chunkname), 0, Key::default()));
+    // pfUI carry (pfUI's 5.1 dialect): 5.1 makes a main chunk vararg, its arguments `...`. A
+    // 5.0 vararg function collects them into its `arg` local; the main chunk's local is named so
+    // no source can reach it, and `arg` at chunk level stays the global it is in 5.0.
+    if p.heap.pfui_lua51() {
+        p.fs().vararg = true;
+        p.new_localvar(MAIN_VARARG, 0)?;
+        p.adjustlocalvars(1);
+        p.reserveregs(1)?;
+    }
     p.chunk()?;
     // The client's `luaY_parser` raises its own bare text past the last statement (`0x6fca1a`,
     // `0x871cf4`).
@@ -125,7 +137,7 @@ fn getbinopr(t: Tok) -> Option<BinOpr> {
 fn priority(op: BinOpr) -> (u8, u8) {
     match op {
         BinOpr::Add | BinOpr::Sub => (6, 6),
-        BinOpr::Mul | BinOpr::Div => (7, 7),
+        BinOpr::Mul | BinOpr::Div | BinOpr::Mod => (7, 7),
         BinOpr::Pow => (10, 9),
         BinOpr::Concat => (5, 4),
         BinOpr::Eq | BinOpr::Ne | BinOpr::Lt | BinOpr::Le | BinOpr::Gt | BinOpr::Ge => (3, 3),
@@ -629,10 +641,23 @@ impl<'a> Parser<'a> {
         num: Option<bool>,
         prep: usize,
     ) -> R<()> {
-        self.adjustlocalvars(nvars);
+        // pfUI carry (pfUI's 5.1 dialect): 5.1 gives each pass its own loop variables, the
+        // block holding them closed at the end of every pass, so a closure made in the body keeps
+        // that pass's values; 5.0's live in the enclosing block, one set for the whole loop.
+        let fresh = self.heap.pfui_lua51();
+        if !fresh {
+            self.adjustlocalvars(nvars);
+        }
         self.checknext(Tok::Do)?;
         self.enterblock(true);
-        self.block()?;
+        if fresh {
+            self.enterblock(false);
+            self.adjustlocalvars(nvars);
+            self.block()?;
+            self.leaveblock()?;
+        } else {
+            self.block()?;
+        }
         self.patchtohere(prep as i32)?;
         let endfor = match num {
             Some(true) => self.code(Op::ForLoopUp(base, NO_JUMP), 1)?,
@@ -1288,6 +1313,7 @@ impl<'a> Parser<'a> {
                 let line = self.lx.line;
                 return self.body(false, line, hint);
             }
+            Tok::Dots if self.heap.pfui_lua51() => return self.pfui_vararg(),
             _ => return self.primaryexp(),
         };
         self.next()?;
@@ -1298,7 +1324,7 @@ impl<'a> Parser<'a> {
     /// answers the first untreated operator.
     fn subexpr(&mut self, limit: u8) -> R<(Exp, Option<BinOpr>)> {
         self.enterlevel()?;
-        let mut v = match getunopr(self.tok()) {
+        let mut v = match self.unopr() {
             Some(uop) => {
                 self.next()?;
                 let (mut v, _) = self.subexpr(UNARY_PRIORITY)?;
@@ -1307,7 +1333,7 @@ impl<'a> Parser<'a> {
             }
             None => self.simpleexp()?,
         };
-        let mut op = getbinopr(self.tok());
+        let mut op = self.binopr();
         while let Some(o) = op {
             let (left, right) = priority(o);
             if left <= limit {
@@ -1325,5 +1351,56 @@ impl<'a> Parser<'a> {
 
     fn expr(&mut self) -> R<Exp> {
         Ok(self.subexpr(0)?.0)
+    }
+
+    /// The current token's unary operator: the 1.12 grammar's, and on a pfUI state 5.1's `#`
+    /// (pfUI carry, [`Heap::set_pfui_lua51`]).
+    fn unopr(&self) -> Option<UnOpr> {
+        let t = self.tok();
+        getunopr(t)
+            .or_else(|| (t == Tok::Char(b'#') && self.heap.pfui_lua51()).then_some(UnOpr::Len))
+    }
+
+    /// The current token's binary operator, `%` on a pfUI state (pfUI carry).
+    fn binopr(&self) -> Option<BinOpr> {
+        let t = self.tok();
+        getbinopr(t)
+            .or_else(|| (t == Tok::Char(b'%') && self.heap.pfui_lua51()).then_some(BinOpr::Mod))
+    }
+
+    /// pfUI carry: 5.1's `...` as an expression, on a pfUI state. A 5.0 vararg function keeps
+    /// its extra arguments in its `arg` local, so `...` is `unpack(arg)`, every value `arg.n`
+    /// counts; a main chunk keeps its in [`MAIN_VARARG`].
+    fn pfui_vararg(&mut self) -> R<Exp> {
+        let main = self.fs.len() == 1;
+        if !self.fsr().vararg {
+            return Err(self.lx.error("cannot use `...' outside a vararg function"));
+        }
+        let line = self.lx.line;
+        self.next()?;
+        let k = self.string_k(b"unpack")?;
+        let mut f = Exp::new(Kind::Global(k));
+        self.exp2nextreg(&mut f)?;
+        let Kind::NonReloc(base) = f.k else {
+            unreachable!("the function is in a register")
+        };
+        let top = self.fs.len() - 1;
+        let name: &[u8] = if main { MAIN_VARARG } else { b"arg" };
+        let arg = self.singlevaraux(top, name, true)?;
+        match arg {
+            Some(kind) => {
+                let mut a = Exp::new(kind);
+                self.exp2nextreg(&mut a)?;
+            }
+            None => {
+                let r = self.fsr().freereg;
+                self.reserveregs(1)?;
+                self.code(Op::NewTable(r, 0, 0), 0)?;
+            }
+        }
+        f.k = Kind::Call(self.code(Op::Call(base, 2, 2), 1)?);
+        self.fixline(line);
+        self.fs().freereg = base + 1;
+        Ok(f)
     }
 }

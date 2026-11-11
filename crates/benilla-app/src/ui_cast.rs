@@ -12,6 +12,9 @@ use benilla_ui::script::{ScriptValue, UiScript};
 
 use crate::ui_action::{CastFail, CastFailLines, MessageSink, Shown, Spells};
 
+#[cfg(feature = "nampower")]
+#[path = "pfui/cast_reports.rs"]
+mod pfui;
 mod views;
 pub(crate) use views::{slot_moves_here, CastLive, CastViews};
 

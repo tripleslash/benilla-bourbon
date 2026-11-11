@@ -90,6 +90,17 @@ const TOOLTIP: [&str; 3] = [
     "OnTooltipAddMoney",
 ];
 
+/// pfUI's build: the GameTooltip's with ClassicAPI's tooltip scripts, which its VM fires
+/// ([`crate::script::pfui_host::tooltip_subjects`]).
+#[cfg(feature = "pfui")]
+const TOOLTIP_PFUI: [&str; 5] = [
+    "OnTooltipSetDefaultAnchor",
+    "OnTooltipCleared",
+    "OnTooltipAddMoney",
+    "OnTooltipSetItem",
+    "OnTooltipSetUnit",
+];
+
 /// The names `kind` adds to the frame's.
 fn added(kind: FrameKind) -> &'static [&'static str] {
     match kind {
@@ -105,7 +116,13 @@ fn added(kind: FrameKind) -> &'static [&'static str] {
         FrameKind::Slider | FrameKind::StatusBar => &VALUE,
         FrameKind::ColorSelect => &COLOR_SELECT,
         FrameKind::MovieFrame => &MOVIE,
+        #[cfg(not(feature = "pfui"))]
         FrameKind::GameTooltip => &TOOLTIP,
+        #[cfg(feature = "pfui")]
+        FrameKind::GameTooltip => {
+            let _ = TOOLTIP;
+            &TOOLTIP_PFUI
+        }
         FrameKind::Frame | FrameKind::WorldFrame | FrameKind::MessageFrame | FrameKind::Minimap => {
             &[]
         }

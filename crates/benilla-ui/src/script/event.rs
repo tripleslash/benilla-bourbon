@@ -9,6 +9,10 @@
 
 use std::borrow::Cow;
 
+#[cfg(feature = "pfui")]
+#[path = "pfui_host/frame_events.rs"]
+pub(crate) mod pfui;
+
 use mlua::{Function, Lua, Table, Value};
 
 use super::{ScriptValue, REG_SCRIPTS};
@@ -109,6 +113,11 @@ fn fire(lua: &Lua, id: u32, script: &str, extra: Vec<Value>) -> mlua::Result<()>
     // when the guard drops, unwinds included.
     let _fire =
         super::handler_prof::armed().then(|| super::handler_prof::Fire::open(lua, id, script));
+    // pfUI's VM hands an `OnEvent` `self, event, ...`, and filters unit events.
+    #[cfg(feature = "pfui")]
+    if script == "OnEvent" && super::pfui_host::installed(lua)? {
+        return super::pfui_host::invoke_handler(lua, wrapper, &func, true, extra);
+    }
     invoke_with_globals(lua, wrapper, &func, extra)
 }
 
@@ -137,6 +146,11 @@ pub(crate) fn invoke_with_globals(
     func: &Function,
     extra: Vec<Value>,
 ) -> mlua::Result<()> {
+    // pfUI's VM also hands its handlers `self, ...` as arguments.
+    #[cfg(feature = "pfui")]
+    if super::pfui_host::installed(lua)? {
+        return super::pfui_host::invoke_handler(lua, wrapper, func, false, extra);
+    }
     let mut globals: Vec<(&str, Value)> = Vec::with_capacity(2 + extra.len());
     globals.push(("this", Value::Table(wrapper)));
     let names: Vec<Cow<'static, str>> = (1..=extra.len()).map(arg_name).collect();

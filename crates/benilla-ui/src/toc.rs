@@ -126,6 +126,12 @@ fn starts_with_ci(s: &str, prefix: &str) -> bool {
 }
 
 impl Directive {
+    /// The line as written, for the directives only the pfUI extension reads.
+    #[cfg(feature = "pfui")]
+    pub fn raw(&self) -> &str {
+        &self.line
+    }
+
     /// Whether the reader claims this line for `kind`: the first literal in [`Kind::ALL`] order
     /// that prefixes the line itself, so a literal with a colon needs the colon right after the
     /// key and a line without a colon matches none of those.

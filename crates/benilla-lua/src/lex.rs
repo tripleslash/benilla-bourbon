@@ -149,6 +149,9 @@ pub struct Lexer<'a> {
     /// 5.0's `buff`: the text of the last string or numeral read, which `luaX_syntaxerror` quotes
     /// for a current string or number token, even when the lookahead has since overwritten it.
     buff: Vec<u8>,
+    /// pfUI carry (pfUI's 5.1 dialect): a `0x` numeral is one hexadecimal number, as 5.1's
+    /// `luaO_str2d` reads it; off on every state but the pfUI extension's.
+    hex: bool,
 }
 
 const EOZ: i32 = -1;
@@ -177,7 +180,8 @@ fn is_alpha(c: i32) -> bool {
 }
 
 impl<'a> Lexer<'a> {
-    pub fn new(src: &'a [u8], chunkname: &[u8]) -> Result<Self, SyntaxError> {
+    /// `hex`: pfUI's 5.1 dialect's hexadecimal numerals (pfUI carry).
+    pub fn new(src: &'a [u8], chunkname: &[u8], hex: bool) -> Result<Self, SyntaxError> {
         let mut lx = Lexer {
             src,
             pos: 0,
@@ -193,6 +197,7 @@ impl<'a> Lexer<'a> {
             },
             ahead: None,
             buff: Vec::new(),
+            hex,
         };
         lx.advance()?;
         Ok(lx)
@@ -534,6 +539,9 @@ impl<'a> Lexer<'a> {
             }
         };
         digits(self);
+        if self.hex && self.buff == b"0" && (self.ch() == b'x' as i32 || self.ch() == b'X' as i32) {
+            return self.hex_numeral();
+        }
         if self.ch() == b'.' as i32 {
             self.buff.push(b'.');
             self.pos += 1;
@@ -560,6 +568,30 @@ impl<'a> Lexer<'a> {
             Some(n) => {
                 let mut t = Self::tok(Tok::Number);
                 t.num = n;
+                Ok(t)
+            }
+            None => Err(self.lex_error("malformed number", false)),
+        }
+    }
+
+    /// pfUI carry (pfUI's 5.1 dialect): the rest of a `0x` numeral, its hexadecimal digits as
+    /// one number, as 5.1's `luaO_str2d` falls back to `strtoul(s, &end, 16)`.
+    fn hex_numeral(&mut self) -> Result<Token, SyntaxError> {
+        self.buff.push(self.ch() as u8);
+        self.pos += 1;
+        let start = self.buff.len();
+        while (0..256).contains(&self.ch()) && (self.ch() as u8).is_ascii_hexdigit() {
+            self.buff.push(self.ch() as u8);
+            self.pos += 1;
+        }
+        let value = std::str::from_utf8(&self.buff[start..])
+            .ok()
+            .filter(|digits| !digits.is_empty())
+            .and_then(|digits| u64::from_str_radix(digits, 16).ok());
+        match value {
+            Some(n) => {
+                let mut t = Self::tok(Tok::Number);
+                t.num = n as f64;
                 Ok(t)
             }
             None => Err(self.lex_error("malformed number", false)),

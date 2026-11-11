@@ -72,6 +72,11 @@ fn item_leg(
     (recovery, category, category_recovery)
 }
 
+// Nampower's queue reads the GCD leg alone.
+#[cfg(feature = "nampower")]
+#[path = "../pfui/cooldowns.rs"]
+mod pfui;
+
 /// One timer; a zero duration is untracked.
 #[derive(Clone, Copy, Debug)]
 struct Timer {

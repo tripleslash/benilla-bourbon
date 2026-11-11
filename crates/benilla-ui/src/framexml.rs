@@ -57,6 +57,22 @@ impl Element {
     pub fn attrs(&self) -> &[(String, String)] {
         &self.attrs
     }
+
+    /// This node as an instance of the intrinsic template `intrinsic` of type `base`: the
+    /// intrinsic first in its `inherits`, then its own.
+    #[cfg(feature = "pfui")]
+    pub fn as_intrinsic(&self, base: &str, intrinsic: &str) -> Element {
+        let mut node = self.clone();
+        node.tag = base.to_string();
+        let inherits = match self.attr("inherits").filter(|i| !i.trim().is_empty()) {
+            Some(own) => format!("{intrinsic}, {own}"),
+            None => intrinsic.to_string(),
+        };
+        node.attrs
+            .retain(|(k, _)| !k.eq_ignore_ascii_case("inherits"));
+        node.attrs.push(("inherits".to_string(), inherits));
+        node
+    }
 }
 
 /// A `<Script file=…>` or an inline `<Script>` body; both run in document order with the rest of
@@ -222,6 +238,53 @@ impl Templates {
         out
     }
 
+    /// A ClassicAPI list, `inherits="A, B"`: each name's own levels in the list's order, for the
+    /// extension's VM; `None` for an `inherits` that is no list.
+    #[cfg(feature = "pfui")]
+    pub fn list_inherited_levels(
+        &self,
+        element: &Element,
+        is_font: impl Fn(&str) -> bool,
+    ) -> Option<Vec<std::rc::Rc<Element>>> {
+        let list = element.attr("inherits").filter(|i| i.contains(','))?;
+        let mut out = Vec::new();
+        self.list_levels(list, &is_font, &mut Vec::new(), &mut out);
+        Some(out)
+    }
+
+    /// The levels of each name of an `inherits` list, the most distant first, a cycle stopping
+    /// at the repeated name.
+    #[cfg(feature = "pfui")]
+    fn list_levels(
+        &self,
+        list: &str,
+        is_font: &impl Fn(&str) -> bool,
+        active: &mut Vec<String>,
+        out: &mut Vec<std::rc::Rc<Element>>,
+    ) {
+        for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+            let key = name.to_ascii_lowercase();
+            if is_font(name) || active.contains(&key) {
+                continue;
+            }
+            let Some(t) = self.entries.get(&key) else {
+                continue;
+            };
+            active.push(key);
+            if let Some(parent) = t.element.attr("inherits").filter(|i| !i.is_empty()) {
+                self.list_levels(parent, is_font, active, out);
+            }
+            // A level two names share loads once, where it first appears.
+            if !out
+                .iter()
+                .any(|level| std::rc::Rc::ptr_eq(level, &t.element))
+            {
+                out.push(t.element.clone());
+            }
+            active.pop();
+        }
+    }
+
     pub fn contains(&self, name: &str) -> bool {
         self.entries.contains_key(&name.to_ascii_lowercase())
     }
@@ -315,7 +378,13 @@ pub fn parse(text: &str) -> Result<ParsedDocument, Error> {
             items.push(TopLevel::Font(element_from_node(child)));
         } else {
             let el = element_from_node(child);
-            if el.attr_is_true("virtual") {
+            // A ClassicAPI intrinsic (`<Frame name="EventFrame" intrinsic="true">`) is a template
+            // too, under a name that is also a frame type.
+            #[cfg(feature = "pfui")]
+            let template = el.attr_is_true("virtual") || el.attr_is_true("intrinsic");
+            #[cfg(not(feature = "pfui"))]
+            let template = el.attr_is_true("virtual");
+            if template {
                 // An unnamed one is kept: the loader reports it where the reference does.
                 items.push(TopLevel::Template(el));
             } else {

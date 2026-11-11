@@ -435,6 +435,9 @@ pub(super) const BUILT_OUTSIDE_THE_PACKETS_IN_THE_REFERENCE: &[(&str, &[&str], &
 /// the VM fails as stale.
 #[rustfmt::skip]
 pub(super) const WRITES_NO_VIEW: &[(&str, &str)] = &[
+    #[cfg(feature = "nampower")]
+    ("::pfui::spell_queue::release", "Nampower's queue release: its casts go through the call \
+        host as calls, and it pushes no view"),
     ("::bindings::begin_dispatch", "the input pass's head: the binding calls Lua made, then the \
         frame's key records"),
     ("::bindings::end_dispatch", "the input pass's tail: the stuck keys' release"),
@@ -499,6 +502,10 @@ pub(super) const WRITES_NO_VIEW: &[(&str, &str)] = &[
 /// message sounds and the unit edits, which raise no event) are not queues here. Each is named
 /// by its path in the crate and matched whole ([`filled_through_a_read`]).
 pub(super) const FILLED_THROUGH_A_READ: &[(&str, Fill)] = &[
+    // pfUI's focus memory, which Nampower's packet events read and the session's end clears
+    // through `&self`.
+    #[cfg(feature = "nampower")]
+    ("::pfui::SessionFocus", Fill::State),
     // The account-data sections, which the download's handler stores through `&self`.
     ("::account_data::AccountData", Fill::State),
     // The far-sight machine the update handler starts and ends (`0x5de0d0`, `0x5fbb1a`,

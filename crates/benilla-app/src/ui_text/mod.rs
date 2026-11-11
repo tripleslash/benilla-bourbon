@@ -16,6 +16,9 @@
 //! scales them (`engine::sfnt`), rasterized 1-bit or smooth as the font's flags say.
 
 mod engine;
+#[cfg(feature = "pfui")]
+#[path = "../pfui/inline_texture.rs"]
+pub(crate) mod inline_texture;
 mod layout;
 mod markup;
 mod measurer;

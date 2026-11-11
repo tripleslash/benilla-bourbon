@@ -129,6 +129,8 @@ mod no_install;
 mod npc_text;
 /// Ships in part (the FPS journal and the clocks it reads); the rest is `dev`.
 mod perf;
+#[cfg(feature = "pfui")]
+mod pfui;
 mod pipe_warm;
 mod pipeline_cache_file;
 mod player;
@@ -554,6 +556,11 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
         extended: extend.is_some(),
         ..build
     };
+    #[cfg(feature = "pfui")]
+    let build = BuildId {
+        extended: true,
+        ..build
+    };
 
     // A dev build's install, state folder and probe identity resolve from the launcher's folder,
     // so a crate on top of benilla keeps them in its own and not in cargo's checkout of benilla.
@@ -864,6 +871,9 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
             unfocused_mode: bevy::winit::UpdateMode::Continuous,
         });
     }
+
+    #[cfg(feature = "pfui")]
+    app.add_plugins(pfui::PfuiPlugin);
 
     // `ExtractSchedule` runs single-threaded too: bevy_render leaves it multi-threaded, with no
     // non-Send member, and single-threaded measured faster. `WOW_MT_EXTRACT=1` restores it.

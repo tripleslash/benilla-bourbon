@@ -116,6 +116,16 @@ impl Loader<'_> {
         if let Err(e) = crate::script::implicit_creation_anchor_lua(self.lua, &region_wrapper) {
             self.report.fault(format!("{dbg}: implicit anchor: {e}"));
         }
+        // ClassicAPI's `parentKey` and `atlas`, after the element's own content.
+        #[cfg(feature = "pfui")]
+        if let Err(e) = crate::script::pfui_host::xml::region_created(
+            self.lua,
+            &levels.iter().collect::<Vec<_>>(),
+            &region_wrapper,
+            wrapper,
+        ) {
+            self.report.fault(format!("{dbg}: {e}"));
+        }
         Some(region_wrapper)
     }
 

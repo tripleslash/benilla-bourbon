@@ -495,9 +495,10 @@ pub fn wmo_group_submeshes(group_bytes: &[u8], root: &WmoRoot) -> Result<Vec<Ren
         let has_normals = group.vertex_normals.len() == group.vertex_positions.len();
         // Neither exterior (`0x8`) nor exterior-lit (`0x40`): the reference's interior test.
         let interior = (group.flags & 0x48) == 0;
-        // An exterior group draws unshaded by MOCV. 1.12.1's own data never pairs the two (every
-        // exterior group ships without one); Turtle WoW's does, 41 groups, and its 1.12 engine
-        // draws `SW_Harbor_Lowmain_000`, whose exterior bake averages 0.07, fully lit.
+        // Only an interior group draws with its MOCV. The exterior drawer binds its vertex
+        // streams without a colour (`0x6b4f2d` passes format 3 to `0x6b4da0`, whose colour slot
+        // is then empty, `0x6b4e40`), where the interior drawer passes 4 and the MOCV pointer
+        // (`0x6b51b0`, `0x6b4e12`). An exterior group's MOCV, however dark, changes nothing.
         let has_colors = interior && colors.len() == group.vertex_positions.len();
         let vertex = |g: u32| {
             let p = &group.vertex_positions[g as usize];

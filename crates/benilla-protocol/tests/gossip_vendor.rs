@@ -52,11 +52,11 @@ fn gossip_bodies_golden() {
     );
 }
 
-/// `0x4e271d`-`0x4e2722` reads a count of 16 or more as 15, reads 15 options and takes the quest
-/// count from the bytes after them, here the 16th option's index, 0; and the coded byte is tested
-/// `& 1` (`0x4e2365`, `0x4e23d4`), so 2 is not coded.
+/// 1.12.1 reads a count of 16 or more as 15 (`0x4e271d`-`0x4e2722`) and takes the quest count
+/// from the 16th option's index; tortoise reads all 16, as Turtle's client does, and then the
+/// real quest. The coded byte is tested `& 1` (`0x4e2365`, `0x4e23d4`), so 2 is not coded.
 #[test]
-fn a_sixteenth_gossip_option_is_never_read() {
+fn a_sixteenth_gossip_option_is_read() {
     let mut body = 0xAAu64.to_le_bytes().to_vec();
     body.extend_from_slice(&100u32.to_le_bytes());
     body.extend_from_slice(&16u32.to_le_bytes());
@@ -76,10 +76,14 @@ fn a_sixteenth_gossip_option_is_never_read() {
         ServerPacket::GossipMessage {
             options, quests, ..
         } => {
-            assert_eq!(options.len(), 15);
-            assert_eq!(options[14].message, "Option 15");
+            assert_eq!(options.len(), 16);
+            assert_eq!(options[15].message, "Option 16");
             assert!(options.iter().all(|o| !o.coded));
-            assert!(quests.is_empty());
+            assert_eq!(quests.len(), 1);
+            assert_eq!(
+                (quests[0].quest_id, quests[0].title.as_str()),
+                (42, "A Quest")
+            );
         }
         other => panic!("gossip message, got {}", other.name()),
     }

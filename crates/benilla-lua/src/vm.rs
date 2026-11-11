@@ -3060,6 +3060,30 @@ impl Vm {
                         }
                     }
                     Op::Not(a, b) => r!(a) = Value::Bool(!r!(b).truthy()),
+                    // pfUI carry (pfUI's 5.1 dialect): 5.1's `OP_MOD` on numbers, `a - floor(a
+                    // / b) * b`; 1.12 has no `__mod` to try first.
+                    Op::Mod(a, b, c) => {
+                        let (x, y) = (rk!(b), rk!(c));
+                        match (self.tonumber(x), self.tonumber(y)) {
+                            (Some(p), Some(q)) => r!(a) = Value::Num(p - (p / q).floor() * q),
+                            (None, _) => {
+                                return Err(self.type_error(x, rkreg!(b), "perform arithmetic on"))
+                            }
+                            _ => {
+                                return Err(self.type_error(y, rkreg!(c), "perform arithmetic on"))
+                            }
+                        }
+                    }
+                    // pfUI carry: 5.1's `OP_LEN`, a string's bytes or a table's border.
+                    Op::Len(a, b) => {
+                        let x = r!(b);
+                        let n = match x.unpack() {
+                            V::Str(s) => self.heap.str(s).len(),
+                            V::Table(t) => self.heap.table(t).length(),
+                            _ => return Err(self.type_error(x, Some(b as usize), "get length of")),
+                        };
+                        r!(a) = Value::Num(n as f64);
+                    }
                     Op::Concat(a, b, c) => {
                         self.top = base!() + maxstack!();
                         let b0 = base!();
@@ -3605,6 +3629,8 @@ fn symbexec(p: &Proto, lastpc: usize, reg: usize) -> Option<usize> {
             | Op::Mul(a, ..)
             | Op::Div(a, ..)
             | Op::Pow(a, ..)
+            | Op::Mod(a, ..)
+            | Op::Len(a, _)
             | Op::AddK(a, ..)
             | Op::SubK(a, ..)
             | Op::MulK(a, ..)

@@ -105,6 +105,8 @@ pub fn load_into_under(
         status_root,
         report: LoadReport::default(),
         warned: HashSet::new(),
+        #[cfg(feature = "pfui")]
+        late_relative_keys: Vec::new(),
     };
     loader.report.warnings.extend(doc.warnings.iter().cloned());
     loader.load_doc(doc);
@@ -132,6 +134,8 @@ pub fn apply_template(lua: &mlua::Lua, wrapper: &Table, kind: &str, template: &s
         status_root: "",
         report: LoadReport::default(),
         warned: HashSet::new(),
+        #[cfg(feature = "pfui")]
+        late_relative_keys: Vec::new(),
     };
 
     let (own_name, parent_name) = loader.frame_names(wrapper);
@@ -261,6 +265,9 @@ struct Loader<'a> {
     pub(super) report: LoadReport,
     /// Warn-once keys.
     pub(super) warned: HashSet<String>,
+    /// ClassicAPI anchors whose `relativeKey` named nothing yet, with the key.
+    #[cfg(feature = "pfui")]
+    pub(super) late_relative_keys: Vec<(XmlAnchor, String)>,
 }
 
 /// The nodes an element's `LoadXML` reads, in the order it reads them: the reference merges no
@@ -302,6 +309,7 @@ impl<'l> IntoIterator for &'l Levels<'_> {
 }
 
 /// One `<Anchor>` as read, before its target is looked up ([`Loader::apply_anchor`]).
+#[derive(Clone)]
 pub(super) struct XmlAnchor {
     pub(super) wrapper: Table,
     /// A region wrapper (`call_region`) rather than a frame's (`call`).
@@ -314,6 +322,9 @@ pub(super) struct XmlAnchor {
     /// `0x767984`).
     pub(super) rel_raw: String,
     pub(super) dbg: String,
+    /// A ClassicAPI `relativeKey`'s object, which wins over `relativeTo`.
+    #[cfg(feature = "pfui")]
+    pub(super) rel_object: Option<Table>,
 }
 
 impl Loader<'_> {
@@ -549,6 +560,21 @@ impl Loader<'_> {
     /// forever round a cycle with no `parent=` on it, and where one stops that walk, the level
     /// recursion (`0x76985c`, and `0x76a092` for the `<Frames>`) overflows the stack.
     pub(super) fn levels<'a>(&mut self, raw: &'a Element) -> Levels<'a> {
+        // A ClassicAPI `inherits` list, in the extension's VM.
+        #[cfg(feature = "pfui")]
+        if crate::script::pfui_host::xml::active(self.lua()) {
+            let model = self.model();
+            let list = model
+                .framexml_templates
+                .borrow()
+                .list_inherited_levels(raw, |_| false);
+            if let Some(inherited) = list {
+                return Levels {
+                    inherited,
+                    own: raw,
+                };
+            }
+        }
         let (inherited, stop) = {
             let model = self.model();
             let templates = model.framexml_templates.borrow();
@@ -579,10 +605,24 @@ impl Loader<'_> {
     /// names a font, which the string links instead of loading a template (`0x770f69`).
     pub(super) fn fontstring_levels<'a>(&self, raw: &'a Element) -> Levels<'a> {
         let model = self.model();
+        let is_font = |name: &str| model.fonts.id(name).is_some();
+        #[cfg(feature = "pfui")]
+        if crate::script::pfui_host::xml::active(self.lua()) {
+            let list = model
+                .framexml_templates
+                .borrow()
+                .list_inherited_levels(raw, is_font);
+            if let Some(inherited) = list {
+                return Levels {
+                    inherited,
+                    own: raw,
+                };
+            }
+        }
         let inherited = model
             .framexml_templates
             .borrow()
-            .inherited_levels_until(raw, |name| model.fonts.id(name).is_some());
+            .inherited_levels_until(raw, is_font);
         Levels {
             inherited,
             own: raw,
@@ -750,6 +790,13 @@ impl Loader<'_> {
         parent_name: &str,
     ) -> Option<Table> {
         let el = raw;
+        // A ClassicAPI intrinsic tag (`<EventFrame>`) is its base type, the intrinsic first in
+        // its `inherits`.
+        #[cfg(feature = "pfui")]
+        let intrinsic = crate::script::pfui_host::xml::intrinsic(self.lua(), &el.tag)
+            .map(|(base, name)| raw.as_intrinsic(&base, &name));
+        #[cfg(feature = "pfui")]
+        let (el, raw) = intrinsic.as_ref().map_or((el, raw), |node| (node, node));
         // Only creation lives here: everything after `CreateFrame` is `decorate`, which
         // `apply_template` enters for a frame that already exists.
 
@@ -865,6 +912,15 @@ impl Loader<'_> {
 
         // The levels the load reads, its first line a missing template's (`0x769861`).
         let levels = self.levels(raw);
+        #[cfg(feature = "pfui")]
+        if let Err(e) = crate::script::pfui_host::xml::frame_created(
+            self.lua(),
+            &levels.iter().collect::<Vec<_>>(),
+            &wrapper,
+            parent,
+        ) {
+            self.report.fault(format!("{dbg_name}: {e}"));
+        }
         self.decorate(
             &levels,
             &el.tag,
@@ -894,6 +950,11 @@ impl Loader<'_> {
         //      opens (`0x7697c2`): until the post-load hook, its own OnShow and OnHide fire nothing.
         self.apply_preload_id(levels.own, wrapper, dbg_name);
         crate::script::visibility::set_load_window(self.lua(), wrapper, true);
+        // ClassicAPI's `mixin=`, each level's, before anything of the load reads the object.
+        #[cfg(feature = "pfui")]
+        if let Err(e) = crate::script::pfui_host::xml::apply_mixins(self.lua(), levels, wrapper) {
+            self.report.fault(format!("{dbg_name}: mixin: {e}"));
+        }
         // 2 · each level's load, the template first (`0x76985c`): its base load (`0x769820`),
         //     then its type's part, so a Slider's or StatusBar's first SetValue fires
         //     (`0x789a1e`-`0x789a44`, `0x783371`) with the handler that level's `<Scripts>` set.
@@ -910,6 +971,14 @@ impl Loader<'_> {
                 &mut onload,
             );
         }
+        // An intrinsic template's handlers join the frame's own now that every level has loaded.
+        #[cfg(feature = "pfui")]
+        if let Err(e) =
+            crate::script::pfui_host::xml::join_intrinsic(self.lua(), wrapper, &mut onload)
+        {
+            self.report
+                .fault(format!("{dbg_name}: intrinsic scripts: {e}"));
+        }
 
         // 3 · the post-load hook (`0x76a2f0`): close the window (`0x76a2ff`), then the nested
         //     <Frames> (`0x76a060`): per level, the template first, the level's first `<Frames>`
@@ -923,6 +992,9 @@ impl Loader<'_> {
                 }
             }
         }
+
+        #[cfg(feature = "pfui")]
+        self.apply_late_relative_keys();
 
         // 4 · this frame's OnLoad, now that its subtree is complete (bottom-up).
         if let Some(func) = onload {
@@ -975,7 +1047,34 @@ impl Loader<'_> {
                 // into `GetRegions` in the file's order, a template's first.
                 self.apply_layers(child, wrapper, self_name, dbg);
             } else if is("Scripts") {
+                #[cfg(feature = "pfui")]
+                if level.attr_is_true("intrinsic")
+                    && crate::script::pfui_host::xml::active(self.lua())
+                {
+                    let lua = self.lua;
+                    let owner = crate::script::binding_abi::name_of(lua, wrapper);
+                    let mut compile =
+                        |h: &Element, name: &str| self.compile_handler(h, name, &owner, dbg);
+                    if let Err(e) = crate::script::pfui_host::xml::capture_intrinsic(
+                        lua,
+                        child,
+                        wrapper,
+                        &mut compile,
+                    ) {
+                        self.report.fault(format!("{dbg}: intrinsic scripts: {e}"));
+                    }
+                    continue;
+                }
                 self.apply_scripts(child, wrapper, dbg, onload);
+            } else if cfg!(feature = "pfui") && is("KeyValues") {
+                #[cfg(feature = "pfui")]
+                if crate::script::pfui_host::xml::active(self.lua()) {
+                    if let Err(e) =
+                        crate::script::pfui_host::xml::apply_key_values(self.lua(), child, wrapper)
+                    {
+                        self.report.fault(format!("{dbg}: KeyValues: {e}"));
+                    }
+                }
             }
         }
         self.typed_level(level, kind, wrapper, self_name, dbg);
@@ -1018,6 +1117,9 @@ impl Loader<'_> {
                 None => Value::Nil,
             },
         };
+        // A ClassicAPI `relativeKey` names its target as an object, over `relativeTo`.
+        #[cfg(feature = "pfui")]
+        let rel = d.rel_object.clone().map_or(rel, Value::Table);
         let XmlAnchor {
             wrapper,
             region,
@@ -1103,6 +1205,9 @@ impl Loader<'_> {
         read(el, &mut v, Len::Script);
         let ok = match el.children.first() {
             None if el.attr(gate).is_some() => true,
+            // ClassicAPI reads a node that gives only `x` or only `y` with the other 0.
+            #[cfg(feature = "pfui")]
+            None if crate::script::pfui_host::xml::partial_length(self.lua(), el, &keys) => true,
             None => {
                 self.status_warning(format!("{missing}{}", el.tag));
                 false

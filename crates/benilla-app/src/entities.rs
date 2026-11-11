@@ -1016,14 +1016,22 @@ fn setup_entities(
         Ok(geosets) => commands.insert_resource(Characters(geosets)),
         Err(e) => warn!("character geosets unavailable, players show every geoset: {e:#}"),
     }
-    match CharSections::load(&mut chain) {
+    // tortoise: on a Turtle realm, its flagged skin rows are the extra player colours its server
+    // sends (`sections/turtle.rs`); a 1.12.1 chain reads the stock table.
+    let turtle = flavor.as_ref().is_some_and(|f| f.is_turtle());
+    let sections = if turtle {
+        CharSections::load_turtle(&mut chain)
+    } else {
+        CharSections::load(&mut chain)
+    };
+    match sections {
         Ok(sections) => {
             commands.insert_resource(SkinSections::new(sections, world_assets.chain.clone()))
         }
         Err(e) => warn!("char sections unavailable, player bodies stay untextured: {e:#}"),
     }
     // Turtle WoW's races and race/class table are its own; the 1.12.1 load refuses them.
-    let catalog = if flavor.is_some_and(|f| f.is_turtle()) {
+    let catalog = if turtle {
         CharCreateCatalog::load_turtle(&mut chain)
     } else {
         CharCreateCatalog::load(&mut chain)

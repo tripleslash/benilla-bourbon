@@ -38,6 +38,16 @@ impl Loader<'_> {
             } else {
                 self.compile_handler(handler, &name, &owner, dbg)
             };
+            // ClassicAPI's `method=` and `function=`, and `inherit=` over the levels before.
+            #[cfg(feature = "pfui")]
+            let func =
+                match crate::script::pfui_host::xml::handler(self.lua, handler, wrapper, func) {
+                    Ok(func) => func,
+                    Err(e) => {
+                        self.report.fault(format!("{dbg}: <{name}>: {e}"));
+                        continue;
+                    }
+                };
             if let Err(e) = wrapper.call_method::<()>("SetScript", (name.clone(), func.clone())) {
                 self.report
                     .fault(format!("{dbg}: SetScript(\"{name}\"): {e}"));
@@ -91,6 +101,15 @@ impl Loader<'_> {
         if body.is_empty() {
             return None;
         }
+        // pfUI's VM hands a handler `self, ...` ([`crate::script::pfui_host::invoke_handler`]),
+        // which a modern template's body reads as its `self`; on the body's own first line, so
+        // its line numbers stay.
+        #[cfg(feature = "pfui")]
+        let prefixed = crate::script::pfui_host::installed(self.lua())
+            .unwrap_or(false)
+            .then(|| format!("local self = ...; {body}"));
+        #[cfg(feature = "pfui")]
+        let body = prefixed.as_deref().unwrap_or(body);
         let compiled = self
             .lua()
             .load(body)

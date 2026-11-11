@@ -58,10 +58,12 @@ pub(super) fn read_gossip_message(
 ) -> io::Result<(u64, u32, Vec<GossipOption>, Vec<QuestOption>)> {
     let npc_guid = read_u64_le(r)?;
     let text_id = read_u32_le(r)?;
-    // A count of 16 or more reads as 15 (`0x4e271d`-`0x4e2722`), and the quest count is read from
-    // the bytes after those 15, as the reference reads it: no 16th option exists.
-    let option_count = read_u32_le(r)?.min(15);
-    let mut options = Vec::with_capacity(capacity_hint(option_count, 15));
+    // Deviation: (tortoise) every option is read before the quest count, up to the server's 32,
+    // because Turtle's item scripts send 17 and more and its GossipFrame has 32 buttons. 1.12.1 reads a
+    // count of 16 or more as 15 (`0x4e271d`-`0x4e2722`) and the quest count from the bytes after
+    // those 15, which misreads such a menu.
+    let option_count = read_u32_le(r)?;
+    let mut options = Vec::with_capacity(capacity_hint(option_count, 32));
     for _ in 0..option_count {
         options.push(GossipOption {
             index: read_u32_le(r)?,
@@ -185,4 +187,64 @@ pub fn select_greeting(blocks: &[NpcTextBlock], npc_gender: u8, roll: f32) -> Op
         }
     }
     None
+}
+
+#[cfg(test)]
+mod turtle_menu_tests {
+    use super::read_gossip_message;
+
+    /// A gossip body of `count` options, each a taxi icon, the last one coded, then one quest
+    /// when `quest` is set.
+    fn menu(count: u32, quest: bool) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&0x4000_0000_0000_0001u64.to_le_bytes());
+        body.extend_from_slice(&100u32.to_le_bytes());
+        body.extend_from_slice(&count.to_le_bytes());
+        for index in 0..count {
+            body.extend_from_slice(&index.to_le_bytes());
+            body.extend_from_slice(&[2, u8::from(index + 1 == count)]);
+            body.extend_from_slice(format!("Destination {index}\0").as_bytes());
+        }
+        body.extend_from_slice(&u32::from(quest).to_le_bytes());
+        if quest {
+            for value in [42u32, 2, 60] {
+                body.extend_from_slice(&value.to_le_bytes());
+            }
+            body.extend_from_slice(b"A quest\0");
+        }
+        body
+    }
+
+    /// tortoise: a 17-option item menu (Turtle's Hearthstone) reads whole; 1.12.1's cap of 15
+    /// would read option 16's index as the quest count. After TuringKi/benilla 741e220f.
+    #[test]
+    fn a_seventeen_option_menu_is_not_misread_as_quests() {
+        let bytes = menu(17, false);
+        let mut r = bytes.as_slice();
+        let (guid, text, options, quests) = read_gossip_message(&mut r).unwrap();
+        assert_eq!((guid, text), (0x4000_0000_0000_0001, 100));
+        assert_eq!(options.len(), 17);
+        assert_eq!(options[16].index, 16);
+        assert!(quests.is_empty());
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn thirty_two_options_keep_the_following_quest_and_the_coded_flag() {
+        let bytes = menu(32, true);
+        let mut r = bytes.as_slice();
+        let (_, _, options, quests) = read_gossip_message(&mut r).unwrap();
+        assert_eq!(options.len(), 32);
+        assert!(options[31].coded);
+        assert_eq!(quests[0].quest_id, 42);
+        assert_eq!(quests[0].title, "A quest");
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn a_truncated_menu_is_rejected() {
+        let mut bytes = menu(17, false);
+        bytes.pop();
+        assert!(read_gossip_message(&mut bytes.as_slice()).is_err());
+    }
 }

@@ -62,6 +62,16 @@ const BETWEEN_THE_DISPATCH_AND_THE_DRAIN: &[(&str, &[&str], &str)] = &[];
 /// held to its systems' access by the same test.
 #[rustfmt::skip]
 const AFTER_THE_PACKETS_IN_THE_REFERENCE: &[(&str, &[&str], &str)] = &[
+    #[cfg(feature = "nampower")]
+    ("::pfui::spell_queue::release", &["creature_anim::AttackStopInFlight",
+        "spell::cast_send::CastPark", "spell::cast_send::HeldForPick",
+        "spell::cast_send::ScriptCastPermit",
+        "spell::cast_send::unit_caster::UnitAttackOwed", "spell::cooldowns::Cooldowns",
+        "spell::inflight::AutoRepeatActive", "spell::inflight::PendingCast",
+        "spell::inflight::QueuedMeleeSpell", "spell::targeting::SpellTargeting",
+        "ui_loot::LootLatch", "ui_pet::PetBar", "ui_tradeskill::TradeSkillOpens"],
+        "Nampower's queue releases its casts at frame time, on the client's tick, not inside \
+         a packet"),
     ("::net::motion::facing::drive_display_facing", &["Commands net::motion::remote::RemoteMotion",
         "Commands net::motion::spline::Spline", "Transform"],
         "turns the units' models toward their facing; unit movement is \

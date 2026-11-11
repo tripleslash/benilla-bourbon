@@ -1914,6 +1914,12 @@ fn fire_one(
                     return None;
                 }
                 text_filter.mask_chat(filters, msg.chat_type, &mut text);
+                #[cfg(feature = "pfui")]
+                crate::ui_text::inline_texture::strip_typed(
+                    msg.sender_guid,
+                    msg.language,
+                    &mut text,
+                );
                 let text = text;
                 let mut event = ChatEvent {
                     kind,

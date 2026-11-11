@@ -196,10 +196,44 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         let h = frame_handle_of(lua, &this)?;
         Ok(size_read(lua, h, true))
     })?;
+    // ClassicAPI's `GetWidth([ignoreRect])`.
+    #[cfg(feature = "pfui")]
+    set_shared(
+        lua,
+        m,
+        Side::Frame,
+        "GetWidth",
+        |lua, (this, ignore_rect): (Table, Option<bool>)| {
+            let h = frame_handle_of(lua, &this)?;
+            Ok(classicapi_size_read(
+                lua,
+                h,
+                true,
+                ignore_rect == Some(true),
+            ))
+        },
+    )?;
     set_shared(lua, m, Side::Frame, "GetHeight", |lua, this: Table| {
         let h = frame_handle_of(lua, &this)?;
         Ok(size_read(lua, h, false))
     })?;
+    // ClassicAPI's `GetHeight([ignoreRect])`.
+    #[cfg(feature = "pfui")]
+    set_shared(
+        lua,
+        m,
+        Side::Frame,
+        "GetHeight",
+        |lua, (this, ignore_rect): (Table, Option<bool>)| {
+            let h = frame_handle_of(lua, &this)?;
+            Ok(classicapi_size_read(
+                lua,
+                h,
+                false,
+                ignore_rect == Some(true),
+            ))
+        },
+    )?;
 
     // GetCenter() (`0x7a1810`): the resolved rect's midpoints over the frame's scale, through the
     // getter steps ([`crate::layout::LayoutUnits::center`]); two nils before the first resolve.
@@ -365,6 +399,44 @@ fn size_read(lua: &Lua, h: FrameHandle, width: bool) -> f64 {
         } else {
             units.span(r.bottom, r.top)
         }
+    })
+}
+
+/// ClassicAPI's size: a set size, or the anchored span over the scale, in `GetTop`'s units; with
+/// `ignore_rect` a size that is not set answers 0.
+#[cfg(feature = "pfui")]
+fn classicapi_size_read(lua: &Lua, h: FrameHandle, width: bool, ignore_rect: bool) -> f64 {
+    let (units, stored) = {
+        let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+        let units = model.layout_units();
+        let set = model
+            .layout_inputs
+            .get(&h)
+            .map_or(crate::layout::Len::Script(0.0), |i| {
+                if width {
+                    i.width
+                } else {
+                    i.height
+                }
+            });
+        (units, set.layout(units))
+    };
+    if stored != 0.0 {
+        return units.load(stored);
+    }
+    if ignore_rect {
+        return 0.0;
+    }
+    settle_frame(lua, h);
+    let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+    let scale = layout_scale(&model, h);
+    model.frame_rects.get(&h).map_or(0.0, |r| {
+        let span = if width {
+            r.right - r.left
+        } else {
+            r.top - r.bottom
+        };
+        units.load(span / scale)
     })
 }
 

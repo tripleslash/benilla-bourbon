@@ -243,14 +243,27 @@ pub(super) fn load_core(script: &UiScript) -> Vec<String> {
 /// carried in the client binary, which benilla does not ship, and a modified interface file is
 /// loaded rather than refused.
 fn load_core_with(script: &UiScript, layer: bool) -> Vec<String> {
+    // pfUI's data (its DBC catalogs, icons, maps) installs before the core; a failure there is
+    // reported and the stock interface still loads, since the release builds always carry pfUI.
+    #[cfg(feature = "pfui")]
+    let pfui_failure = crate::pfui::prepare(script).err().map(|error| {
+        let e = format!("pfUI data: {error}");
+        error!("ui_script: {e}");
+        script.report_load_failure(&e);
+        e
+    });
     let Some(core) = core(layer) else {
         let mut failures = vec![report_missing_core(script)];
         failures.extend(load_core_bindings(script));
+        #[cfg(feature = "pfui")]
+        failures.extend(pfui_failure);
         return failures;
     };
     let mut toc = benilla_ui::status::Status::default();
     let mut failures = core.load_files_into(script, &core.toc.files, &mut toc);
     failures.extend(close_core(script, toc));
+    #[cfg(feature = "pfui")]
+    failures.extend(pfui_failure);
     failures
 }
 

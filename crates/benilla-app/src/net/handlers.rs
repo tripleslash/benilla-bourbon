@@ -387,18 +387,7 @@ mod tests {
     #[test]
     fn every_handler_names_the_kind_it_registered_for() {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = Vec::new();
-        let mut dirs = vec![src];
-        while let Some(dir) = dirs.pop() {
-            for entry in std::fs::read_dir(dir).expect("src") {
-                let path = entry.expect("entry").path();
-                if path.is_dir() {
-                    dirs.push(path);
-                } else if path.extension().is_some_and(|e| e == "rs") {
-                    files.push(path);
-                }
-            }
-        }
+        let files = crate::test_support::rust_files(&src);
         let (mut seen, mut problems) = (0, Vec::new());
         for path in files {
             if path.ends_with("net/handlers.rs") {

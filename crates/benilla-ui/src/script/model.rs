@@ -689,6 +689,8 @@ pub(crate) struct Model {
     pub(crate) has_key: bool,
     /// What the cursor carries; nothing moves locally, the server's updates settle the bags.
     pub(crate) cursor: Option<cursor::CursorPayload>,
+    #[cfg(feature = "pfui")]
+    pub(crate) pfui_cursor: Option<super::pfui_host::equipment_actions::CursorState>,
     /// The cursor's one grid latch, `[0xb4da24]`: set by a setter that showed a bar's drop grid,
     /// cleared by `ClearCursor`'s tail, which hides the pet bar's for a held pet action and the
     /// action bar's otherwise (`0x49529b`).
@@ -1259,9 +1261,14 @@ impl Model {
     /// Records a non-fatal warning for the host's terminal and the retained diagnostic log.
     pub(crate) fn record_warning(&mut self, msg: impl Into<String>) {
         let msg = msg.into();
-        self.diagnostics
-            .record(super::diagnostics::DiagnosticKind::Warning, &msg);
-        self.warnings.push(msg);
+        // tortoise: the terminal hears a warning once; its row's count carries the repeats.
+        // Turtle's shop scans a tooltip per entry, which was 242 identical lines a session.
+        if self
+            .diagnostics
+            .record(super::diagnostics::DiagnosticKind::Warning, &msg)
+        {
+            self.warnings.push(msg);
+        }
     }
 
     /// A warning for the host's terminal only, for a message already retained under another kind.
@@ -1568,6 +1575,8 @@ impl Model {
             worn_cooldowns: HashMap::new(),
             has_key: false,
             cursor: None,
+            #[cfg(feature = "pfui")]
+            pfui_cursor: None,
             cursor_grid: false,
             world_pick: cursor::WorldPick::default(),
             item_pick_armed: false,

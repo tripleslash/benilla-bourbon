@@ -169,7 +169,9 @@ fn every_event_we_fire_carries_the_reference_s_arguments() {
         unreadable.len(),
         unreadable.join("\n  ")
     );
-    let unnamed = unnamed_in(scan(), &table);
+    let mut unnamed = unnamed_in(scan(), &table);
+    // The pfUI extension's own dispatch, as in `every_event_we_fire_is_in_the_reference_table`.
+    unnamed.retain(|at| !at.contains("pfui"));
     assert!(
         unnamed.is_empty(),
         "{} fire site(s) build their event name away from the call, in files that name gated \
@@ -210,6 +212,9 @@ fn every_event_we_fire_is_in_the_reference_table() {
     let mut off: Vec<String> = fire_sites()
         .into_iter()
         .filter(|(name, _, _)| !names.contains(name.as_str()))
+        // The pfUI extension fires ClassicAPI's own events, which its listeners register through
+        // its own key (`pfui_host::extension_event`), not the 1.12 table.
+        .filter(|(_, _, at)| !at.contains("pfui"))
         .map(|(name, _, at)| format!("{name} from {at}"))
         .collect();
     off.sort();

@@ -30,6 +30,10 @@ use crate::net::{GuidIndex, ObjectStore, Reputations, SelfGuid, SelfPlayer};
 use crate::target::{Factions, RelUnit, Relations, Selection, UnitLookup};
 use benilla_protocol::messages::OwnerFallback;
 
+#[cfg(feature = "pfui")]
+#[path = "../pfui/click_target.rs"]
+mod pfui;
+
 /// `TARGET_FLAG_*` bits of the client's targeting flag word (`0xcecac0`).
 const TF_UNIT: u16 = 0x0002;
 const TF_UNIT_RAID: u16 = 0x0004;

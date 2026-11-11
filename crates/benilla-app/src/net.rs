@@ -35,6 +35,8 @@ pub(crate) use objects::continue_refusal_walk;
 pub(crate) use objects::wire;
 pub(crate) use objects::Listed;
 pub(crate) use objects::{release_unheld, ReleasePending};
+#[cfg(feature = "pfui")]
+mod pfui;
 mod reputations;
 mod session;
 #[cfg(test)]
@@ -1227,6 +1229,11 @@ pub(crate) enum ClientCommand {
     /// `CMSG_SET_SELECTION`; `guid == 0` clears.
     SetSelection {
         guid: u64,
+    },
+    /// tortoise: the language every later chat line goes out in, the self race's
+    /// `ChrRaces.BaseLanguage`.
+    SetChatLanguage {
+        language: u32,
     },
     /// `CMSG_MESSAGECHAT`. A plain line, `.` GM commands included, goes as `Say`.
     /// The language every later chat line goes out in: the self race's `ChrRaces.BaseLanguage`.
