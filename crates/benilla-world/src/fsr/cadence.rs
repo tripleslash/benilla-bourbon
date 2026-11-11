@@ -37,6 +37,7 @@ use bevy::prelude::*;
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::extract_component::ExtractComponent;
 use bevy::render::extract_resource::ExtractResource;
+#[cfg(not(target_arch = "wasm32"))]
 use bevy::render::Render;
 use bevy::window::PrimaryWindow;
 
@@ -523,8 +524,10 @@ pub(super) struct FgPacing {
     /// World-frame `Render` start to start, smoothed, seconds: the rendered interval.
     interval: f32,
     /// One world frame's `Render`, smoothed, seconds.
+    #[cfg(not(target_arch = "wasm32"))]
     world_cost: f32,
     /// One held frame's `Render`, smoothed, seconds.
+    #[cfg(not(target_arch = "wasm32"))]
     held_cost: f32,
 }
 
@@ -575,6 +578,7 @@ pub(super) fn mark_render(
 /// real frame. They run here on the render thread, not as main-world updates: the main world is
 /// already simulating the next frame, and a held frame costs only its own render. Each is paced
 /// to [`held_spacing`] after the world frame's present.
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn run_held_frames(world: &mut World) {
     let now = bevy::platform::time::Instant::now();
     let held = world.resource::<FgHolds>().0;

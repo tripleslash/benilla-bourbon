@@ -758,7 +758,7 @@ pub(crate) fn defer_write(buffer: Buffer, offset: wgpu::BufferAddress, data: &[u
 fn drain_writes(queue: &RenderQueue) {
     let writes = core::mem::take(&mut *lock(&WRITES));
     for (buffer, offset, data) in writes {
-        queue.0.write_buffer(&buffer, offset, &data);
+        queue.write_buffer(&buffer, offset, &data);
     }
 }
 

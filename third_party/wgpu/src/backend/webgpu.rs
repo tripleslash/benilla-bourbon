@@ -2177,6 +2177,8 @@ impl WebDevice {
             inner: texture,
             drop_guard: Some(Rc::new(DropGuard::new(drop_callback))),
             ident: crate::cmp::Identifier::create(),
+            // benilla local patch: the handle is the caller's, which destroys it.
+            release: Release::owned_elsewhere(),
         }
         .into()
     }
@@ -2276,7 +2278,10 @@ impl dispatch::DeviceInterface for WebDevice {
             }
             #[cfg(feature = "wgsl")]
             crate::ShaderSource::Wgsl(ref code) => {
-                let shader_module = webgpu_sys::GpuShaderModuleDescriptor::new(code);
+                // benilla patch (PATCH.md, "Browser WGSL"): Bevy 0.20 hands its WESL output over as
+                // WGSL text, so the same gaps reach the browser by this path too.
+                let shader_module =
+                    webgpu_sys::GpuShaderModuleDescriptor::new(&browser_wgsl(code.to_string()));
                 Ok((
                     shader_module,
                     WebShaderCompilationInfo::Wgsl {
@@ -2331,7 +2336,7 @@ impl dispatch::DeviceInterface for WebDevice {
         //   `3.4028234e38f` is in range and rounds to exactly `f32::MAX`.
         // - A module using subgroup or quad builtins (reached only on a device with the patched
         //   `SUBGROUP` feature) needs the `enable subgroups;` directive, which naga does not write.
-        #[cfg(naga)]
+        #[cfg(any(naga, feature = "wgsl"))]
         fn browser_wgsl(text: String) -> String {
             let text = text.replace("340282350000000000000000000000000000000f", "3.4028234e38f");
             // A subgroup builtin: `@builtin(subgroup_…)`, a `quad…(` call, or a `subgroupX…(`

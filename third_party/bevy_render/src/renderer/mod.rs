@@ -16,6 +16,9 @@ pub use async_compute::{
 pub use render_device::*;
 
 pub(crate) use wgpu_wrapper::wgpu_wrapper;
+// benilla fork: the holder `wgpu_wrapper!` names as `$crate::renderer::Held`.
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+pub use wgpu_wrapper::Held;
 
 use crate::{
     settings::{RenderResources, WgpuSettings, WgpuSettingsPriority},

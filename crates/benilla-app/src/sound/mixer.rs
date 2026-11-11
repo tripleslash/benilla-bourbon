@@ -695,9 +695,11 @@ pub(crate) fn stream_from_bytes(bytes: Vec<u8>) -> Result<StreamingSoundData<Fro
 /// whatever thread calls this (the main thread, same as [`sfx_from_bytes`] already does).
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn stream_from_bytes(bytes: Vec<u8>) -> Result<StreamingSoundData<FromFileError>> {
-    StaticSoundData::from_cursor(std::io::Cursor::new(bytes))
-        .map(|data| StreamingSoundData(data, std::marker::PhantomData))
-        .context("opening stream")
+    anyhow::Context::context(
+        StaticSoundData::from_cursor(std::io::Cursor::new(bytes))
+            .map(|data| StreamingSoundData(data, std::marker::PhantomData)),
+        "opening stream",
+    )
 }
 
 /// wasm32: PCM the **browser** decoded ([`super::web_decode`]), wearing the streaming type the

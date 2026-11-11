@@ -514,9 +514,9 @@ impl Plugin for RenderPlugin {
             #[cfg(all(target_arch = "wasm32", feature = "webgpu"))]
             render_app.add_systems(
                 Render,
-                destroy_released_gpu_resources
-                    .in_set(RenderSystems::PostCleanup)
-                    .after(sync_world::despawn_temporary_render_entities),
+                // bevy_extract's temporary-entity despawn is crate-private and runs in
+                // `PostCleanup`: after the whole set.
+                destroy_released_gpu_resources.after(RenderSystems::PostCleanup),
             );
         }
     }

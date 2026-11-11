@@ -918,7 +918,7 @@ impl PipelineCache {
 
                 let pipeline = Pipeline::MeshPipeline(device.create_mesh_pipeline(&descriptor));
                 disk_cache.note_built();
-                Ok(pipeline)
+                Ok(built(pipeline))
             },
             self.synchronous_pipeline_compilation,
         )
@@ -1163,6 +1163,18 @@ fn create_pipeline_task(
 /// browser's WebGPU backend.
 #[cfg(not(all(target_arch = "wasm32", feature = "webgpu")))]
 type BuiltPipeline = Pipeline;
+
+/// A pipeline made synchronously, as [`BuiltPipeline`] holds it.
+#[cfg(not(all(target_arch = "wasm32", feature = "webgpu")))]
+fn built(pipeline: Pipeline) -> BuiltPipeline {
+    pipeline
+}
+
+/// A pipeline made synchronously, as [`BuiltPipeline`] holds it.
+#[cfg(all(target_arch = "wasm32", feature = "webgpu"))]
+fn built(pipeline: Pipeline) -> BuiltPipeline {
+    BuiltPipeline::Ready(pipeline)
+}
 
 #[cfg(not(all(target_arch = "wasm32", feature = "webgpu")))]
 fn build_render_pipeline(

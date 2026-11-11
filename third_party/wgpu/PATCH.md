@@ -58,7 +58,10 @@ build instead of silently requesting the wrong feature.
 ## Browser WGSL (`src/backend/webgpu.rs`, `browser_wgsl`)
 
 A module Bevy hands over as naga IR is written back to WGSL for the browser by naga 30's writer.
-Two things it writes, the browser's compiler rejects, so `browser_wgsl` post-processes the text:
+Two things it writes, the browser's compiler rejects, so `browser_wgsl` post-processes the text.
+Bevy 0.20 composes its WESL shaders to WGSL text and hands most modules over as
+`ShaderSource::Wgsl`, which reaches the browser without naga, so that path runs through
+`browser_wgsl` too (the depth and mip downsamples' `quadSwapX` without `enable subgroups;`):
 
 - `f32::MAX` comes out as `340282350000000000000000000000000000000f`, a decimal above the largest
   f32 ("value cannot be represented as 'f32'" in Tint); it is rewritten to `3.4028234e38f`, which is
