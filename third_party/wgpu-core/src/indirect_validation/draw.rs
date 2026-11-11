@@ -37,10 +37,12 @@ const BUFFER_SIZE: wgt::BufferSize = wgt::BufferSize::new(1_048_560).unwrap();
 ///
 /// This machinery requires the following limits:
 ///
-/// - max_bind_groups: 3,
-/// - max_dynamic_storage_buffers_per_pipeline_layout: 1,
-/// - max_storage_buffers_per_shader_stage: 3,
+/// - max_bind_groups: 4,
+/// - max_dynamic_storage_buffers_per_pipeline_layout: 2,
+/// - max_storage_buffers_per_shader_stage: 4,
 /// - max_immediate_size: 8,
+///
+/// (BENILLA: upstream's 3, 1 and 3, before the count buffer's group 3.)
 ///
 /// These are all indirectly satisfied by `DownlevelFlags::INDIRECT_EXECUTION`, which is also
 /// required for this module's functionality to work.
@@ -110,10 +112,13 @@ impl Draw {
                 instance_flags,
             ),
             flags: hal::PipelineLayoutFlags::empty(),
+            // BENILLA: group 3, the count buffer of a multi-draw-indirect-count, is bound as a
+            // source buffer is (any `INDIRECT` buffer has that group).
             bind_group_layouts: &[
                 Some(metadata_bind_group_layout.as_ref()),
                 Some(src_bind_group_layout.as_ref()),
                 Some(dst_bind_group_layout.as_ref()),
+                Some(src_bind_group_layout.as_ref()),
             ],
             immediate_size: 8,
         };
@@ -453,6 +458,30 @@ impl Draw {
                 encoder.set_bind_group(pipeline_layout, 2, dst_bind_group, &[]);
             }
 
+            // BENILLA: the batch's count buffer, or the source's own group where it has none
+            // (its entries carry `NO_COUNT` and never read it).
+            let (count_bind_group, count_dynamic_offset) = match batch.count_buffer {
+                Some(ref count_buffer) => {
+                    count_buffer.try_raw(snatch_guard)?;
+                    let group = count_buffer
+                        .indirect_validation_bind_groups
+                        .get(snatch_guard)
+                        .unwrap()
+                        .draw
+                        .as_ref();
+                    (group, batch.count_dynamic_offset)
+                }
+                None => (src_bind_group, batch.src_dynamic_offset),
+            };
+            unsafe {
+                encoder.set_bind_group(
+                    pipeline_layout,
+                    3,
+                    count_bind_group,
+                    &[u64_offset_to_u32_offset(count_dynamic_offset)],
+                );
+            }
+
             unsafe {
                 encoder.dispatch_workgroups([(batch.entries.len() as u32).div_ceil(64), 1, 1]);
             }
@@ -690,7 +719,8 @@ fn calculate_src_offsets(
     let binding_size = calculate_src_buffer_binding_size(buffer_size, limits);
     let min_storage_buffer_offset_alignment = limits.min_storage_buffer_offset_alignment as u64;
 
-    assert!([16, MAX_DATA_SIZE].contains(&data_size));
+    // BENILLA: and 4, a multi-draw-indirect-count's count.
+    assert!([4, 16, MAX_DATA_SIZE].contains(&data_size));
     assert!([32, 64, 128, 256].contains(&min_storage_buffer_offset_alignment));
     assert!(buffer_size >= data_size);
     assert!(offset <= buffer_size - data_size);
@@ -982,15 +1012,32 @@ struct MetadataEntry {
     dst_offset: u32,
     vertex_or_index_limit: u32,
     instance_limit: u32,
+    // BENILLA: the draw's index in its call, and the word offset of its call's count in the
+    // batch's count binding (`NO_COUNT` without one): the rewrite skips a draw past its count.
+    draw_index: u32,
+    count_offset: u32,
 }
 
+/// BENILLA: `MetadataEntry::count_offset` of a draw that has no count (`validate_draw.wgsl`).
+const NO_COUNT: u32 = u32::MAX;
+
+/// BENILLA: the destination window one batch's entries cover, in bytes: as many of the smallest
+/// destination stride (16, a non-indexed draw off DX12) as `MetadataEntry`s fit one metadata
+/// buffer, so a batch's metadata never outgrows `BUFFER_SIZE` (upstream's entries were 16 bytes,
+/// one per 16 destination bytes; these are 24).
+const DST_WINDOW: u64 = BUFFER_SIZE.get() / size_of::<MetadataEntry>() as u64
+    * size_of::<wgt::DrawIndirectArgs>() as u64;
+
 impl MetadataEntry {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         indexed: bool,
         src_offset: u64,
         dst_offset: u64,
         vertex_or_index_limit: u64,
         instance_limit: u64,
+        draw_index: u32,
+        count_offset: u32,
     ) -> Self {
         const U32_MAX_AS_U64: u64 = u32::MAX as u64;
 
@@ -1026,14 +1073,24 @@ impl MetadataEntry {
             dst_offset,
             vertex_or_index_limit,
             instance_limit,
+            draw_index,
+            count_offset,
         }
     }
 }
+
+/// BENILLA: a batch's key: the source buffer and its dynamic offset, the destination buffer and
+/// its [`DST_WINDOW`], and the count buffer and its dynamic offset (`None` for draws without
+/// one).
+type BatchKey = (TrackerIndex, u64, usize, u64, Option<(TrackerIndex, u64)>);
 
 struct DrawIndirectValidationBatch {
     src_buffer: Arc<crate::resource::Buffer>,
     src_dynamic_offset: u64,
     dst_resource_index: usize,
+    // BENILLA: the count buffer of the batch's multi-draw-indirect-count draws, bound at group 3.
+    count_buffer: Option<Arc<crate::resource::Buffer>>,
+    count_dynamic_offset: u64,
     entries: Vec<MetadataEntry>,
 
     staging_buffer_index: usize,
@@ -1056,10 +1113,9 @@ impl DrawIndirectValidationBatch {
 
 /// Accumulates all needed data needed to validate indirect draws.
 pub(crate) struct DrawBatcher {
-    // BENILLA: the key's last element is the `BUFFER_SIZE` window of the destination buffer
-    // an entry writes to, always 0 in a pooled buffer. It keeps a batch's metadata within one
-    // metadata buffer when a multi-draw-indirect-count's destination is larger than that.
-    batches: FastHashMap<(TrackerIndex, u64, usize, u64), DrawIndirectValidationBatch>,
+    // BENILLA: the key ([`BatchKey`]) adds the destination's [`DST_WINDOW`], which keeps a
+    // batch's metadata within one metadata buffer, and the count buffer the batch binds.
+    batches: FastHashMap<BatchKey, DrawIndirectValidationBatch>,
     current_dst_entry: Option<CurrentEntry>,
 }
 
@@ -1075,6 +1131,9 @@ impl DrawBatcher {
     ///
     /// Returns the index of the indirect buffer in `indirect_draw_validation_resources`
     /// and the offset to be used for the draw.
+    ///
+    /// BENILLA: `draw_index` is the draw's index in its call (0 for a single draw).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn add<'a>(
         &mut self,
         indirect_draw_validation_resources: &'a mut DrawResources,
@@ -1084,14 +1143,16 @@ impl DrawBatcher {
         family: crate::command::DrawCommandFamily,
         vertex_or_index_limit: u64,
         instance_limit: u64,
+        draw_index: u32,
     ) -> Result<(usize, u64), DeviceError> {
         let stride = crate::command::get_dst_stride_of_indirect_args(device.backend(), family);
 
         let (dst_resource_index, dst_offset) = indirect_draw_validation_resources
             .get_dst_subrange(stride, &mut self.current_dst_entry)?;
 
-        self.record(
-            device,
+        let limits = device.adapter.limits();
+        let (key, entry) = entry(
+            &limits,
             src_buffer,
             offset,
             family,
@@ -1099,7 +1160,10 @@ impl DrawBatcher {
             instance_limit,
             dst_resource_index,
             dst_offset,
+            draw_index,
+            None,
         );
+        self.push(key, src_buffer, None, Some(entry));
 
         Ok((dst_resource_index, dst_offset))
     }
@@ -1108,8 +1172,14 @@ impl DrawBatcher {
     /// rewritten arguments laid out back to back in one destination buffer, so that one
     /// `draw_*_indirect_count` with the caller's count buffer reads them as one array.
     ///
-    /// Every one of the `count` (the call's `max_count`) is rewritten, since the count itself
-    /// is only known on the GPU; those past it are never executed.
+    /// Every one of the `count` (the call's `max_count`) gets a metadata entry, since the count
+    /// itself is only known on the GPU. With `count_buffer` (the call's count buffer and the
+    /// count's offset in it) the rewrite reads the count and skips the draws past it, which are
+    /// never executed; without it all `count` are rewritten.
+    ///
+    /// The entries are made in one pass: the device's limits read once, and one batch lookup a
+    /// run of entries with the same key (a source binding window and a destination window), not
+    /// one a draw.
     ///
     /// Returns the index of the destination buffer in `indirect_draw_validation_resources` and
     /// the offset of the first draw's arguments.
@@ -1124,6 +1194,7 @@ impl DrawBatcher {
         family: crate::command::DrawCommandFamily,
         vertex_or_index_limit: u64,
         instance_limit: u64,
+        count_buffer: Option<(&Arc<crate::resource::Buffer>, u64)>,
     ) -> Result<(usize, u64), RenderPassErrorInner> {
         let src_stride = get_src_stride_of_indirect_args(family);
         let dst_stride = crate::command::get_dst_stride_of_indirect_args(device.backend(), family);
@@ -1134,78 +1205,115 @@ impl DrawBatcher {
                 &mut self.current_dst_entry,
             )?;
 
-        for i in 0..u64::from(count) {
-            self.record(
-                device,
+        let limits = device.adapter.limits();
+        let count_location = count_buffer.map(|(buffer, offset)| {
+            let (dynamic_offset, offset) = calculate_src_offsets(buffer.size, &limits, offset, 4);
+            (buffer.tracker_index(), dynamic_offset, offset)
+        });
+        let count_buffer = count_buffer.map(|(buffer, _)| buffer);
+
+        let mut run: Option<(BatchKey, Vec<MetadataEntry>)> = None;
+        for i in 0..count {
+            let (key, entry) = entry(
+                &limits,
                 src_buffer,
-                offset + src_stride * i,
+                offset + src_stride * u64::from(i),
                 family,
                 vertex_or_index_limit,
                 instance_limit,
                 dst_resource_index,
-                dst_offset + dst_stride * i,
+                dst_offset + dst_stride * u64::from(i),
+                i,
+                count_location,
             );
+            if !matches!(run, Some((ref k, _)) if *k == key) {
+                if let Some((k, entries)) = run.take() {
+                    self.push(k, src_buffer, count_buffer, entries);
+                }
+                run = Some((key, Vec::new()));
+            }
+            if let Some((_, ref mut entries)) = run {
+                entries.push(entry);
+            }
+        }
+        if let Some((k, entries)) = run {
+            self.push(k, src_buffer, count_buffer, entries);
         }
 
         Ok((dst_resource_index, dst_offset))
     }
 
-    /// BENILLA: upstream's `add` past the destination's allocation, so `add_contiguous` can
-    /// share it: the metadata entry that rewrites the draw at `offset` in `src_buffer` into
-    /// `dst_offset` of destination `dst_resource_index`.
-    #[allow(clippy::too_many_arguments)]
-    fn record(
+    /// BENILLA: upstream's `add` past the entry: `entries` into the batch of `key`, made with
+    /// `src_buffer` and `count_buffer` if it is new.
+    fn push(
         &mut self,
-        device: &Device,
+        key: BatchKey,
         src_buffer: &Arc<crate::resource::Buffer>,
-        offset: u64,
-        family: crate::command::DrawCommandFamily,
-        vertex_or_index_limit: u64,
-        instance_limit: u64,
-        dst_resource_index: usize,
-        dst_offset: u64,
+        count_buffer: Option<&Arc<crate::resource::Buffer>>,
+        entries: impl IntoIterator<Item = MetadataEntry>,
     ) {
-        let buffer_size = src_buffer.size;
-        let limits = device.adapter.limits();
-        let data_size = get_src_stride_of_indirect_args(family);
-        let (src_dynamic_offset, src_offset) =
-            calculate_src_offsets(buffer_size, &limits, offset, data_size);
+        let (_, src_dynamic_offset, dst_resource_index, _, count) = key;
+        self.batches
+            .entry(key)
+            .or_insert_with(|| DrawIndirectValidationBatch {
+                src_buffer: src_buffer.clone(),
+                src_dynamic_offset,
+                dst_resource_index,
+                count_buffer: count_buffer.cloned(),
+                count_dynamic_offset: count.map_or(0, |(_, dynamic_offset)| dynamic_offset),
+                entries: Vec::new(),
 
-        let src_buffer_tracker_index = src_buffer.tracker_index();
-
-        let entry = MetadataEntry::new(
-            family == crate::command::DrawCommandFamily::DrawIndexed,
-            src_offset,
-            dst_offset,
-            vertex_or_index_limit,
-            instance_limit,
-        );
-
-        match self.batches.entry((
-            src_buffer_tracker_index,
-            src_dynamic_offset,
-            dst_resource_index,
-            dst_offset / BUFFER_SIZE.get(),
-        )) {
-            hashbrown::hash_map::Entry::Occupied(mut occupied_entry) => {
-                occupied_entry.get_mut().entries.push(entry)
-            }
-            hashbrown::hash_map::Entry::Vacant(vacant_entry) => {
-                vacant_entry.insert(DrawIndirectValidationBatch {
-                    src_buffer: src_buffer.clone(),
-                    src_dynamic_offset,
-                    dst_resource_index,
-                    entries: vec![entry],
-
-                    // these will be initialized once we accumulated all entries for the batch
-                    staging_buffer_index: 0,
-                    staging_buffer_offset: 0,
-                    metadata_resource_index: 0,
-                    metadata_buffer_offset: 0,
-                });
-            }
-        }
+                // these will be initialized once we accumulated all entries for the batch
+                staging_buffer_index: 0,
+                staging_buffer_offset: 0,
+                metadata_resource_index: 0,
+                metadata_buffer_offset: 0,
+            })
+            .entries
+            .extend(entries);
     }
+}
+
+/// BENILLA: the metadata entry that rewrites the draw at `offset` in `src_buffer` into
+/// `dst_offset` of destination `dst_resource_index`, and the key of its batch. `count` is the
+/// call's count buffer's tracker index, the dynamic offset its binding takes and the count's
+/// offset inside that binding.
+#[allow(clippy::too_many_arguments)]
+fn entry(
+    limits: &Limits,
+    src_buffer: &Arc<crate::resource::Buffer>,
+    offset: u64,
+    family: crate::command::DrawCommandFamily,
+    vertex_or_index_limit: u64,
+    instance_limit: u64,
+    dst_resource_index: usize,
+    dst_offset: u64,
+    draw_index: u32,
+    count: Option<(TrackerIndex, u64, u64)>,
+) -> (BatchKey, MetadataEntry) {
+    let data_size = get_src_stride_of_indirect_args(family);
+    let (src_dynamic_offset, src_offset) =
+        calculate_src_offsets(src_buffer.size, limits, offset, data_size);
+    let count_offset = count.map_or(NO_COUNT, |(_, _, offset)| {
+        u64_offset_to_u32_offset(offset) / 4
+    });
+    let entry = MetadataEntry::new(
+        family == crate::command::DrawCommandFamily::DrawIndexed,
+        src_offset,
+        dst_offset,
+        vertex_or_index_limit,
+        instance_limit,
+        draw_index,
+        count_offset,
+    );
+    let key = (
+        src_buffer.tracker_index(),
+        src_dynamic_offset,
+        dst_resource_index,
+        dst_offset / DST_WINDOW,
+        count.map(|(index, dynamic_offset, _)| (index, dynamic_offset)),
+    );
+    (key, entry)
 }
 
 /// Indirect draw validation doesn't support u64 offsets.

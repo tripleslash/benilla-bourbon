@@ -11,8 +11,15 @@ struct MetadataEntry {
     dst_offset: u32,
     vertex_or_index_limit: u32,
     instance_limit: u32,
+    // BENILLA: the draw's index in its call.
+    draw_index: u32,
+    // BENILLA: for a draw of a multi-draw-indirect-count, the offset into `counts` of the call's
+    // count; `NO_COUNT` for any other draw.
+    count_offset: u32,
 }
 const OFFSET_MASK: u32 = 0x3FFFFFFF;
+// BENILLA: `count_offset` of a draw that has no count.
+const NO_COUNT: u32 = 0xFFFFFFFFu;
 
 struct MetadataRange {
     start: u32,
@@ -26,6 +33,10 @@ var<storage, read> metadata: array<MetadataEntry>;
 var<storage, read> src: array<u32>;
 @group(2) @binding(0)
 var<storage, read_write> dst: array<u32>;
+// BENILLA: the count buffer of the batch's multi-draw-indirect-count draws; another binding of
+// the source layout (the source buffer itself) where the batch has none, never read then.
+@group(3) @binding(0)
+var<storage, read> counts: array<u32>;
 
 fn is_bit_set(data: u32, index: u32) -> bool {
     return ((data >> index) & 1u) == 1u;
@@ -36,6 +47,13 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3u) {
     if global_invocation_id.x >= metadata_range.count { return; }
 
     let metadata = metadata[metadata_range.start + global_invocation_id.x];
+
+    // BENILLA: a draw past its call's count is never executed (`ExecuteIndirect` stops at the
+    // count), so its arguments are not rewritten.
+    if metadata.count_offset != NO_COUNT && metadata.draw_index >= counts[metadata.count_offset] {
+        return;
+    }
+
     var failed = false;
 
     let is_indexed = is_bit_set(metadata.src_offset, 31);

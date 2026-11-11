@@ -3341,7 +3341,8 @@ fn multi_draw_indirect(
         }
 
         impl<'a> DrawContext<'a> {
-            fn add(&mut self, offset: u64) -> Result<DrawData, DeviceError> {
+            // BENILLA: `draw_index`, the draw's index in the call.
+            fn add(&mut self, offset: u64, draw_index: u32) -> Result<DrawData, DeviceError> {
                 let (dst_resource_index, dst_offset) = self.indirect_draw_validation_batcher.add(
                     self.indirect_draw_validation_resources,
                     self.device,
@@ -3350,6 +3351,7 @@ fn multi_draw_indirect(
                     self.family,
                     self.vertex_or_index_limit,
                     self.instance_limit,
+                    draw_index,
                 )?;
                 Ok(DrawData {
                     buffer_index: dst_resource_index,
@@ -3386,10 +3388,10 @@ fn multi_draw_indirect(
             instance_limit: state.vertex.limits.instance_limit,
         };
 
-        let mut current_draw_data = draw_ctx.add(offset)?;
+        let mut current_draw_data = draw_ctx.add(offset, 0)?;
 
         for i in 1..count {
-            let draw_data = draw_ctx.add(offset + stride * i as u64)?;
+            let draw_data = draw_ctx.add(offset + stride * i as u64, i)?;
 
             if draw_data.buffer_index == current_draw_data.buffer_index {
                 #[cfg(debug_assertions)]
@@ -3493,11 +3495,17 @@ fn multi_draw_indirect_count(
     indirect_buffer.check_usage(BufferUsages::INDIRECT)?;
     let indirect_raw = indirect_buffer.try_raw(state.pass.base.snatch_guard)?;
 
-    state
-        .pass
-        .scope
-        .buffers
-        .merge_single(&count_buffer, wgt::BufferUses::INDIRECT)?;
+    // BENILLA: the rewrite reads the count too, and rewrites only the draws below it, so in this
+    // pass the count buffer is also a storage read. Both are read-only uses, which one scope may
+    // hold together.
+    state.pass.scope.buffers.merge_single(
+        &count_buffer,
+        if rewrite {
+            wgt::BufferUses::INDIRECT | wgt::BufferUses::STORAGE_READ_ONLY
+        } else {
+            wgt::BufferUses::INDIRECT
+        },
+    )?;
 
     count_buffer.check_usage(BufferUsages::INDIRECT)?;
     let count_raw = count_buffer.try_raw(state.pass.base.snatch_guard)?;
@@ -3543,8 +3551,9 @@ fn multi_draw_indirect_count(
         ),
     );
 
-    // BENILLA: the rewrite above. All `max_count` draws are rewritten, back to back in one
-    // destination buffer, and `ExecuteIndirect` reads the caller's count as before.
+    // BENILLA: the rewrite above. Room for all `max_count` draws, back to back in one
+    // destination buffer; the rewrite reads the caller's count and rewrites the draws below it,
+    // and `ExecuteIndirect` reads the same count as before.
     let (indirect_raw, offset) = if rewrite {
         let (dst_resource_index, dst_offset) = indirect_draw_validation_batcher.add_contiguous(
             state.pass.base.indirect_draw_validation_resources,
@@ -3559,6 +3568,7 @@ fn multi_draw_indirect_count(
                 state.vertex.limits.vertex_limit
             },
             state.vertex.limits.instance_limit,
+            Some((&count_buffer, count_buffer_offset)),
         )?;
         (
             state

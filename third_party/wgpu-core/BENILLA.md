@@ -44,16 +44,22 @@ comment says so).
 | file | hunk |
 |---|---|
 | `src/device/resource.rs`, `Device::new` | indirect validation is created when the flag is set **or the backend is DX12**, so the rewrite (and the `INDIRECT_BUILTIN_UPDATE` layouts that expect it) always exist there. The flag stays what decides it on every other backend. |
-| `src/command/render.rs`, `multi_draw_indirect_count` (and its call site) | takes the pass's `DrawBatcher`. On DX12, for `Draw` and `DrawIndexed` (not mesh tasks, which upstream does not rewrite either), it records the indirect buffer as a storage read, rewrites all `max_count` draws with `DrawBatcher::add_contiguous`, and calls `draw_*_indirect_count` on the destination buffer and offset with the caller's own count buffer. Off DX12 the function is upstream's. |
+| `src/command/render.rs`, `multi_draw_indirect_count` (and its call site) | takes the pass's `DrawBatcher`. On DX12, for `Draw` and `DrawIndexed` (not mesh tasks, which upstream does not rewrite either), it records the indirect buffer as a storage read and the count buffer as an indirect and a storage read, hands all `max_count` draws and the count's location to `DrawBatcher::add_contiguous`, and calls `draw_*_indirect_count` on the destination buffer and offset with the caller's own count buffer. Off DX12 the function is upstream's. |
+| `src/command/render.rs`, `multi_draw_indirect` | `DrawContext::add` passes each draw's index in the call to `DrawBatcher::add`. |
+| `src/command/bundle.rs`, `DrawIndirect` | passes `DrawBatcher::add` the draw index 0 (a bundle's indirect draw is a single draw). |
 | `src/command/render.rs`, `RenderPassErrorInner` | `IndirectCountTooLargeForRewrite { size, max_binding_size }` (and its `webgpu_error_type` arm, a validation error): the rewritten arguments of one count draw must fit one storage binding, the device's `max_storage_buffer_binding_size` (wgpu-hal's DX12 adapter offers 2 GiB − 1; at the WebGPU default of 128 MiB it is still ~4.2 million indexed draws). |
-| `src/indirect_validation/draw.rs`, `DrawBatcher` | `add` is split into the destination allocation and `record` (upstream's body unchanged); `add_contiguous` allocates one contiguous range for `count` draws and records each one, `src_stride` apart in the source and `dst_stride` apart in the destination. The batch key gains the destination's `BUFFER_SIZE` window (`dst_offset / BUFFER_SIZE`, always 0 in a pooled buffer), so a batch's metadata still fits one metadata buffer when a destination is larger than that. |
+| `src/indirect_validation/validate_draw.wgsl` | `MetadataEntry` gains `draw_index` (the draw's index in its call) and `count_offset` (its call's count in the new group 3, `counts`, or `NO_COUNT`); a draw at or past its count returns before reading or writing anything. |
+| `src/indirect_validation/draw.rs`, `Draw` | the pipeline layout's group 3 is the source layout again, bound per batch to the count buffer's own `indirect_validation_bind_groups.draw` (any `INDIRECT` buffer has it) with the count's dynamic offset, or to the source's group where the batch has no count. The limits it needs become 4 bind groups, 2 dynamic storage buffers and 4 storage buffers a stage. `calculate_src_offsets` also takes a 4-byte datum, the count. |
+| `src/indirect_validation/draw.rs`, `MetadataEntry`, `DrawBatcher` | the entry is 24 bytes (`draw_index`, `count_offset`). `add` takes the draw's index; `add_contiguous` allocates one contiguous range for `count` draws and makes their entries in one pass (`entry`: the limits read once, one batch lookup a run of same-keyed entries, `push`), `src_stride` apart in the source and `dst_stride` apart in the destination, with the count's location. The batch key (`BatchKey`) gains the destination's `DST_WINDOW` (as many 16-byte destinations as 24-byte entries fit one metadata buffer), so a batch's metadata always fits one metadata buffer, and the count buffer with its dynamic offset. |
 | `src/indirect_validation/draw.rs`, `DrawResources` | `get_dst_contiguous_subrange`: a range up to `BUFFER_SIZE` comes from the pool exactly as a single draw's does (`get_subrange_impl` never splits a range); a larger one gets a buffer of its own at that size, after which the next range starts a fresh pooled buffer. `Drop` destroys such buffers instead of pooling them; it runs when the command buffer has completed (`EncoderInFlight` keeps the resources alive until then), which is what makes pooling safe upstream as well. |
 | `src/indirect_validation/draw.rs`, `BufferPoolEntry` | a `size` field, and `create_buffer_and_bind_group` becomes a wrapper over `create_sized_buffer_and_bind_group` (any size of at least `BUFFER_SIZE`, the layout's `min_binding_size`). |
 
-**Why every `max_count` draw is rewritten.** The count lives in a GPU buffer, so the CPU cannot
-know how many draws will run. Rewriting all of them costs one compute invocation each; the ones
-past the count are never executed. The source range is already bounded by `max_count` and checked
-against the buffer's size upstream, so the shader reads nothing out of range.
+**Why every `max_count` draw has an entry, and only the counted ones are rewritten.** The count
+lives in a GPU buffer, so the CPU cannot know how many draws will run: each of the `max_count`
+gets a metadata entry and a compute invocation. The invocation reads the count first and stops at
+a draw past it, which `ExecuteIndirect` never executes, so the rewrite reads and writes only the
+draws that run. The source range is already bounded by `max_count` and checked against the
+buffer's size upstream, so the shader reads nothing out of range.
 
 **The validation that comes with it.** The rewrite is wgpu's indirect validation: a draw whose
 vertex, index or instance range exceeds the bound buffers becomes a no-op instead of undefined
@@ -164,6 +170,12 @@ file, and `Only
 in` the registry copy for cargo's packaging files (`.cargo-ok`, `.cargo_vcs_info.json`,
 `Cargo.lock`, `Cargo.toml.orig`). If the registry copy is absent, fetch
 `https://static.crates.io/crates/wgpu-core/wgpu-core-30.0.1.crate`.
+
+What the rewrite costs a frame: under `WOW_GPU_PASSES`, each static_gx pass has a
+`<pass>_rewrite` span beside it (`static_gx_prepass_rewrite`, `static_gx_rewrite`,
+`static_gx_prepass_late_rewrite`), from an encoder timestamp right before the pass to the pass's
+first, which brackets exactly the "Pre Pass" wgpu-core records ahead of it: the scope's barriers
+and this rewrite. On Vulkan the same span is the barriers alone.
 
 On a DX12 machine: `WOW_STATIC_GX_MDI=0` against `=1` (plain multi-draw), and Bevy's indirect lane
 (`WOW_ENTITY_GPU_CULL=1`, which now uses count draws on DX12), each pictured against Vulkan

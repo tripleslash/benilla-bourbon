@@ -1499,6 +1499,15 @@ pub(crate) fn static_gx_pass(
                 // The prepass has no colour target at all, not an empty slot.
                 let colors = [color];
                 let used = usize::from(colors[0].is_some());
+                let pre = PrePassSpan::begin(
+                    &diagnostics,
+                    render_context.command_encoder(),
+                    if used == 1 {
+                        "static_gx_rewrite"
+                    } else {
+                        "static_gx_prepass_rewrite"
+                    },
+                );
                 let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
                     label: Some(label),
                     color_attachments: &colors[..used],
@@ -1507,6 +1516,7 @@ pub(crate) fn static_gx_pass(
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
+                pre.end(&mut pass);
                 let span = diagnostics.pass_span(&mut pass, label);
                 pass.set_bind_group(0, &view_bind.main, view_offsets);
                 pass.set_bind_group(2, &light_bind.0, &[]);
@@ -1540,6 +1550,11 @@ pub(crate) fn static_gx_pass(
                     cull.pyramid(render_context);
                     cull.late(render_context);
                     // After the early prepass took the clear, the attachment loads.
+                    let pre = PrePassSpan::begin(
+                        &diagnostics,
+                        render_context.command_encoder(),
+                        "static_gx_prepass_late_rewrite",
+                    );
                     let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
                         label: Some("static_gx_prepass_late"),
                         color_attachments: &[],
@@ -1548,6 +1563,7 @@ pub(crate) fn static_gx_pass(
                         occlusion_query_set: None,
                         multiview_mask: None,
                     });
+                    pre.end(&mut pass);
                     let span = diagnostics.pass_span(&mut pass, "static_gx_prepass_late");
                     pass.set_bind_group(0, &view_bind.main, view_offsets);
                     pass.set_bind_group(2, &light_bind.0, &[]);
@@ -1565,6 +1581,40 @@ pub(crate) fn static_gx_pass(
             },
         );
     }
+}
+
+/// fork: the GPU time between a render pass's preceding commands and its first: what wgpu
+/// records for the pass ahead of it, its "Pre Pass" (the scope's barriers, query resets and, on
+/// DX12, the compute rewrite of the pass's indirect and count draws, `third_party/wgpu-core`'s
+/// `indirect_validation`). Begun on the encoder right before the pass and ended by the pass's
+/// first timestamp; `WOW_GPU_PASSES` lists it beside the pass, as `<pass>_rewrite`.
+///
+/// Armed only under `WOW_GPU_PASSES` on native: the render diagnostics are registered in every
+/// build (the journal's GPU columns), and a player's frame takes none of these timestamps.
+struct PrePassSpan<'a, R: RecordDiagnostics>(Option<&'a R>);
+
+impl<'a, R: RecordDiagnostics> PrePassSpan<'a, R> {
+    fn begin(recorder: &'a R, encoder: &mut CommandEncoder, name: &'static str) -> Self {
+        if !pre_pass_spans() {
+            return Self(None);
+        }
+        recorder.begin_time_span(encoder, name.into());
+        Self(Some(recorder))
+    }
+
+    fn end(self, pass: &mut bevy::render::render_phase::TrackedRenderPass<'_>) {
+        if let Some(recorder) = self.0 {
+            recorder.end_pass_span(pass);
+        }
+    }
+}
+
+/// `WOW_GPU_PASSES` is set, on native; read once.
+fn pre_pass_spans() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !cfg!(target_arch = "wasm32") && crate::launch_env::var("WOW_GPU_PASSES").is_some()
+    })
 }
 
 /// The pipelines of `ids` as a table in [`batch::pipe_class`] order, `None` where a key has none;

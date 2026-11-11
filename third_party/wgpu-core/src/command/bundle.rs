@@ -1473,6 +1473,8 @@ impl RenderBundle {
                             vertex_or_index_limit
                                 .expect("finalized render bundle missing vertex_or_index_limit"),
                             instance_limit.expect("finalized render bundle missing instance_limit"),
+                            // BENILLA: a bundle's indirect draw is a single draw.
+                            0,
                         )?;
 
                         let dst_buffer =
