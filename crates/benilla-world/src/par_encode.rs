@@ -110,30 +110,57 @@ where
     R: JobSend + 'static,
     F: Fn(&mut Recorder<'_>, J) -> R + JobSync,
 {
+    record_holding_last(ctx, jobs, false, f).0
+}
+
+/// [`record`], except that with `hold_last` the last job records on an encoder of its own and its
+/// commands come back instead of going to `ctx`, for the caller to hand to a later system's
+/// context: static_gx's occluders record its colour pass with its depth prepass and submit it in
+/// the colour pass's own slot (`static_gx::render::static_gx_occluders`). Without `hold_last` it
+/// is [`record`] exactly, and returns `None`.
+pub(crate) fn record_holding_last<J, R, F>(
+    ctx: &mut RenderContext,
+    mut jobs: Vec<J>,
+    hold_last: bool,
+    f: F,
+) -> (Vec<R>, Option<wgpu::CommandBuffer>)
+where
+    J: JobSend,
+    R: JobSend + 'static,
+    F: Fn(&mut Recorder<'_>, J) -> R + JobSync,
+{
     let device = ctx.render_device().clone();
     let diagnostics = ctx.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
     if jobs.len() > 1 && !serial() {
         #[cfg(not(target_arch = "wasm32"))]
-        return record_parallel(ctx, &device, diagnostics, jobs, &f);
+        return record_parallel(ctx, &device, diagnostics, jobs, hold_last, &f);
     }
+    let held = if hold_last { jobs.pop() } else { None };
     let mut rec = Recorder::new(&device, diagnostics);
-    let out = jobs.into_iter().map(|job| f(&mut rec, job)).collect();
+    let mut out: Vec<R> = jobs.into_iter().map(|job| f(&mut rec, job)).collect();
     if let Some(buffer) = rec.finish() {
         ctx.add_command_buffer(buffer);
     }
-    out
+    let held = held.and_then(|job| {
+        let mut rec = Recorder::new(&device, diagnostics);
+        out.push(f(&mut rec, job));
+        rec.finish()
+    });
+    (out, held)
 }
 
-/// Each job on its own encoder on the compute pool; the buffers go to `ctx` in job order.
+/// Each job on its own encoder on the compute pool; the buffers go to `ctx` in job order, the
+/// last one back to the caller instead with `hold_last`.
 #[cfg(not(target_arch = "wasm32"))]
 fn record_parallel<J, R, F>(
     ctx: &mut RenderContext,
     device: &RenderDevice,
     diagnostics: Option<&DiagnosticsRecorder>,
     jobs: Vec<J>,
+    hold_last: bool,
     f: &F,
-) -> Vec<R>
+) -> (Vec<R>, Option<wgpu::CommandBuffer>)
 where
     J: Send,
     R: Send + 'static,
@@ -156,12 +183,16 @@ where
             scope.spawn(async move { run(job) });
         }
     });
+    let last = done.len().wrapping_sub(1);
     let mut out = Vec::with_capacity(done.len());
-    for (buffer, r) in done {
-        if let Some(buffer) = buffer {
+    let mut held = None;
+    for (i, (buffer, r)) in done.into_iter().enumerate() {
+        if hold_last && i == last {
+            held = buffer;
+        } else if let Some(buffer) = buffer {
             ctx.add_command_buffer(buffer);
         }
         out.push(r);
     }
-    out
+    (out, held)
 }

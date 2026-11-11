@@ -35,10 +35,11 @@
 //! `bevy_core_pipeline` rework. Opaque and alpha-mask phases are binned, not sorted, so there is no
 //! sort for the culling to save either.
 //!
-//! The static world (`static_gx`) draws in the main pass, after Bevy's prepass, so its buildings
-//! reach the pyramid the NEXT frame's early phase tests against but not this frame's late one: an
-//! entity behind a wall is culled early, re-tested late against a pyramid without the wall, and
-//! drawn. [`WorldOccluders`] is where the static world's depth must land to cull it; see there.
+//! The static world (`static_gx`) lays its depth in [`WorldOccluders`], after Bevy's early
+//! prepass and before the early pyramid is built, so its buildings occlude in this frame's late
+//! test as well as the next frame's early one: an entity behind a wall is culled by both. In a
+//! classic frame (no static depth prepass) the buildings draw in the main pass and reach only the
+//! next frame's pyramid; see [`WorldOccluders`].
 
 use bevy::camera::Camera;
 use bevy::core_pipeline::mip_generation::experimental::depth::early_downsample_depth;
@@ -67,22 +68,25 @@ fn decide(lever: Option<&str>) -> bool {
 /// phases lays depth that THIS frame's occlusion test sees: after the early prepass, before the
 /// early pyramid is built from the depth texture (`early_downsample_depth`), in the prepass set.
 ///
-/// `static_gx` belongs here and is not here yet: its depth-only pass is recorded with its colour
-/// pass by one system in `Core3dSystems::MainPass` (`static_gx::render::static_gx_pass`), so the
-/// late test runs without the buildings. What its side must do, through the depth texture alone:
+/// `static_gx` is here (`static_gx::render::static_gx_occluders`), through the depth texture
+/// alone:
 ///
-/// 1. Record the depth-only job (`static_gx_prepass`, the `GX_PREPASSED` twins) from a system of
-///    its own, `.in_set(WorldOccluders)`, on the same `ViewDepthStencilTexture` with `StoreOp::Store`.
-///    The early prepass has already taken the depth clear, so this pass loads. Its pipelines keep
-///    `GreaterEqual` and write; the compare and the reverse-Z target are Bevy's prepass's own.
-/// 2. Leave the colour job where it is, in `MainPass`: its `Equal` test against the depth the
-///    twins laid is unchanged, and entity depth already in the buffer only rejects static
-///    fragments an entity covers, as the opaque pass would have.
+/// 1. The world camera's depth-only job (the GPU cull's two phases, `static_gx_prepass` and
+///    `static_gx_prepass_late`, the `GX_PREPASSED` twins) records and is submitted from this set,
+///    on the same `ViewDepthStencilTexture` with `StoreOp::Store`. The early prepass has already
+///    taken the depth clear, so the pass loads. Its pipelines keep `GreaterEqual` and write; the
+///    compare and the reverse-Z target are Bevy's prepass's own.
+/// 2. The colour job records with it, from the same batch (the cull wrote that batch's argument
+///    ranges), and is submitted in its own slot in `MainPass` by `static_gx_pass`: its `Equal`
+///    test against the depth the twins laid is unchanged, and entity depth already in the buffer
+///    only rejects static fragments an entity covers, as the opaque pass would have.
 /// 3. In a classic frame (no `GX_PREPASSED`, colour pipelines writing depth themselves) nothing
-///    changes; the buildings then reach the pyramid one frame late, as now.
+///    changes: `static_gx_pass` records both in `MainPass`, and the buildings reach the pyramid
+///    one frame late.
 /// 4. The water mirror never takes this set's work: only the world camera has a pyramid.
 ///
-/// Nothing in this set runs today; the set is configured so that system has its slot.
+/// Off the lane (the default) the system is not registered and `static_gx_pass` runs as it always
+/// did.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WorldOccluders;
 

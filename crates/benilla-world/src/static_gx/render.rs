@@ -1347,23 +1347,134 @@ fn prepare_view_bind(
     )));
 }
 
+/// What the static world's passes read of a view.
+type GxViewData = (
+    &'static ViewTarget,
+    &'static ViewDepthStencilTexture,
+    &'static MeshViewBindGroup,
+    // The world camera and the water's planar mirror — a booth bake must never receive world
+    // cells (see the marker).
+    &'static StaticGxView,
+    // fork: GPU cull — the view's matrices and its pyramid's key (`gpu_cull`).
+    &'static ExtractedView,
+);
+
+/// One view's [`GxViewData`].
+type GxViewItems<'a> = (
+    &'a ViewTarget,
+    &'a ViewDepthStencilTexture,
+    &'a MeshViewBindGroup,
+    &'a StaticGxView,
+    &'a ExtractedView,
+);
+
 /// The retained static world: its depth prepass (modern) and colour pass, before the opaque pass.
+///
+/// fork: entity cull — on a view whose prepass [`static_gx_occluders`] recorded (in
+/// `entity_cull::WorldOccluders`), this submits the colour pass that system recorded with it,
+/// here, in the colour pass's own slot, and records nothing.
 pub(crate) fn static_gx_pass(
     world: &World,
-    view: ViewQuery<(
-        &ViewTarget,
-        &ViewDepthStencilTexture,
-        &MeshViewBindGroup,
-        // The world camera and the water's planar mirror — a booth bake must never receive
-        // world cells (see the marker).
-        &StaticGxView,
-        // fork: GPU cull — the view's matrices and its pyramid's key (`gpu_cull`).
-        &ExtractedView,
-    )>,
+    view: ViewQuery<GxViewData>,
     mut render_context: RenderContext,
 ) {
+    #[cfg(not(target_arch = "wasm32"))]
+    let entity = view.entity();
+    let items = view.into_inner();
+    #[cfg(not(target_arch = "wasm32"))]
+    if occluder_view(world, items.3) {
+        if let Some(buffer) = world
+            .get_resource::<GxHeldColour>()
+            .and_then(|held| held.take(entity))
+        {
+            render_context.add_command_buffer(buffer);
+        }
+        return;
+    }
+    record_static_gx(world, items, &mut render_context, None);
+}
+
+/// fork: entity cull — static_gx's depth prepass as an occluder of THIS frame's entity occlusion
+/// test: in `entity_cull::WorldOccluders` (after Bevy's early prepass, before the early pyramid
+/// is built from the depth texture), the world camera's prepass job (the GPU cull's early phase,
+/// `static_gx_prepass`, the pyramid, the late phase, `static_gx_prepass_late`) records and is
+/// submitted, so Bevy's late occlusion test sees the buildings. The colour job records with it,
+/// from the same batch and in parallel as before, and is held for [`static_gx_pass`] to submit
+/// in the colour pass's slot: the batch's argument ranges are the ones the cull wrote, so the
+/// colour pass must draw from the batch the prepass drew from.
+///
+/// The colour job's resources are all made before `Core3d` runs (the view, light and ray-traced
+/// scene groups in `PrepareBindGroups`), and what writes them in `Core3d` (the shadow layers,
+/// the scene's build) is submitted before the colour pass's slot, so recording it here changes no
+/// frame. Its colour attachment is taken here; nothing between this set and the colour pass's
+/// slot writes the view's main texture. Registered only where `entity_cull::enabled()`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn static_gx_occluders(
+    world: &World,
+    view: ViewQuery<GxViewData>,
+    mut render_context: RenderContext,
+) {
+    let entity = view.entity();
+    let items = view.into_inner();
+    if !occluder_view(world, items.3) {
+        return;
+    }
+    // A colour pass held last frame and never submitted (its view drew nothing in its slot)
+    // must not be submitted this frame.
+    if let Some(held) = world.get_resource::<GxHeldColour>() {
+        drop(held.take(entity));
+    }
+    record_static_gx(world, items, &mut render_context, Some(entity));
+}
+
+/// fork: entity cull — whether `marker`'s view records its prepass in
+/// `entity_cull::WorldOccluders` ([`static_gx_occluders`]): the world camera, on the GPU-driven
+/// entity lane (the only view with Bevy's prepass and occlusion test), in a frame with
+/// static_gx's depth prepass. A classic frame's colour pipelines write depth themselves and draw
+/// in the colour pass's slot as before.
+#[cfg(not(target_arch = "wasm32"))]
+fn occluder_view(world: &World, marker: &StaticGxView) -> bool {
+    marker.primary
+        && crate::entity_cull::enabled()
+        && world
+            .get_resource::<GxPipelines>()
+            .is_some_and(|pipes| !pipes.prepass.is_empty())
+}
+
+/// fork: entity cull — the colour pass [`static_gx_occluders`] recorded, per view, until
+/// [`static_gx_pass`] submits it in the colour pass's slot.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Resource, Default)]
+struct GxHeldColour(std::sync::Mutex<HashMap<Entity, wgpu::CommandBuffer>>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl GxHeldColour {
+    fn put(&self, view: Entity, buffer: wgpu::CommandBuffer) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(view, buffer);
+    }
+
+    fn take(&self, view: Entity) -> Option<wgpu::CommandBuffer> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&view)
+    }
+}
+
+/// [`static_gx_pass`]'s body: gather the view's batch and record its prepass and colour jobs.
+/// With `hold`, the colour job's commands go to [`GxHeldColour`] under that view instead of the
+/// context ([`static_gx_occluders`]).
+fn record_static_gx(
+    world: &World,
+    items: GxViewItems<'_>,
+    render_context: &mut RenderContext,
+    hold: Option<Entity>,
+) {
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
-    let (target, depth, view_bind, _marker, extracted) = view.into_inner();
+    let (target, depth, view_bind, _marker, extracted) = items;
     {
         let _t = super::gx_perf_guard(4);
         let gx = world.resource::<GxWorld>();
@@ -1475,9 +1586,12 @@ pub(crate) fn static_gx_pass(
         } else {
             None
         };
-        crate::par_encode::record(
-            &mut render_context,
+        // fork: entity cull — with `hold` the colour job, the last, comes back instead of going
+        // to the context (`static_gx_occluders`).
+        let (_, held) = crate::par_encode::record_holding_last(
+            render_context,
             jobs,
+            hold.is_some(),
             |render_context, (color, depth)| {
                 let diagnostics = render_context.diagnostic_recorder();
                 // fork: GPU cull — the prepass job records phase 1 before its pass, and the
@@ -1580,6 +1694,14 @@ pub(crate) fn static_gx_pass(
                 }
             },
         );
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Some(view), Some(buffer)) = (hold, held) {
+            if let Some(store) = world.get_resource::<GxHeldColour>() {
+                store.put(view, buffer);
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = (hold, held);
     }
 }
 
@@ -1674,6 +1796,23 @@ pub(super) fn build(app: &mut App) {
                 .in_set(Core3dSystems::MainPass)
                 .before(main_opaque_pass_3d),
         );
+    // fork: entity cull — on the GPU-driven entity lane the world camera's static prepass is an
+    // occluder of Bevy's occlusion test (`static_gx_occluders`), and its colour pass, held there,
+    // is submitted by `static_gx_pass`, which therefore runs after it: the two read the world
+    // alone, and `Core3d`'s sets are ordered only where accesses conflict.
+    #[cfg(not(target_arch = "wasm32"))]
+    if crate::entity_cull::enabled() {
+        render_app
+            .init_resource::<GxHeldColour>()
+            .add_systems(
+                Core3d,
+                static_gx_occluders.in_set(crate::entity_cull::WorldOccluders),
+            )
+            .configure_sets(
+                Core3d,
+                crate::entity_cull::WorldOccluders.before(static_gx_pass),
+            );
+    }
     // fork: modern lighting (FORK.md) — static casters for the modern sun.
     modern_shadow::build(render_app);
     // fork: modern lighting (FORK.md, P5) — the same casters voxelized for the probe GI.
