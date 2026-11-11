@@ -217,14 +217,13 @@ mod tests {
         }
 
         let mut cache: ShaderCache<naga::Module, ()> = ShaderCache::new((), naga_module);
-        // The material registers its shader with the world's plugins, which the headless client
-        // does not build; it takes its import libraries (bevy's, `benilla_modern`'s) from there.
-        files.push((
-            "benilla_assets/shaders/liquid_cata.wesl".into(),
-            include_str!("../../benilla-assets/src/shaders/liquid_cata.wesl").into(),
-        ));
+        // The world's plugins embed the material's shader with the libraries it imports.
+        let water = files
+            .iter()
+            .position(|(path, _)| path == "benilla_assets/shaders/liquid_cata.wesl")
+            .expect("liquid_cata.wesl is embedded");
         let water = AssetId::<Shader>::Uuid {
-            uuid: bevy::asset::uuid::Uuid::from_u128(files.len() as u128),
+            uuid: bevy::asset::uuid::Uuid::from_u128(water as u128 + 1),
         };
         for (i, (path, text)) in files.into_iter().enumerate() {
             let id = AssetId::<Shader>::Uuid {
@@ -465,8 +464,8 @@ mod tests {
         let source = server.get_source(AssetSourceId::from("embedded")).unwrap();
         let mut files = Vec::new();
         embedded_shaders(source, std::path::Path::new(""), &mut files);
-        // static_gx and the lane's module, and `benilla_assets`' libraries static_gx imports:
-        // the headless client registers neither the static pass's shaders nor the materials'.
+        // static_gx and the lane's module, and `benilla_assets`' libraries static_gx imports, each
+        // put in or replaced by its source here.
         for (path, text) in [
             (
                 "benilla_assets/shaders/env_frame.wesl",
@@ -608,6 +607,65 @@ mod tests {
                     )
                 });
             }
+        }
+    }
+
+    /// The world's material and pass shaders no other gate composes, composed as the pipeline
+    /// cache composes them, over every embedded library, with the defs of a mesh material and the
+    /// water's screen pass, and validated. The headless client embeds them as the client does
+    /// (`WorldPlugins`), so a shader the world's plugins leave unregistered is missing here too.
+    #[test]
+    fn the_world_shaders_compose_and_validate() {
+        use bevy::shader::{Shader, ShaderCache, ShaderDefVal};
+        let app = crate::game_plugins::schedule_tests::headless_client_unrun();
+        let server = app.world().resource::<AssetServer>();
+        let source = server.get_source(AssetSourceId::from("embedded")).unwrap();
+        let mut files = Vec::new();
+        embedded_shaders(source, std::path::Path::new(""), &mut files);
+        let mut cache: ShaderCache<naga::Module, ()> = ShaderCache::new((), naga_module);
+        let mut ids = std::collections::HashMap::new();
+        for (i, (path, text)) in files.into_iter().enumerate() {
+            let id = AssetId::<Shader>::Uuid {
+                uuid: bevy::asset::uuid::Uuid::from_u128(i as u128 + 1),
+            };
+            cache.set_shader(id, shader_of(text, &path));
+            ids.insert(path, id);
+        }
+        // Each with its mesh's vertex colour or not (terrain's chunks carry one), and the model
+        // and terrain under the modern lighting too.
+        for (path, colors, modern) in [
+            ("benilla_assets/shaders/terrain.wesl", true, false),
+            ("benilla_assets/shaders/terrain.wesl", true, true),
+            ("benilla_assets/shaders/wow_model.wesl", false, false),
+            ("benilla_assets/shaders/wow_model.wesl", true, false),
+            ("benilla_assets/shaders/wow_model.wesl", false, true),
+            ("benilla_assets/shaders/wdl.wesl", false, false),
+            ("benilla_assets/shaders/liquid.wesl", false, false),
+            ("benilla_world/shaders/celestial.wesl", false, false),
+            ("benilla_world/shaders/liquid_screen.wesl", false, false),
+        ] {
+            let mut defs = cata_water_defs(colors);
+            // What bevy's mesh pipeline gives every material it specializes.
+            defs.push("MESH_PIPELINE".into());
+            defs.push("VERTEX_OUTPUT_INSTANCE_INDEX".into());
+            if modern {
+                defs.push("WOW_MODERN".into());
+            }
+            defs.push(ShaderDefVal::UInt("LIQUID_REFLECT_SHIFT".into(), 2));
+            let id = *ids
+                .get(path)
+                .unwrap_or_else(|| panic!("{path} is not embedded by the world's plugins"));
+            let module = cache.get(0, id, &defs).unwrap_or_else(|e| {
+                panic!("{path} (colors {colors}, modern {modern}) does not compose: {e:?}")
+            });
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::default(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| {
+                panic!("{path} (colors {colors}, modern {modern}) does not validate: {e:?}")
+            });
         }
     }
 }
