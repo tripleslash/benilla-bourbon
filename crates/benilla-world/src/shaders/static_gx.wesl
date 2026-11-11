@@ -1,8 +1,8 @@
-// The retained static-world pass: `wow_model.wgsl`'s shading for statics that never fade or
+// The retained static-world pass: `wow_model.wesl`'s shading for statics that never fade or
 // animate (ADT doodads, WMO groups, interior M2 props), with per-vertex flag words and a per-item
 // record in place of materials. `StaticGx::divert` admits opaque and alpha-tested batches with no
-// env map and no depth flags. The light prefix, helpers and lighting lanes copy `wow_model.wgsl`'s
-// and must stay in sync: naga_oil cannot import functions that use another module's bindings.
+// env map and no depth flags. The light prefix, helpers and lighting lanes copy `wow_model.wesl`'s
+// and must stay in sync.
 
 // fork: modern lighting (FORK.md)
 import benilla_world::shaders::modern::color as colorspace;
@@ -13,7 +13,7 @@ import benilla_world::shaders::modern::locallight;
 @if(RT_SHADOWS) import benilla_world::shaders::modern::rt_shadow as rtshadow;
 import benilla_assets::shaders::env_frame;
 // Ported from WarcraftXL (https://github.com/WarcraftXL) by iThorgrim — module
-// wxl-experimental-wind (the shared foliage vertex displacement, `wind_hook.wgsl`).
+// wxl-experimental-wind (the shared foliage vertex displacement, `wind_hook.wesl`).
 import benilla_assets::shaders::wind_hook;
 // fork: rain on surfaces (the Everwood port).
 import benilla_assets::shaders::wet_hook;
@@ -28,13 +28,13 @@ import bevy_pbr::{
 // the shadow textures the retained pass reads).
 
 // **How dark a fully covered character shadow gets** — the same number `benilla-assets`'
-// `terrain.wgsl` and `wow_model.wgsl` carry; move all three together. Scales the SUN term only:
+// `terrain.wesl` and `wow_model.wesl` carry; move all three together. Scales the SUN term only:
 // the subtract-and-restore below keeps the authored ambient, and with it the retained pass's
 // fixture/probe lighting. 0.70, raised from the 0.45 this first shipped at.
 const SHADOW_SUN_FLOOR: f32 = 0.70;
 
 // fork: modern lighting (FORK.md, P6) — the interior look's numbers, carried by
-// value beside `wow_model.wgsl`'s copies; move the two together.
+// value beside `wow_model.wesl`'s copies; move the two together.
 const MODERN_MOCV_EMISSIVE: f32 = 2.0;
 const MODERN_SIDN_GAIN: f32 = 2.5;
 const MODERN_SIDN_DAY: f32 = 0.35;
@@ -45,11 +45,11 @@ const MODERN_ROOM_FLOOR: f32 = 0.30;
 const MODERN_BAKE_FLOOR: f32 = 0.9;
 // fork: the probe field's openness over which a modern interior WMO surface eases from the light
 // outside (below the first) to the room's own (above the second), in place of the line the group's
-// interior flag draws at a cave mouth or a doorway. `wow_model.wgsl` carries the same pair.
+// interior flag draws at a cave mouth or a doorway. `wow_model.wesl` carries the same pair.
 const MODERN_ROOM_OPEN_INSIDE: f32 = 0.02;
 const MODERN_ROOM_OPEN_OUTSIDE: f32 = 0.2;
 
-// Prefix of lighting::global_light's buffer; field order in sync with it and wow_model.wgsl.
+// Prefix of lighting::global_light's buffer; field order in sync with it and wow_model.wesl.
 struct WowLight {
     light_ambient: vec4<f32>,
     light_diffuse: vec4<f32>,
@@ -88,7 +88,7 @@ struct WowLight {
 // is still the right question for the MODEL lane, whose booths and glue scene pack their own
 // classic light blob inside a modern session; this lane has no such view — it draws the world
 // camera and the water mirror, and both read the modern buffer — so here the model is known when
-// the pipeline is built. The heavy branches are `#ifdef`-removed outright; this constant is for the
+// the pipeline is built. The heavy branches are `@if`-removed outright; this constant is for the
 // handful of cheap predicates where a `select` reads better than a preprocessor block.
 @if(WOW_MODERN) {
 const MODERN_FRAME: bool = true;
@@ -339,10 +339,10 @@ const WORD_MATTE: u32 = 268435456u;    // 1 << 28: ShadeSel::Matte, fixed intens
 // fork: an alpha-tested leaf batch of a classified static tree or bush model (foliage wind).
 const WORD_FOLIAGE_WIND: u32 = 536870912u; // 1 << 29
 
-// The alpha-test cutout reference 224/255, as wow_model.wgsl's VANILLA_ALPHA_KEY.
+// The alpha-test cutout reference 224/255, as wow_model.wesl's VANILLA_ALPHA_KEY.
 const VANILLA_ALPHA_KEY: f32 = 0.8784314;
 
-// ---- mirrored law (wow_model.wgsl) ----
+// ---- mirrored law (wow_model.wesl) ----
 
 fn wow_normalize(v: vec3<f32>) -> vec3<f32> {
     let l2 = dot(v, v);
@@ -443,7 +443,7 @@ fn wet_sheen_at(boost: f32, n_lit: vec3<f32>, p: vec3<f32>, shadow: f32) -> vec3
 
 @if(WOW_MODERN) {
 // fork: modern lighting (FORK.md) — a modern pipeline's stage-0 colour, lit per
-// pixel where a classic one takes `vertex_light`'s per-vertex colour: `wow_model.wgsl`'s
+// pixel where a classic one takes `vertex_light`'s per-vertex colour: `wow_model.wesl`'s
 // `modern_lit_rgb` over the flag words. `base` is the bare texel.
 fn modern_gx_rgb(
     in: GxVsOut,
@@ -529,7 +529,7 @@ fn modern_gx_rgb(
     let quad = vec4<f32>(n_lit.x * n_lit.y, n_lit.y * n_lit.z, n_lit.z * n_lit.z, n_lit.x * n_lit.z);
     let x2y2 = n_lit.x * n_lit.x - n_lit.y * n_lit.y;
     if ((in.word & WORD_WMO) != 0u) {
-        // ---- WMO surfaces: wow_model.wgsl's is_wmo branch ----
+        // ---- WMO surfaces: wow_model.wesl's is_wmo branch ----
         let interior = (in.word & WORD_INTERIOR) != 0u;
         let class_int = (in.word & WORD_CLASS_INT) != 0u;
         let class_trans = (in.word & WORD_CLASS_TRANS) != 0u;
@@ -584,7 +584,7 @@ fn modern_gx_rgb(
         }
         var sidn_e = sidn_rgb * (wow_light.grade.x * sidn_w);
         // fork: modern lighting (P6) — a modern window is an emitter, on every class and with a
-        // daylight floor (`wow_model.wgsl` carries the same three numbers).
+        // daylight floor (`wow_model.wesl` carries the same three numbers).
         if (modern_interior && interior) {
             sidn_e = sidn_rgb * (MODERN_SIDN_GAIN * mix(MODERN_SIDN_DAY, 1.0, wow_light.grade.x));
         }
@@ -638,7 +638,7 @@ fn modern_gx_rgb(
         return base * primary;
     }
     if ((in.word & WORD_INTERIOR) != 0u) {
-        // ---- interior M2 props: wow_model.wgsl's interior-prop branch ----
+        // ---- interior M2 props: wow_model.wesl's interior-prop branch ----
         // The spawn-folded SH probe (MODD ambient, fixed-axis diffuse, the group's MOLR lobes)
         // over the fragment normal; its soft wrap is the reference's, not a hard max(N·L, 0).
         let probe = 7u * ((gx_rec(in.word).w >> 1u) & 0x1fffu);
@@ -699,7 +699,7 @@ fn modern_gx_rgb(
 @if(GX_TWO_SIDED) {
 @if(GX_CUTOUT) {
     // fork: modern lighting (FORK.md, P3) — foliage: wrap diffuse + back-lit
-    // transmission under the cascades (see wow_model.wgsl).
+    // transmission under the cascades (see wow_model.wesl).
     {
         let to_eye = normalize(view.world_position.xyz - in.world_position.xyz);
         let nl = dot(n_lit, L);
@@ -713,7 +713,7 @@ fn modern_gx_rgb(
 }
 }
 
-// The lit colour at one vertex, `wow_model.wgsl`'s `vertex_light` over the flag words: the
+// The lit colour at one vertex, `wow_model.wesl`'s `vertex_light` over the flag words: the
 // reference lights per vertex and interpolates the clamped colour, the vertex colour inside the
 // clamp as the lit material. Both faces light from the submitted normal (no
 // GL_LIGHT_MODEL_TWO_SIDE in the reference). `vc` is the vertex colour, white where the batch
@@ -726,7 +726,7 @@ fn vertex_light(normal: vec3<f32>, point_lit: vec4<f32>, vc: vec4<f32>, word: u3
     let sum_nl = wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * ndotl;
     let rec = gx_rec(word);
     if ((word & WORD_WMO) != 0u) {
-        // ---- WMO surfaces: wow_model.wgsl's is_wmo lane ----
+        // ---- WMO surfaces: wow_model.wesl's is_wmo lane ----
         // Interior batch classes: INT is unlit (the bake is the room's light), TRANS's lit pass
         // and EXT take the FFP sum. Exterior groups take it at sun scale 1, no terrain shade and
         // no SH lobe (prog 198/VS 151). WINDOW (MOMT 0x20), interior drawer only: GL_LIGHT0
@@ -760,7 +760,7 @@ fn vertex_light(normal: vec3<f32>, point_lit: vec4<f32>, vc: vec4<f32>, word: u3
     let x2y2 = n_lit.x * n_lit.x - n_lit.y * n_lit.y;
     var e: vec3<f32>;
     if ((word & WORD_INTERIOR) != 0u) {
-        // ---- interior M2 props: wow_model.wgsl's interior-prop lane ----
+        // ---- interior M2 props: wow_model.wesl's interior-prop lane ----
         // The spawn-folded SH probe (MODD ambient, fixed-axis diffuse, the group's MOLR lobes)
         // over the vertex normal; its soft wrap is the reference's, not a hard max(N·L, 0).
         let probe = 7u * ((rec.w >> 1u) & 0x1fffu);
@@ -779,7 +779,7 @@ fn vertex_light(normal: vec3<f32>, point_lit: vec4<f32>, vc: vec4<f32>, word: u3
     } else {
         // ---- exterior ADT doodads and exterior MODD props ----
         // Model2.bls order-2 SH sun lobe at intensity 0.5 Shaded (MCSH), 1.0 Matte, 2.5 Lit,
-        // baked unclamped as wow_model.wgsl's (`0x71c4e0`); only the per-vertex sum clamps.
+        // baked unclamped as wow_model.wesl's (`0x71c4e0`); only the per-vertex sum clamps.
         let shade_t = select(1.0, 0.0, (word & WORD_SHADE_LIT) != 0u);
         let intensity = select(mix(2.5, 0.5, shade_t), 1.0, (word & WORD_MATTE) != 0u);
         let sun_dc = wow_light.grade.yzw * intensity;
@@ -845,13 +845,11 @@ struct GxVsOut {
     @if(GX_BINDLESS) @location(8) @interpolate(flat) region: u32,
 }
 
-// The vertex entry's body. fork: meshlets — the mesh stage (`static_gx_mesh.wgsl`) calls it per
-// output vertex in place of the entry.
-@if(!GX_MESHLETS) {
+// The vertex entry's body. fork: meshlets — the mesh stage (`static_gx_mesh.wesl`) imports it and
+// calls it per output vertex.
 @vertex
 fn vertex(v: GxVertex) -> GxVsOut {
     return gx_vertex(v);
-}
 }
 
 fn gx_vertex(v: GxVertex) -> GxVsOut {
@@ -1030,13 +1028,11 @@ struct GxPrepassOut {
     @if(GX_BINDLESS) @location(3) @interpolate(flat) region: u32,
 }
 
-// The prepass vertex entry's body. fork: meshlets — the mesh stage's prepass entry calls it per
-// output vertex in place of the entry.
-@if(!GX_MESHLETS) {
+// The prepass vertex entry's body. fork: meshlets — the mesh stage's prepass entry imports it and
+// calls it per output vertex.
 @vertex
 fn prepass_vertex(v: GxPrepassVertex) -> GxPrepassOut {
     return gx_prepass_vertex(v);
-}
 }
 
 fn gx_prepass_vertex(v: GxPrepassVertex) -> GxPrepassOut {
@@ -1058,8 +1054,13 @@ fn gx_prepass_vertex(v: GxPrepassVertex) -> GxPrepassOut {
     return out;
 }
 
+// The prepass fragment entry's body, which the meshlet lane's prepass imports too.
 @fragment
 fn prepass_fragment(in: GxPrepassOut) {
+    gx_prepass_fragment(in);
+}
+
+fn gx_prepass_fragment(in: GxPrepassOut) {
 @if(GX_BINDLESS) {
     gx_enter(in.region);
 }
@@ -1079,8 +1080,13 @@ fn prepass_fragment(in: GxPrepassOut) {
 }
 }
 
+// The colour fragment entry's body, which the meshlet lane's colour pass imports too.
 @fragment
 fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
+    return gx_fragment(in);
+}
+
+fn gx_fragment(in: GxVsOut) -> vec4<f32> {
 @if(GX_BINDLESS) {
     gx_enter(in.region);
 }
@@ -1106,7 +1112,7 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // `textureSampleGrad`; `mip_bias` folds in as a scale of 2^bias on the footprint, which is
     // exactly what the bias form does to the LOD.
     // `view.mip_bias` (decision 1639) — the render-scale LOD compensation, 0.0 at native. Carried
-    // here as well as in wow_model.wgsl because this lane draws the same statics through its own
+    // here as well as in wow_model.wesl because this lane draws the same statics through its own
     // sampler rather than through `pbr_input_from_standard_material`, which applies the bias for
     // free; a lane that skipped it would blur out of step with the entity path drawing the
     // identical art.
@@ -1124,11 +1130,11 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
 }
 }
     // Both faces light from the submitted normal (no GL_LIGHT_MODEL_TWO_SIDE in the reference);
-    // this pipeline never negates back faces, so it has no front-face select like wow_model.wgsl.
+    // this pipeline never negates back faces, so it has no front-face select like wow_model.wesl.
     let n_lit = wow_normalize(in.world_normal);
     // fork: modern lighting — the water mirror takes none of the modern lanes
     // (`sunshadow::mirror_view`): no cascades, cloud shadow, probe field, sky map or light grid — the
-    // plain ambient and N·L, and an interior keeps its bake. See `terrain.wgsl` for why.
+    // plain ambient and N·L, and an interior keeps its bake. See `terrain.wesl` for why.
 @if(WOW_MODERN) {
     let modern_lite = sunshadow::mirror_view(modern_block.cascades, view.world_position);
 }

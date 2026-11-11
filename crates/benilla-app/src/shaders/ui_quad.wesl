@@ -1,6 +1,6 @@
 // The player-UI quad material. The reference draws the UI fixed-function into an 8-bit
 // backbuffer, so the fragment tints and premultiplies on gamma bytes and outputs raw gamma for the
-// `(One, OneMinusSrcAlpha)` blend; `ui_gamma.wgsl` decodes once. One pipeline for four modes, a
+// `(One, OneMinusSrcAlpha)` blend; `ui_gamma.wesl` decodes once. One pipeline for four modes, a
 // uniform per mode, and a second pipeline for MOD:
 //   DISABLE  (EGxBlend 0, no blend):                    out = (rgb, 1)     ⇒ rgb
 //   ALPHAKEY (EGxBlend 1, no blend, test a ≥ 224/255):  out = (rgb, 1)     ⇒ rgb, or discard

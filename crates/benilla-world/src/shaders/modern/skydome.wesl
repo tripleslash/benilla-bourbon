@@ -1,5 +1,5 @@
-// The sky dome's dawn/dusk azimuthal warp (`0x6d0f50`), shared by the dome itself (`sky.wgsl`) and
-// the water's reflection of it (`liquid_cata.wgsl`'s `sky_dome`), so the sky the water mirrors is the
+// The sky dome's dawn/dusk azimuthal warp (`0x6d0f50`), shared by the dome itself (`sky.wesl`) and
+// the water's reflection of it (`liquid_cata.wesl`'s `sky_dome`), so the sky the water mirrors is the
 // sky the player sees: one table, one warp, nothing to drift apart.
 
 // Glow `g` for a sun-relative azimuth phase, sampled linearly like `0x6d0f50` from the reference's

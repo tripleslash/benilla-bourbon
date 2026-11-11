@@ -65,7 +65,7 @@ impl MaterialExtension for CloudExt {
     }
 
     fn fragment_shader() -> ShaderRef {
-        "embedded://benilla_world/shaders/cloud.wgsl".into()
+        "embedded://benilla_world/shaders/cloud.wesl".into()
     }
 
     fn specialize(
@@ -215,7 +215,7 @@ pub(super) fn apply_cloud_visibility(
 }
 
 /// Centres the dome on the camera at `far·0.87`, inside the sky dome. The radius only sizes it on
-/// screen; occlusion comes from the far-depth pin in `sky_vertex.wgsl`.
+/// screen; occlusion comes from the far-depth pin in `sky_vertex.wesl`.
 #[allow(clippy::type_complexity)]
 pub(super) fn follow_cloud_dome(
     cam: Query<(&GlobalTransform, &Projection), With<WorldCamera>>,

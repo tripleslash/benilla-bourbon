@@ -96,8 +96,8 @@ fn render_target_for(px: UVec2, window_factor: f32, scale: f32) -> (UVec2, f32) 
 /// clamped at 0 so supersampling keeps its sharper mips.
 ///
 /// WebGPU samplers carry no LOD bias, so it rides [`MipBias`] into the view uniform, which the PBR
-/// lane applies and our own shaders must too (`terrain.wgsl`, `static_gx.wgsl`, `liquid.wgsl`, the
-/// coverage re-sample in `wow_model.wgsl`).
+/// lane applies and our own shaders must too (`terrain.wesl`, `static_gx.wesl`, `liquid.wesl`, the
+/// coverage re-sample in `wow_model.wesl`).
 fn mip_bias(effective: f32) -> f32 {
     effective.log2().min(0.0)
 }

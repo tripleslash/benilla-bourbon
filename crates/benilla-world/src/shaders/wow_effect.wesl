@@ -18,7 +18,7 @@ import benilla_world::shaders::modern::froxelfog;
 import bevy_render::view::View;
 @if(EFFECT_POINTS) import benilla_world::shaders::effect_points;
 
-// Prefix of `lighting::global_light`'s buffer; keep in sync with wow_model.wgsl's copy.
+// Prefix of `lighting::global_light`'s buffer; keep in sync with wow_model.wesl's copy.
 struct WowLight {
     light_ambient: vec4<f32>,
     light_diffuse: vec4<f32>,
@@ -47,7 +47,7 @@ struct WowLight {
 // flag 0x8, 1 scene, 2 black for Add, 3 white for Mod, 4 grey for Mod2x); y rain's forced fog, zw
 // its start and end. `clip`: the target rect in pixels (min.xy, max.xy), the whole target when
 // z <= x; the reference clips a UI model to its widget's viewport, and model panes share an atlas.
-// `shape_a`, `shape_b`: a point draw's shape (`effect_points.wgsl`), zero on every other draw.
+// `shape_a`, `shape_b`: a point draw's shape (`effect_points.wesl`), zero on every other draw.
 struct EffectParams {
     fog: vec4<f32>,
     clip: vec4<f32>,
@@ -89,7 +89,7 @@ const RAIN_FOG_GREY: vec3<f32> = vec3<f32>(0.50196078, 0.50196078, 0.50196078);
 
 @if(EFFECT_POINTS) {
 // fork: perf — a point draw: one instance a point, its corner picked by vertex index
-// (`effect_points.wgsl`).
+// (`effect_points.wesl`).
 struct Vertex {
     @builtin(vertex_index) index: u32,
     @location(0) point_a: vec4<f32>, // world position, the shape's scalar
@@ -427,7 +427,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
     // fork: modern lighting (FORK.md) — decode after the additive premultiply (in
     // gamma, like the classic fold: decoding first inflates a soft halo by α^(1/2.2)); Mod2x keeps
-    // its 0.5-grey identity neutral in linear (see wow_model.wgsl).
+    // its 0.5-grey identity neutral in linear (see wow_model.wesl).
     var add_alpha = c.a;
     if (wow_light.point_count.y > 0.5) {
 @if(BLEND_ADD) {

@@ -19,7 +19,7 @@
 //! The GPU cull stays the one draw-level cull (a draw outside the frustum or behind the pyramid
 //! never launches a task). The task stage adds the meshlet grain on its survivors: each meshlet's
 //! sphere against the frustum, its normal cone against the eye, and its box against the same
-//! pyramid in the same two phases (`static_gx_mesh.wgsl`, the header). A view keeps one bit per
+//! pyramid in the same two phases (`static_gx_mesh.wesl`, the header). A view keeps one bit per
 //! meshlet of the table ([`MeshletView`], `drawn`), written by the two prepasses and read by the
 //! colour pass, so the colour pass shades exactly the meshlets whose depth the prepasses laid.
 //!
@@ -71,7 +71,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// The lane's startup decision.
 static LANE: AtomicBool = AtomicBool::new(false);
 
-/// The task stage's modes, the immediates' second word (`static_gx_mesh.wgsl`, `GX_MODE_*`).
+/// The task stage's modes, the immediates' second word (`static_gx_mesh.wesl`, `GX_MODE_*`).
 pub(super) const MODE_EARLY: u32 = 0;
 pub(super) const MODE_LATE: u32 = 1;
 pub(super) const MODE_COLOUR: u32 = 2;
@@ -82,21 +82,16 @@ const IMMEDIATE_BYTES: u32 = 8;
 /// The task entry point of every mesh pipeline.
 const TASK_ENTRY: &str = "meshlet_task";
 
-/// The lane's shader: `static_gx.wgsl` under `GX_MESHLETS` with the mesh entries appended
-/// (`static_gx_mesh.wgsl`), built from the sources at startup, so a hot reload of either file
-/// does not reach it.
+/// The lane's shader, `static_gx_mesh.wesl`: a WESL module importing `static_gx.wesl`'s vertex
+/// and fragment bodies, inserted from its source at startup, so a hot reload of it does not reach
+/// the lane (one of `static_gx.wesl` does, through the import).
 pub(super) const MESH_SHADER: Handle<Shader> =
     bevy::asset::uuid_handle!("4b7d2c91-e3a5-4f08-b6d1-9c2e5a7f3d18");
 
-/// The composed source: the mesh-shader and draw-index enables must lead the module, and naga
-/// refuses either on a device without it, so they are never in `static_gx.wgsl` itself.
-const MESH_SOURCE: &str = concat!(
-    "enable wgpu_mesh_shader, draw_index;\n",
-    "#import benilla_modern::gx_occlusion\n",
-    include_str!("../../shaders/static_gx.wgsl"),
-    "\n",
-    include_str!("../../shaders/modern/static_gx_mesh.wgsl"),
-);
+/// The lane's path, whose module path (`benilla_world::shaders::modern::static_gx_mesh`) is its
+/// file's, as an embedded shader's is.
+const MESH_PATH: &str = "embedded://benilla_world/shaders/modern/static_gx_mesh.wesl";
+const MESH_SOURCE: &str = include_str!("../../shaders/modern/static_gx_mesh.wesl");
 
 /// `WOW_GX_MESHLETS=0` turns the lane off: static_gx draws through the GPU cull's path.
 fn switched_on() -> bool {
@@ -178,7 +173,7 @@ pub(super) fn span(
     Some((a, b.checked_sub(a)?))
 }
 
-/// The mesh group (`static_gx_mesh.wgsl`, `GX_MESH_GROUP`): the cull's view uniform, the meshlet
+/// The mesh group (`static_gx_mesh.wesl`, `GX_MESH_GROUP`): the cull's view uniform, the meshlet
 /// table, vertices and triangles, the draw's vertex slab, the candidates, the mesh meta, the
 /// candidate refs, the view's drawn bits, its pyramid and its counters. Task and mesh stages.
 pub(super) fn mesh_layout() -> BindGroupLayoutDescriptor {
@@ -204,18 +199,17 @@ pub(super) fn mesh_layout() -> BindGroupLayoutDescriptor {
 }
 
 /// Queue the mesh twin of a static_gx pipeline: the same fragment, depth, raster and layout, the
-/// mesh group appended (its index is `desc`'s group count), the task and mesh stages
-/// (`meshlet_task` and `entry`) of [`MESH_SHADER`] under `desc`'s defs and `GX_MESHLETS`, and the
-/// immediates.
+/// mesh group appended (its index is `desc`'s group count, `GX_MESH_GROUP`), the task and mesh
+/// stages (`meshlet_task` and `entry`) of [`MESH_SHADER`] under `desc`'s defs, and the immediates.
 pub(super) fn queue_pipeline(
     cache: &PipelineCache,
     desc: &RenderPipelineDescriptor,
     entry: &'static str,
 ) -> CachedRenderPipelineId {
-    let defs = [
-        ShaderDefVal::from("GX_MESHLETS"),
-        ShaderDefVal::UInt("GX_MESH_GROUP".into(), desc.layout.len() as u32),
-    ];
+    let defs = [ShaderDefVal::UInt(
+        "GX_MESH_GROUP".into(),
+        desc.layout.len() as u32,
+    )];
     let mut layout = desc.layout.clone();
     layout.push(mesh_layout());
     let mut stage_defs = desc.vertex.shader_defs.clone();
@@ -518,10 +512,7 @@ impl<'w> GxMeshletPass<'w> {
 pub(super) fn build(app: &mut App) {
     if let Some(mut shaders) = app.world_mut().get_resource_mut::<Assets<Shader>>() {
         // A UUID id never fails to insert.
-        let _ = shaders.insert(
-            MESH_SHADER.id(),
-            Shader::from_wgsl(MESH_SOURCE, "benilla_world/shaders/static_gx_mesh.wgsl"),
-        );
+        let _ = shaders.insert(MESH_SHADER.id(), Shader::from_wesl(MESH_SOURCE, MESH_PATH));
     }
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
@@ -556,8 +547,12 @@ mod tests {
         MESHLET_TRIANGLES, MESHLET_VERTICES, MESH_THREADS, TASK_MESHLETS, TASK_PAYLOAD_BYTES,
     };
 
-    const MESH: &str = include_str!("../../shaders/modern/static_gx_mesh.wgsl");
-    const CULL: &str = include_str!("../../shaders/modern/gx_cull.wgsl");
+    const MESH: &str = include_str!("../../shaders/modern/static_gx_mesh.wesl");
+    const FRAGMENT_ENTRY: &str =
+        "@fragment\nfn fragment(in: GxVsOut) -> @location(0) vec4<f32> {\n    return gx_fragment(in);\n}\n";
+    const PREPASS_FRAGMENT_ENTRY: &str =
+        "@fragment\nfn prepass_fragment(in: GxPrepassOut) {\n    gx_prepass_fragment(in);\n}\n";
+    const CULL: &str = include_str!("../../shaders/modern/gx_cull.wesl");
 
     /// The task and mesh stages are sized as the meshlets are cut, and the payload, modes and
     /// immediates are the Rust side's.
@@ -621,17 +616,19 @@ mod tests {
         assert!(CULL.contains(&format!("const TASK_MESHLETS: u32 = {TASK_MESHLETS}u;")));
         assert!(CULL.contains("const LATE_DRAW: u32 = 0x80000000u;"));
         assert!(MESH.contains("const GX_LATE_DRAW: u32 = 0x80000000u;"));
-        assert!(MESH_SOURCE.starts_with("enable wgpu_mesh_shader, draw_index;\n"));
+        assert!(MESH.contains("\nenable wgpu_mesh_shader, draw_index;\n"));
     }
 
     /// The mesh group declares what `mesh_layout` lays out, and the cull's mesh variant the three
     /// bindings after the cull's ten.
     #[test]
     fn the_mesh_group_agrees_with_its_layout() {
-        let bindings = MESH.matches("@group(#{GX_MESH_GROUP}) @binding(").count();
+        let bindings = MESH
+            .matches("@group(constants::GX_MESH_GROUP) @binding(")
+            .count();
         assert_eq!(bindings, mesh_layout().entries.len());
         for i in 0..bindings {
-            assert!(MESH.contains(&format!("@group(#{{GX_MESH_GROUP}}) @binding({i})")));
+            assert!(MESH.contains(&format!("@group(constants::GX_MESH_GROUP) @binding({i})")));
         }
         for i in 10..13 {
             assert!(CULL.contains(&format!("@group(0) @binding({i})")));
@@ -669,15 +666,33 @@ mod tests {
         ] {
             assert!(MESH.contains(line), "`{line}` is gone");
         }
-        let src = include_str!("../../shaders/static_gx.wgsl");
-        assert!(src.contains(
-            "#ifdef GX_MESHLETS\nfn gx_vertex(v: GxVertex) -> GxVsOut {\n#else\n@vertex\n\
-             fn vertex(v: GxVertex) -> GxVsOut {\n#endif\n"
-        ));
-        assert!(src.contains(
-            "#ifdef GX_MESHLETS\nfn gx_prepass_vertex(v: GxPrepassVertex) -> GxPrepassOut {\n\
-             #else\n@vertex\nfn prepass_vertex(v: GxPrepassVertex) -> GxPrepassOut {\n#endif\n"
-        ));
+        let src = include_str!("../../shaders/static_gx.wesl");
+        // static_gx's entries are wrappers of the bodies the lane imports, so both run one code.
+        for (entry, body) in [
+            (
+                "@vertex\nfn vertex(v: GxVertex) -> GxVsOut {\n    return gx_vertex(v);\n}\n",
+                "\nfn gx_vertex(v: GxVertex) -> GxVsOut {\n",
+            ),
+            (
+                "@vertex\nfn prepass_vertex(v: GxPrepassVertex) -> GxPrepassOut {\n    \
+                 return gx_prepass_vertex(v);\n}\n",
+                "\nfn gx_prepass_vertex(v: GxPrepassVertex) -> GxPrepassOut {\n",
+            ),
+            (
+                FRAGMENT_ENTRY,
+                "\nfn gx_fragment(in: GxVsOut) -> vec4<f32> {\n",
+            ),
+            (
+                PREPASS_FRAGMENT_ENTRY,
+                "\nfn gx_prepass_fragment(in: GxPrepassOut) {\n",
+            ),
+        ] {
+            assert!(src.contains(entry), "`{entry}` is gone");
+            assert!(src.contains(body), "`{body}` is gone");
+        }
+        for entry in [FRAGMENT_ENTRY, PREPASS_FRAGMENT_ENTRY] {
+            assert!(MESH.contains(entry), "the lane's `{entry}` is gone");
+        }
     }
 
     /// Three items of 2, 0 and 1 meshlets, assembled in the order 2, 0, 1 with 6, 10 and 0

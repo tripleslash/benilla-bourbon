@@ -60,7 +60,7 @@ impl PluginGroup for WorldPlugins {
             // The ground-fx decal lane, which orders itself on the billboard place set.
             .add(crate::ground_fx::plugin)
             .add(crate::frame_pace::plugin)
-            // The skin palette: every rig's joint matrices, skinned in `wow_model.wgsl` in place of
+            // The skin palette: every rig's joint matrices, skinned in `wow_model.wesl` in place of
             // Bevy's `SkinnedMesh`.
             .add(crate::rig_palette::plugin)
             // The rig machinery the palette reads: pose evaluation, composition and the global

@@ -66,7 +66,7 @@ pub struct ModelSubmesh {
     pub window: bool,
     /// Blends additively (M2 glow cards and coronae).
     pub additive: bool,
-    /// Sphere-mapped: `wow_model.wgsl` derives the UV from the view-space reflection.
+    /// Sphere-mapped: `wow_model.wesl` derives the UV from the view-space reflection.
     pub env_map: bool,
     /// The second texture stage the shader draws, a two-texture M2 unit's ([`Stage1`]).
     pub stage1: Option<Stage1>,
@@ -102,7 +102,7 @@ pub struct ModelSubmesh {
     pub ground_quad: Option<benilla_formats::GroundQuad>,
 }
 
-/// A batch's second texture stage as `wow_model.wgsl` draws it: the texture at the generated
+/// A batch's second texture stage as `wow_model.wesl` draws it: the texture at the generated
 /// environment coordinate or on the vertex's UV set 1, combined with the stage-0 result by its gx
 /// preset ([`benilla_formats::TextureStage`]).
 #[derive(Clone)]
@@ -156,7 +156,7 @@ fn build_submesh_mesh_as(
     let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, usages);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, sub.uvs.clone());
-    // UV set 1, which a stage 1 on a UV set reads (`wow_model.wgsl`, `uv_b`).
+    // UV set 1, which a stage 1 on a UV set reads (`wow_model.wesl`, `uv_b`).
     if !sub.uvs2.is_empty() && sub.uvs2.len() == sub.positions.len() {
         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, sub.uvs2.clone());
     }
@@ -202,7 +202,7 @@ pub const ATTRIBUTE_WOW_JOINT_WEIGHT: bevy::mesh::MeshVertexAttribute =
     );
 
 /// A merged blob's per-vertex fade sphere (world centre, fade radius), the same on every vertex
-/// of one placement, from which `wow_model.wgsl` fades each placement. Shader location 12.
+/// of one placement, from which `wow_model.wesl` fades each placement. Shader location 12.
 pub const ATTRIBUTE_WOW_FADE_SPHERE: bevy::mesh::MeshVertexAttribute =
     bevy::mesh::MeshVertexAttribute::new(
         "Wow_FadeSphere",
@@ -232,7 +232,7 @@ pub fn submesh_to_skinned_mesh(sub: &RenderSubmesh) -> Mesh {
 }
 
 /// A joint index with this bit names a rider row of the slot, after the body's bones: a rigid
-/// attached model drawn through its wearer's slot instead of one of its own. `wow_model.wgsl`'s
+/// attached model drawn through its wearer's slot instead of one of its own. `wow_model.wesl`'s
 /// `wow_rig_row` decodes it.
 pub const RIDER_JOINT_BIT: u16 = 0x8000;
 

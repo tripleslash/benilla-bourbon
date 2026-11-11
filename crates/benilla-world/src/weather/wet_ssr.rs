@@ -123,7 +123,7 @@ fn init_pipelines(
         mapped_at_creation: false,
     });
     commands.insert_resource(WetSsrPipelines {
-        shader: asset_server.load("embedded://benilla_world/shaders/wet_ssr.wgsl"),
+        shader: asset_server.load("embedded://benilla_world/shaders/wet_ssr.wesl"),
         layout,
         variants: Default::default(),
         params,

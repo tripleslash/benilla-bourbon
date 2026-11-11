@@ -164,7 +164,7 @@ pub(super) fn bake_stage(
 /// The texture transform, `uv' = R_q((uv + t − p) ⊙ s) + p` with `p = (½, ½)` (`0x715f25`):
 /// translate, scale about the pivot, then rotate about it. `R_q`, the raw quaternion's rotation,
 /// is read here as its z-rotation alone, `c = 1 − 2z²`, `s = 2zw`, `+θ` counter-clockwise with `u`
-/// right and `v` up: no shipped rotation has x or y components. `wow_model.wgsl`'s UV fold must
+/// right and `v` up: no shipped rotation has x or y components. `wow_model.wesl`'s UV fold must
 /// stay in step.
 pub fn uv_transform(uv: [f32; 2], t: [f32; 2], q: [f32; 4], s: [f32; 2]) -> [f32; 2] {
     let (c, sn) = rotation_2x2(q);

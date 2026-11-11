@@ -1,4 +1,4 @@
-// **The cata liquid path's screen-space inputs** — the three textures `liquid_cata.wgsl` reads that
+// **The cata liquid path's screen-space inputs** — the three textures `liquid_cata.wesl` reads that
 // the opaque world has to be finished before anything can produce.
 //
 // The reference calls these `"LiquidProc BackBufferTex"`, `"blurredBack"` and the depth
@@ -113,7 +113,7 @@ fn fs_blur_reflect(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 /// first, from the level above (`blur_src`, a one-level view of it): four bilinear taps at ±0.75 of a
 /// source texel, a [1 3 3 1] tent on each axis, so level `k` is blurred about `1.2 · 2^k` of its
 /// level-0 texels — the `σ` the water's rough mirror read picks its level by
-/// (`liquid_cata.wgsl`'s `MIRROR_CHAIN_SIGMA0`). An explicit level, so no derivative is asked for.
+/// (`liquid_cata.wesl`'s `MIRROR_CHAIN_SIGMA0`). An explicit level, so no derivative is asked for.
 @fragment
 fn fs_mip_down(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let o = 0.75 / vec2<f32>(textureDimensions(blur_src));

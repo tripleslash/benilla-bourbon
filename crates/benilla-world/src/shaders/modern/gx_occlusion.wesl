@@ -1,6 +1,6 @@
 // fork: static_gx's Hi-Z tests (`static_gx/render/gpu_cull.rs`): the view uniform, the frustum
-// test and the pyramid test a box goes through, shared by the draw cull (`gx_cull.wgsl`) and the
-// meshlet cull in the task stage (`static_gx_mesh.wgsl`). Native only.
+// test and the pyramid test a box goes through, shared by the draw cull (`gx_cull.wesl`) and the
+// meshlet cull in the task stage (`static_gx_mesh.wesl`). Native only.
 //
 // Depth is reverse-Z: larger is nearer, and the pyramid keeps each texel's farthest (minimum).
 

@@ -1,10 +1,19 @@
-// fork: static_gx's mesh-shader lane (`static_gx/render/meshlets.rs`), native only. Not a module
-// of its own: the lane's shader is `enable wgpu_mesh_shader, draw_index;`, the
-// `benilla_modern::gx_occlusion` import, `static_gx.wgsl` and then this file, composed under
-// `GX_MESHLETS` (with `GX_BINDLESS`), so the mesh stage runs `vertex` / `prepass_vertex`'s own
-// bodies (`gx_vertex`, `gx_prepass_vertex`) and the fragments are static_gx's.
-//
-// One multi-draw per bucket, one draw per survivor of C's draw cull (`gx_cull.wgsl`): the task
+// fork: static_gx's mesh-shader lane (`static_gx/render/meshlets.rs`), native only, composed under
+// `GX_MESHLETS` with `static_gx.wesl`'s defs: the task and mesh stages run static_gx's vertex
+// bodies (`gx_vertex`, `gx_prepass_vertex`) per output vertex, and the fragments are static_gx's
+// bodies behind this module's own entries. The enables are here alone: naga refuses either on a
+// device without it, so `static_gx.wesl` never says them.
+
+import benilla_world::shaders::static_gx::{
+    GxVertex, GxPrepassVertex, GxVsOut, GxPrepassOut,
+    gx_vertex, gx_prepass_vertex, gx_fragment, gx_prepass_fragment,
+};
+import benilla_world::shaders::modern::gx_occlusion;
+import benilla_world::shaders::modern::gx_bindless;
+
+enable wgpu_mesh_shader, draw_index;
+
+// One multi-draw per bucket, one draw per survivor of C's draw cull (`gx_cull.wesl`): the task
 // stage runs one workgroup per `TASK_MESHLETS` of the draw's meshlets, one thread a meshlet, and
 // launches one mesh workgroup per meshlet it keeps; the mesh stage writes the meshlet's vertices
 // through the vertex path and its triangles from the meshlet table.
@@ -31,7 +40,7 @@ const GX_MODE_EARLY: u32 = 0u;
 const GX_MODE_LATE: u32 = 1u;
 const GX_MODE_COLOUR: u32 = 2u;
 
-// A mesh ref's bit for a draw C's late phase found (`gx_cull.wgsl`).
+// A mesh ref's bit for a draw C's late phase found (`gx_cull.wesl`).
 const GX_LATE_DRAW: u32 = 0x80000000u;
 
 // Words of one static vertex in the slab (`render.rs`, `vertex_layout`: 64 bytes).
@@ -294,4 +303,15 @@ fn meshlet_mesh_prepass(
     for (var t = lane; t < triangles; t += GX_MESH_THREADS) {
         gx_prepass_out.primitives[t].indices = gx_triangle(head.y + t);
     }
+}
+
+// The fragment entries: static_gx's, whose module's own entries an import does not carry.
+@fragment
+fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
+    return gx_fragment(in);
+}
+
+@fragment
+fn prepass_fragment(in: GxPrepassOut) {
+    gx_prepass_fragment(in);
 }

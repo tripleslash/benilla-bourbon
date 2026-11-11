@@ -81,7 +81,7 @@ pub struct MediaInputs {
     pub added_air: f32,
 }
 
-/// The solved medium, in the units `froxelfog.wgsl` reads.
+/// The solved medium, in the units `froxelfog.wesl` reads.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Media {
     /// Fog extinction at the reference height (1/yd along the ray).

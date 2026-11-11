@@ -35,7 +35,7 @@
 //! decodes (DXT1, 64², no alpha) to a plain radial falloff — 255 at the centre, 0 at the rim,
 //! symmetric on both axes, profile `1.0, 0.976, 0.804, 0.514, 0.192, 0.031, 0.008, 0` at eighths of
 //! the radius. That is a smoothstep applied twice, to within a couple of levels. Shipping a texture
-//! of a function this file can write in one line would be dead weight, so `liquid_ripple.wgsl`
+//! of a function this file can write in one line would be dead weight, so `liquid_ripple.wesl`
 //! evaluates the curve instead and [`the_ripple_kernel_matches_the_reference_profile`] holds it to
 //! the measured numbers.
 //!
@@ -122,13 +122,13 @@ pub(super) fn bump_image() -> Image {
 }
 
 /// The variance a bump texel's alpha can carry: `a² · BUMP_VAR_MAX` is the slope variance per axis
-/// its footprint averaged away (`liquid_cata.wgsl`'s `BUMP_VAR_MAX`, which a test holds to this).
+/// its footprint averaged away (`liquid_cata.wesl`'s `BUMP_VAR_MAX`, which a test holds to this).
 /// Square-root encoded, so the small variances of a shallow sheet keep their precision.
 pub(super) const BUMP_VAR_MAX: f32 = 0.05;
 
 /// The bump map's mip chain, level 0 first, and its level count: each level the box average of the
 /// level-0 normals under it, and in ALPHA the slope variance per axis that averaging took out —
-/// `sqrt(σ² / BUMP_VAR_MAX)`, exactly 0 at level 0. `liquid_cata.wgsl`'s `bump_gradient` reads it
+/// `sqrt(σ² / BUMP_VAR_MAX)`, exactly 0 at level 0. `liquid_cata.wesl`'s `bump_gradient` reads it
 /// back as roughness, so the far water's gloss widens as its ripples blur away rather than staying
 /// a mirror of the average normal.
 ///
@@ -644,7 +644,7 @@ mod tests {
         }
     }
 
-    /// The ripple kernel `liquid_ripple.wgsl` evaluates IS the reference's `perturbTex.blp`.
+    /// The ripple kernel `liquid_ripple.wesl` evaluates IS the reference's `perturbTex.blp`.
     ///
     /// The shader stamps a disturbance with `smoothstep(smoothstep(1 − r))` rather than sampling a
     /// texture. This is the evidence for that substitution: the numbers below were decoded straight
@@ -655,7 +655,7 @@ mod tests {
     /// smooth radial falloff and does not drift into a cone, a step or a disc.
     #[test]
     fn the_ripple_kernel_matches_the_reference_profile() {
-        // `liquid_ripple.wgsl`'s `kernel`, in Rust.
+        // `liquid_ripple.wesl`'s `kernel`, in Rust.
         fn kernel(r: f32) -> f32 {
             let t = (1.0 - r).clamp(0.0, 1.0);
             let a = super::smoothstep(t);
@@ -677,7 +677,7 @@ mod tests {
 
     /// The mip chain is complete, its level 0 is the committed sheet with no variance in its alpha,
     /// and its coarser levels carry the slope variance they average away, more of it the more they
-    /// average — the roughness `liquid_cata.wgsl` reads back at the scale `BUMP_VAR_MAX` it shares
+    /// average — the roughness `liquid_cata.wesl` reads back at the scale `BUMP_VAR_MAX` it shares
     /// with this file.
     #[test]
     fn the_bump_mips_carry_the_variance_they_average_away() {
@@ -723,11 +723,11 @@ mod tests {
             mean_var(8) < super::BUMP_VAR_MAX,
             "the whole sheet's variance fits the encoding's range"
         );
-        let cata = include_str!("../../../benilla-assets/src/shaders/liquid_cata.wgsl");
+        let cata = include_str!("../../../benilla-assets/src/shaders/liquid_cata.wesl");
         let want = format!("const BUMP_VAR_MAX: f32 = {};", super::BUMP_VAR_MAX);
         assert!(
             cata.contains(&want),
-            "liquid_cata.wgsl must declare `{want}`"
+            "liquid_cata.wesl must declare `{want}`"
         );
     }
 

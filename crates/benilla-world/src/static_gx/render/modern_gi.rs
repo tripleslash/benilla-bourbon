@@ -13,7 +13,7 @@
 //!    content that streamed in or out, one union box per level a frame. Nothing else is touched,
 //!    so a standing camera pays nothing. fork: where the device rasterizes conservatively
 //!    ([`conservative_lane`]), each sweep is one pixel a voxel over the box's own extent, and a
-//!    triangle writes only in the sweep down its dominant axis (`static_gx_voxel.wgsl`).
+//!    triangle writes only in the sweep down its dominant axis (`static_gx_voxel.wesl`).
 //! 2. **The terrain heightfield.** The resident terrain cells drawn top-down into a depth map (the
 //!    plan's `gi/heightfield.rs`), which is what terrain hits and every ray past the clipmap use.
 //!    Terrain is not voxelized: it is a height per column by construction, and a 2 yd map holds it
@@ -244,7 +244,7 @@ fn init_gi_pipelines(
         store_layout,
         height_layout,
         voxel_shader: asset_server
-            .load("embedded://benilla_world/shaders/modern/static_gx_voxel.wgsl"),
+            .load("embedded://benilla_world/shaders/modern/static_gx_voxel.wesl"),
         height_shader: asset_server
             .load("embedded://benilla_world/shaders/modern/terrain_shadow.wgsl"),
         raster: GiMap::default(),

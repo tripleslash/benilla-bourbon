@@ -1,5 +1,5 @@
 // **The Cataclysm liquid renderer** — a port of `waterDetail 2`'s `ProcWater` + `ProcWaterAbove` /
-// `ProcWaterBelow` program family to WGSL. The 1.12.1 renderer is `liquid.wgsl` and is untouched;
+// `ProcWaterBelow` program family to WGSL. The 1.12.1 renderer is `liquid.wesl` and is untouched;
 // which one a surface wears is the `waterDetail` CVar, and `liquid/surface.rs` owns the swap.
 //
 // ## Provenance
@@ -57,7 +57,7 @@
 // their two endpoints live on the shared global-light buffer — `Light.dbc` `LightIntBand` rows
 // 16/17 (river/lake) and 14/15 (ocean), repacked every frame by `lighting::global_light`. Lerping
 // those directly is the same function with one fewer copy, and it keeps cata water tracking the
-// day/night clock and the zone for free, exactly as `liquid.wgsl` does.
+// day/night clock and the zone for free, exactly as `liquid.wesl` does.
 //
 // ## Axes
 //
@@ -180,7 +180,7 @@ struct LiquidParams {
 };
 @group(constants::MATERIAL_BIND_GROUP) @binding(102) var<uniform> w: LiquidParams;
 
-// The shared global light — the same buffer and the same row layout `liquid.wgsl` reads. See that
+// The shared global light — the same buffer and the same row layout `liquid.wesl` reads. See that
 // file's header for what each row is and who packs it.
 struct WowLight {
     light_ambient: vec4<f32>,
@@ -231,7 +231,7 @@ var<private> modern_prefog_share: vec3<f32>;
 /// simulation and writes this every frame. Only the first two rows are read here; the rest is the
 /// wave step's own state and is declared so the two shaders agree on the layout.
 ///
-/// **`stamps` is one ABI with `ripple.rs`'s `MAX_STAMPS` and `liquid_ripple.wgsl`'s — THREE copies
+/// **`stamps` is one ABI with `ripple.rs`'s `MAX_STAMPS` and `liquid_ripple.wesl`'s — THREE copies
 /// of one number.** This one once sat at 16 while the other two moved to 48, survivable then only
 /// because this program read `placement` and `params` and stopped — a declared struct SMALLER than
 /// the buffer binds and runs, so the mismatch produced no error anywhere. fork: it now reads the sky
@@ -253,7 +253,7 @@ struct Ripple {
 };
 @group(constants::MATERIAL_BIND_GROUP) @binding(91) var<storage, read> ripple: Ripple;
 
-/// fork: modern lighting — the sky dome's colour along a direction: `sky.wgsl`'s elevation gradient,
+/// fork: modern lighting — the sky dome's colour along a direction: `sky.wesl`'s elevation gradient,
 /// piecewise-linear through the five stops at their geometric elevations and the fog colour at and
 /// below the horizon (the dawn/dusk azimuth warp and the sun's glow are left to the dome — the sun
 /// itself reaches the water as the glitter). In the reflection's lane: gamma, like the mirror read.
@@ -345,7 +345,7 @@ struct VsOut {
     @location(7) foam_uv: vec4<f32>,
 }
 
-// ─────────────────────────────────────────────────────────────────────── shared with liquid.wgsl
+// ─────────────────────────────────────────────────────────────────────── shared with liquid.wesl
 
 fn anim_time() -> f32 {
     return w.anim.w * globals.time;
@@ -360,7 +360,7 @@ fn apply_scroll(uv: vec2<f32>) -> vec2<f32> {
 }
 
 // Distance fog — planar eye-Z, GL_LINEAR, gamma space, and the interior-vs-scene block choice on
-// `kind.z`. Identical to `liquid.wgsl`'s, deliberately: the fog a surface takes is a property of
+// `kind.z`. Identical to `liquid.wesl`'s, deliberately: the fog a surface takes is a property of
 // the surface and its room, not of which renderer is drawing it, and the two paths must agree at
 // the toggle or every A/B is confounded by a fog change.
 fn apply_fog(rgb: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
@@ -490,7 +490,7 @@ const LANE_REACH_YD: f32 = 1200.0;
 // The ground's albedo where the probe field has none to give (the authored value space,
 // `modern::gi::GROUND_ALBEDO`): the splat set is not in the scene.
 const LANE_GROUND: vec3<f32> = vec3<f32>(0.40, 0.37, 0.31);
-// static_gx's vertex word bits the hit's lighting reads (`static_gx.wgsl`'s WORD_*).
+// static_gx's vertex word bits the hit's lighting reads (`static_gx.wesl`'s WORD_*).
 const LANE_WORD_UNLIT: u32 = 262144u;
 const LANE_WORD_WMO: u32 = 4194304u;
 const LANE_WORD_INTERIOR: u32 = 8388608u;
@@ -505,7 +505,7 @@ struct LaneReflection {
 
 // A reflected hit lit as the water mirror's render lights it, in the authored value space: the
 // mirror takes none of the modern lanes (`sunshadow::mirror_view`: no probe field, sky map or light
-// grid), so this is `static_gx.wgsl`'s `modern_gx_rgb` with `modern_lite`. A WMO surface: the texel
+// grid), so this is `static_gx.wesl`'s `modern_gx_rgb` with `modern_lite`. A WMO surface: the texel
 // times the ambient and the sun's N·L (its MOCV dropped outside, kept inside), plus its SIDN glow by
 // night; a doodad: the texel times its vertex colour times the `Model2` SH sun lobe; terrain: the
 // ground's albedo under the WMO light. The sun is the scene's ray times the cloud shadow, where the
@@ -876,7 +876,7 @@ fn ripple_height(uv: vec2<f32>) -> f32 {
 /// the world, the most confusing possible symptom for the smallest possible cause.
 ///
 /// The result is a 0..1 UV, which is also why the capture targets do not have to match the
-/// viewport's resolution: `liquid_screen.wgsl` writes them by UV too, so render scale can put any
+/// viewport's resolution: `liquid_screen.wesl` writes them by UV too, so render scale can put any
 /// ratio between the two.
 fn screen_uv(position: vec4<f32>) -> vec2<f32> {
     return (position.xy - view.viewport.xy) / view.viewport.zw;
@@ -1465,7 +1465,7 @@ fn modern_water(
 }
 
 fn fragment_classic(in: VsOut) -> vec4<f32> {
-    // HARD FAR-CLIP WALL — the same one terrain, the models and `liquid.wgsl` take.
+    // HARD FAR-CLIP WALL — the same one terrain, the models and `liquid.wesl` take.
     let frag_view_z = -(view.view_from_world * vec4<f32>(in.world_position.xyz, 1.0)).z;
     if (wow_light.fog_params.w > 0.0 && frag_view_z > wow_light.fog_params.w) {
         discard;

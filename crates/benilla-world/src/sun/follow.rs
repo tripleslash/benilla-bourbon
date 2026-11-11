@@ -26,7 +26,7 @@ use super::{MoonPart, MoonSprite, StarDome, SunPart, SunSprite};
 const SUN_SIZE: f32 = 0.0833;
 
 /// The glares sit on the reference's near sphere, `cam + 12·dir` (`[0x80c4e8]`), in world units,
-/// at the sky's far depth pin (`sky_vertex.wgsl`), drawn last ([`crate::sky_order::GLARE_BIAS`]).
+/// at the sky's far depth pin (`sky_vertex.wesl`), drawn last ([`crate::sky_order::GLARE_BIAS`]).
 const GLARE_DIST: f32 = 12.0;
 
 /// The occlusion march: 48 quadratic samples to just inside the far plane, across the ADT ring and
@@ -76,7 +76,7 @@ fn flare_slew(current: f32, target: f32, rise: f32, fall: f32, dt: f32) -> f32 {
 pub(super) fn disc_span(dir_y: f32, size: f32) -> Vec4 {
     let elev = dir_y.clamp(-1.0, 1.0).asin();
     let half = (0.5 * size).atan();
-    // fork: modern lighting (FORK.md) — `.z` = the frame is linear (celestial.wgsl).
+    // fork: modern lighting (FORK.md) — `.z` = the frame is linear (celestial.wesl).
     let modern = if crate::modern::frame_is_modern() && crate::modern::cpu_hooks_enabled() {
         1.0
     } else {
@@ -587,7 +587,7 @@ pub(super) fn follow_stars(
         _ => 3000.0,
     };
     let byte = (light.star_alpha * 254.0 + 1.0).trunc();
-    // fork: modern lighting (FORK.md) — `.z` = the frame is linear (star.wgsl).
+    // fork: modern lighting (FORK.md) — `.z` = the frame is linear (star.wesl).
     let linear = if crate::modern::frame_is_modern() && crate::modern::cpu_hooks_enabled() {
         1.0
     } else {

@@ -13,7 +13,7 @@
 //! `0b1011` (c0, c1, c3) on the others where masks may skip a layer
 //! ([`HwCaps::multiview_selective`]: Vulkan, DX12), else `0b0011`. The view index is the array
 //! layer on Vulkan and DX12 (wgpu-hal DX12 lists a view-instance location for every layer up to
-//! the mask's highest bit), so `entity_shadow.wgsl`'s `MULTIVIEW` variant reads cascade `i`'s
+//! the mask's highest bit), so `entity_shadow.wesl`'s `MULTIVIEW` variant reads cascade `i`'s
 //! matrix at row `i` of [`MultiviewViews`].
 //!
 //! **Per-view culling is kept.** Each part's draw carries its own view mask as its one instance
@@ -351,7 +351,7 @@ pub(super) fn draw(
                 pass.set_bind_group(2, cut, &[]);
             }
             pass.set_vertex_buffer(0, vslice.buffer.slice(..));
-            // The part's view mask is its one instance (`entity_shadow.wgsl`, `MULTIVIEW`).
+            // The part's view mask is its one instance (`entity_shadow.wesl`, `MULTIVIEW`).
             match &mesh.buffer_info {
                 bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } => {
                     let Some(islice) = allocator.mesh_index_slice(&cmd.mesh) else {
@@ -422,7 +422,7 @@ mod tests {
     /// The shader's matrix table holds every cascade.
     #[test]
     fn the_shader_table_holds_every_cascade() {
-        let src = include_str!("../../../shaders/modern/entity_shadow.wgsl");
+        let src = include_str!("../../../shaders/modern/entity_shadow.wesl");
         let row = format!("clip_from_world: array<mat4x4<f32>, {MAX_CASCADES}>");
         assert!(src.contains(&row));
         for &mask in &MASKS {

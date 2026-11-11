@@ -1,9 +1,7 @@
 // Modern lighting (FORK.md, P5): the runtime probe GI — the probe field's layout
 // and sampling, and the ray march through the voxel clipmap and the terrain heightfield.
 //
-// Imported as `benilla_modern::probegi` — a module name no hooked shader uses as an identifier
-// (naga_oil substitutes a module alias for every bare identifier of that name), and with no
-// identifier in it ending in a digit (a composable module may not carry those).
+// Imported as `probegi` (`benilla_world::shaders::modern::probegi`).
 //
 // No bindings are declared here. The probe field rides the shared modern storage block
 // (`sunshadow::ModernBlock`), so every lane that already binds the block can read it; the march's

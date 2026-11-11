@@ -2,8 +2,8 @@
 //!
 //! The dome's stops are already decoded to linear by `sky.rs`'s hook; this adds what an HDR sky needs
 //! beyond them — the sun's direction and glow colour for the Mie halo and the analytic disk core
-//! (`sky.wgsl`), and what the cloud layer's view-dependent part needs: the key light for the silver
-//! lining, the opacity, the horizon haze and fade (`cloud.wgsl`; the rest is baked, `super::cloud_bake`).
+//! (`sky.wesl`), and what the cloud layer's view-dependent part needs: the key light for the silver
+//! lining, the opacity, the horizon haze and fade (`cloud.wesl`; the rest is baked, `super::cloud_bake`).
 //! Classic frames get zeroed lanes, which both shaders read as "classic".
 
 use bevy::prelude::*;

@@ -15,8 +15,8 @@
 //! it holds everything that wrote depth); the rest are re-tested against a pyramid of THIS frame's
 //! early prepass and the survivors draw in the late prepass. The late test is the authority, so the
 //! prepass must write exactly the depth the main pass would: every opaque or alpha-masked entity
-//! material carries a prepass twin of its own vertex and discards (`wow_model.wgsl`,
-//! `terrain.wgsl`), and every other material keeps out of the prepass (`enable_prepass`). A
+//! material carries a prepass twin of its own vertex and discards (`wow_model.wesl`,
+//! `terrain.wesl`), and every other material keeps out of the prepass (`enable_prepass`). A
 //! `NoFrustumCulling` mesh — dress, equipment, particles, the player-shadow proxy, whose boxes are
 //! a bind pose or absent — is never occluded (`third_party/bevy_pbr/BENILLA.md`).
 //!

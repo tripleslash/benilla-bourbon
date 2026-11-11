@@ -66,7 +66,7 @@ pub(super) struct CompositeRig {
 ///
 /// The target is float and un-encoded, like the portrait booths': the UI pass does its one sRGB
 /// encode at the end, and un-encoded 8-bit values band. The tile draw writes the texel un-encoded
-/// (the [`UiQuad::alpha_test`](crate::ui_pass::UiQuad::alpha_test) arm in `ui_quad.wgsl`) and the
+/// (the [`UiQuad::alpha_test`](crate::ui_pass::UiQuad::alpha_test) arm in `ui_quad.wesl`) and the
 /// blit quad encodes it like any other UI texture.
 pub(super) fn setup_composite(
     mut commands: Commands,

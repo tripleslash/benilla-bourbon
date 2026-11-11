@@ -72,7 +72,7 @@ impl EffectBlend {
 }
 
 /// fork: perf — one point of a point draw: the vertex stage builds its triangle or quad around
-/// it ([`EffectShape`], `effect_points.wgsl`), so a field of them uploads these 32 bytes each and
+/// it ([`EffectShape`], `effect_points.wesl`), so a field of them uploads these 32 bytes each and
 /// no CPU touches a corner. Heavy rain was 2.6 MB of triangles built, copied and uploaded a frame.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -143,7 +143,7 @@ pub struct ParticlePool {
 }
 
 /// fork: perf — what a point draw builds around each [`EffectPoint`]: the weather's four sprites.
-/// The laws are in `effect_points.wgsl`; the numbers are the producer's.
+/// The laws are in `effect_points.wesl`; the numbers are the producer's.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum EffectShape {
     /// A white triangle along a velocity (`v`): base `pos ∓ half_w·right` across the eye line,
@@ -189,7 +189,7 @@ impl EffectShape {
         }
     }
 
-    /// The two params rows `effect_points.wgsl` reads; the first row's `x` names the shape.
+    /// The two params rows `effect_points.wesl` reads; the first row's `x` names the shape.
     pub(crate) fn rows(self) -> [Vec4; 2] {
         match self {
             Self::Streak {
@@ -233,7 +233,7 @@ pub enum EffectTopology {
     /// stage.
     Points(EffectShape),
     /// fork: perf — a range of [`EffectQuads::particles`], one particle pool whose head and tail
-    /// quads the vertex stage builds from [`EffectQuads::pools`]`[pool]` (`wow_effect.wgsl`'s
+    /// quads the vertex stage builds from [`EffectQuads::pools`]`[pool]` (`wow_effect.wesl`'s
     /// `EFFECT_PARTICLES`, the CPU writer's law, `quads::expand_quads`).
     Particles { pool: u32, quads: u32 },
 }
@@ -639,7 +639,7 @@ mod tests {
         );
     }
 
-    /// `effect_points.wgsl` reads a shape's numbers by lane: the first row's `x` names the
+    /// `effect_points.wesl` reads a shape's numbers by lane: the first row's `x` names the
     /// shape, and the rest sit where its branch takes them.
     #[test]
     fn a_shape_packs_its_numbers_in_the_lanes_the_shader_reads() {
@@ -705,14 +705,16 @@ mod tests {
         );
     }
 
-    /// The point library parses and validates as plain WGSL, its import path aside: the effect
-    /// lane and FSR's velocity pass both build their point draws through it.
+    /// The point library parses and validates as plain WGSL: it has no import and no condition,
+    /// and the effect lane and FSR's velocity pass both build their point draws through it.
     #[test]
     fn the_point_library_validates() {
         use naga::valid::{Capabilities, ValidationFlags, Validator};
-        let source = include_str!("../shaders/effect_points.wgsl")
-            .strip_prefix("#define_import_path benilla_world::effect_points")
-            .expect("the library opens with its import path");
+        let source = include_str!("../shaders/effect_points.wesl");
+        assert!(
+            !source.contains("import ") && !source.contains("@if("),
+            "the library is plain WGSL"
+        );
         let module = naga::front::wgsl::parse_str(source)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
         Validator::new(ValidationFlags::all(), Capabilities::all())

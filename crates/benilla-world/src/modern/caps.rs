@@ -283,10 +283,18 @@ mod tests {
         limits.max_immediate_size = 128;
         limits.max_storage_buffers_per_shader_stage = MESH_STORAGE_BUFFERS;
         limits.max_bind_groups = MESH_BIND_GROUPS;
-        // wgpu's recommended minimum dispatch (256 a dimension, 1024 in all) is under the lane's.
-        assert!(!HwCaps::from_parts(features, &limits).mesh_shader);
-        limits.max_task_workgroups_per_dimension = 1 << 22;
-        limits.max_task_workgroup_total_count = 1 << 22;
+        // wgpu 30's recommended minimum dispatch (65535 a dimension, 2^22 in all) covers the
+        // lane's; wgpu 29's (256 a dimension, 1024 in all) did not, and the lane refuses it.
+        assert_eq!(
+            HwCaps::from_parts(features, &limits).mesh_shader,
+            !cfg!(target_arch = "wasm32")
+        );
+        let narrow = WgpuLimits {
+            max_task_workgroups_per_dimension: 256,
+            max_task_workgroup_total_count: 1024,
+            ..limits.clone()
+        };
+        assert!(!HwCaps::from_parts(features, &narrow).mesh_shader);
         assert_eq!(
             HwCaps::from_parts(features, &limits).mesh_shader,
             !cfg!(target_arch = "wasm32")

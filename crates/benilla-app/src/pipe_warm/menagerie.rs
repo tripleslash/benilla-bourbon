@@ -536,7 +536,7 @@ pub(super) fn spawn_menagerie(
     }
     // Liquid: every material on both renderers (`waterDetail` moves at any time, and each is its
     // own pipeline) and both grid layouts. An interior WMO pool bakes `MOMT.diffColor` into
-    // `ATTRIBUTE_COLOR`, read behind `#ifdef VERTEX_COLORS` (`liquid.wgsl:275`), a separate
+    // `ATTRIBUTE_COLOR`, read behind `@if(VERTEX_COLORS)` (`liquid.wesl`), a separate
     // pipeline.
     for mesh in [&liquid_mesh, &liquid_mesh_colored] {
         for mat in lane_handles(&mut lanes.liquid) {

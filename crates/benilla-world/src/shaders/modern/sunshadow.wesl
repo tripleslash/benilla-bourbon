@@ -1,7 +1,6 @@
 // Modern lighting (FORK.md, P2): sampling the modern sun's cascade shadow map.
 //
-// Imported as `benilla_modern::sunshadow` — a module name no hooked shader uses as an identifier
-// (naga_oil substitutes a module alias for every bare identifier of that name).
+// Imported as `sunshadow` (`benilla_world::shaders::modern::sunshadow`).
 //
 // No bindings are declared here: terrain and wow_model bind the map in the material group,
 // static_gx in its light group, so each receiver passes its own texture, sampler and cascade block.

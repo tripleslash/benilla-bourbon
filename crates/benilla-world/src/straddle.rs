@@ -41,7 +41,7 @@ pub type ClipWord = [f32; 2];
 /// The no-clip word; zero, so a zeroed region (a studio buffer's) is inert.
 pub const NO_CLIP: ClipWord = [0.0, 0.0];
 
-/// Bytes per slot: two `f32`, `wow_model.wgsl`'s `array<vec2<f32>, 2048>`.
+/// Bytes per slot: two `f32`, `wow_model.wesl`'s `array<vec2<f32>, 2048>`.
 const SLOT_BYTES: u64 = 8;
 
 /// The clip region's offset in a `wow_light` buffer: after the mat-anim table, before the palette
@@ -133,7 +133,7 @@ pub(crate) fn straddles(d: f32, r: f32, was: bool) -> bool {
     side_booleans(d, slack) == (true, true)
 }
 
-/// The Rust twin of `wow_model.wgsl`'s `WOW_WATER_CLIP`: whether a fragment at height `y` survives
+/// The Rust twin of `wow_model.wesl`'s `WOW_WATER_CLIP`: whether a fragment at height `y` survives
 /// on this copy (`far_copy`: the `FAR_SIDE_MARKER` twin); the plane itself survives on both.
 pub fn keeps(word: ClipWord, y: f32, far_copy: bool) -> bool {
     if word[1] == 0.0 {

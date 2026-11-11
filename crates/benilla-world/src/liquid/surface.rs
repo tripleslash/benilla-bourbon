@@ -67,7 +67,7 @@ impl LiquidPath {
         matches!(self, Self::WmoInterior)
     }
 
-    /// The renderer selector `liquid.wgsl` branches on (`LiquidParams.path.x`).
+    /// The renderer selector `liquid.wesl` branches on (`LiquidParams.path.x`).
     fn shader_id(self) -> f32 {
         match self {
             Self::Adt => 0.0,
@@ -108,9 +108,9 @@ fn scrolls(nibble: u8) -> bool {
 /// that flipping `waterDetail` is a component swap and never an asset build. Both share the kind's
 /// one decoded frame array; the pair costs a few hundred bytes, not a second 30 × 256² decode.
 struct LiquidEntry {
-    /// The 1.12.1 renderer (`liquid.wgsl`).
+    /// The 1.12.1 renderer (`liquid.wesl`).
     material: Handle<LiquidMaterial>,
-    /// The Cataclysm renderer (`liquid_cata.wgsl`).
+    /// The Cataclysm renderer (`liquid_cata.wesl`).
     cata: Handle<LiquidCataMaterial>,
 }
 
@@ -299,7 +299,7 @@ pub(crate) fn spawn_liquids<'a>(
     for (_, lane, layers) in groups {
         let mesh = liquid_bevy_mesh(&layers, None);
         // Computed here, so the exterior cull tests the cell from its first frame. fork: as tall as
-        // the surface's displacement reaches (`liquid_cata.wgsl`'s `HEIGHT_MAX_YD`).
+        // the surface's displacement reaches (`liquid_cata.wesl`'s `HEIGHT_MAX_YD`).
         let aabb = mesh.get_aabb().map(|mut b| {
             b.half_extents.y += HEIGHT_MAX_YD;
             b
@@ -334,11 +334,11 @@ pub(crate) fn spawn_liquids<'a>(
 }
 
 /// fork: how far the Modern (Experimental) water's surface rises or falls at most, yards
-/// (`liquid_cata.wgsl`'s `HEIGHT_MAX_YD`, which a test holds to this): the cells' bounds grow by it.
+/// (`liquid_cata.wesl`'s `HEIGHT_MAX_YD`, which a test holds to this): the cells' bounds grow by it.
 pub(super) const HEIGHT_MAX_YD: f32 = 0.75;
 
 /// fork: the fine ring's split: each wet cell of a surface near the eye is drawn as this many quads a
-/// side, so the Modern (Experimental) water's displacement (`liquid_cata.wgsl`'s vertex stage), which
+/// side, so the Modern (Experimental) water's displacement (`liquid_cata.wesl`'s vertex stage), which
 /// the 4.17-yard lattice cannot carry, has a vertex about every yard.
 const FINE_SPLIT: usize = 4;
 /// A surface takes its fine mesh when its nearest point comes this near the eye, horizontally, and
@@ -610,7 +610,7 @@ pub(crate) fn spawn_wmo_liquids<'a>(
                 Mesh3d(meshes.add(liquid_bevy_mesh(&[lq], body_color))),
                 transform,
                 LiquidSurface,
-                // Bit 30 is the interior-fog lane (`liquid.wgsl`'s `room_fog`), written each frame
+                // Bit 30 is the interior-fog lane (`liquid.wesl`'s `room_fog`), written each frame
                 // by the `Visibility` authority off the pool's room; spawned clear.
                 bevy::mesh::MeshTag::new(0),
                 // Every kind, the lava and slime hum too.
@@ -746,7 +746,7 @@ pub(super) fn setup_liquid(
                         if path.interior_fog() { 1.0 } else { 0.0 },
                         WATER_SHININESS,
                     ),
-                    // Which of the reference's three liquid renderers `liquid.wgsl` runs.
+                    // Which of the reference's three liquid renderers `liquid.wesl` runs.
                     path: Vec4::new(path.shader_id(), 0.0, 0.0, 0.0),
                     // x reserved; y = frame count; z = scroll; w = clock enable (0 on a
                     // deterministic run: frame 0, scroll 0).
@@ -1008,7 +1008,7 @@ fn cata_water_look(kind: LiquidKind) -> [Vec4; 6] {
 /// a beach shelving more slowly than a bank.
 ///
 /// The **strength** is smaller than it looks like it should be, and that is the distance fade being
-/// the reference's own way round (`1.1 − d/150`, `liquid_cata.wgsl`): the surf you are standing in
+/// the reference's own way round (`1.1 − d/150`, `liquid_cata.wesl`): the surf you are standing in
 /// gets the full term rather than the fifth the bump blend used to give it, so the authored number
 /// has to come down by about the same factor to land on the same shoreline.
 ///
@@ -1151,11 +1151,11 @@ mod tests {
     /// the exterior cull can drop.
     #[test]
     fn the_cells_bounds_reach_as_high_as_the_shader_displaces() {
-        let cata = include_str!("../../../benilla-assets/src/shaders/liquid_cata.wgsl");
+        let cata = include_str!("../../../benilla-assets/src/shaders/liquid_cata.wesl");
         let want = format!("const HEIGHT_MAX_YD: f32 = {HEIGHT_MAX_YD};");
         assert!(
             cata.contains(&want),
-            "liquid_cata.wgsl must declare `{want}`"
+            "liquid_cata.wesl must declare `{want}`"
         );
     }
 

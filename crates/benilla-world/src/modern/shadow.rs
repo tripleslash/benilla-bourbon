@@ -160,7 +160,7 @@ pub(crate) struct UploadedMirrorPlane(pub Option<f32>);
 
 /// fork: perf — where the vertex stages' two facts sit in the shared light buffer: row 20's `.z`
 /// (1 = the block's light grid is live this frame, and `.w` is valid) and `.w` (the block's mirror
-/// plane, `sky_params.w`). `wow_model.wgsl` and `terrain.wgsl` bind the block fragment-only, and
+/// plane, `sky_params.w`). `wow_model.wesl` and `terrain.wesl` bind the block fragment-only, and
 /// their vertex stages skip a walk of the light table when these say no fragment will read it.
 /// `build_light_data` packs both as 0, which reads as "walk".
 pub(crate) const VERTEX_HINT_OFFSET: u64 = 20 * 16 + 8;
@@ -176,7 +176,7 @@ const SUN_SNAP_RADIANS: f32 = 1.5e-3;
 /// slice leaves it, so a moving camera keeps most cascades' matrices — and their static cache — for
 /// many frames.
 const CASCADE_MARGIN: f32 = 1.25;
-/// Size of [`ModernCascades::std430`] — `sunshadow.wgsl`'s `ModernCascades`.
+/// Size of [`ModernCascades::std430`] — `sunshadow.wesl`'s `ModernCascades`.
 pub const CASCADES_BYTES: usize = 5 * 64 + 5 * 16;
 
 /// Where each cascade ends (view distance, yd), per tier — the plan's tier table.
@@ -797,7 +797,7 @@ pub fn slice_sphere(
 /// the hardware 2x2 compare) and their normal offset ([`NORMAL_OFFSET_TEXELS`]).
 const CULL_PAD_TEXELS: f32 = 4.0;
 
-/// `sunshadow.wgsl`'s `COVER_RADIUS_YD`: a shaded receiver reads the map this far around itself.
+/// `sunshadow.wesl`'s `COVER_RADIUS_YD`: a shaded receiver reads the map this far around itself.
 const COVER_RADIUS_YD: f32 = 1.5;
 
 /// A cascade's caster cull shrunk to the clip-space XY rect of the camera frustum's `corners`,

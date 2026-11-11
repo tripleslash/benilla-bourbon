@@ -1,7 +1,7 @@
 // Modern lighting (FORK.md, P5): the probe trace — a Fibonacci sphere of rays per
 // probe (one lane each since P8b, see `trace_probes`) marched through the voxel clipmap and the
 // terrain heightfield, projected onto an order-1 SH lobe and left in the scratch buffer for
-// `gi_blend.wgsl` to fold in.
+// `gi_blend.wesl` to fold in.
 //
 // A ray's radiance is the sky where it reaches it, and at a surface the voxel's albedo times the key
 // light under the cascades plus the previous frame's probe field (the second bounce). The whole
@@ -47,7 +47,7 @@ struct GiTrace {
 @group(0) @binding(7) var<uniform> trace: GiTrace;
 @group(0) @binding(8) var<storage, read_write> scratch: array<probegi::GiProbe>;
 
-// This frame's work list (`gi_classify.wgsl`): every probe due a trace, packed. The dispatch is
+// This frame's work list (`gi_classify.wesl`): every probe due a trace, packed. The dispatch is
 // indirect — one workgroup per `group_probes(rays)` listed probes, one lane per ray.
 struct GiWork {
     count: u32,
@@ -110,7 +110,7 @@ const MAX_LIGHTS: u32 = 256u;
 var<workgroup> wg_light_d2: array<f32, 1024>;
 
 // Probes per workgroup for `rays` rays a probe. The classify pass sizes the indirect dispatch with
-// the same arithmetic (`gi_classify.wgsl`), so the two can never disagree.
+// the same arithmetic (`gi_classify.wesl`), so the two can never disagree.
 fn group_probes(rays: u32) -> u32 {
     return clamp(LANES / clamp(rays, 1u, LANES), 1u, MAX_GROUP_PROBES);
 }
@@ -219,7 +219,7 @@ fn setup_probes(
     // Which of this workgroup's probes this lane serves, and which share of its light table.
     let slot = lane / rays;
     let ray = lane % rays;
-    // The dispatch is rows of workgroups (`gi_classify.wgsl`'s `GROUP_ROW`).
+    // The dispatch is rows of workgroups (`gi_classify.wesl`'s `GROUP_ROW`).
     let item = (group_id.y * groups.x + group_id.x) * per_group + slot;
     let busy = slot < per_group && item < listed_count();
 
@@ -308,7 +308,7 @@ fn trace_rays(
     }
     let rays = clamp(u32(g0.misc.x), 1u, LANES);
     let count = listed_count();
-    // Rows of workgroups (`gi_classify.wgsl`), every lane one ray: the same indirect dispatch the
+    // Rows of workgroups (`gi_classify.wesl`), every lane one ray: the same indirect dispatch the
     // setup stage ran, whose `group_probes` rows always hold at least `count * rays` lanes.
     let global = (group_id.y * groups.x + group_id.x) * LANES + lane;
     if (count == 0u || global >= count * rays) {

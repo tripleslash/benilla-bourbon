@@ -39,12 +39,12 @@ use crate::view::WorldCamera;
 
 pub mod node;
 
-/// Probe cascades — capped by `probegi.wgsl`'s fixed arrays. The fifth is P6's interior sub-grid,
+/// Probe cascades — capped by `probegi.wesl`'s fixed arrays. The fifth is P6's interior sub-grid,
 /// which the exterior ladder makes room for while the camera stands in a WMO.
 pub const MAX_CASCADES: usize = 5;
-/// Clipmap levels — `probegi.wgsl`'s `GiClip` arrays. Unrelated to the cascade count since P6.
+/// Clipmap levels — `probegi.wesl`'s `GiClip` arrays. Unrelated to the cascade count since P6.
 pub const MAX_LEVELS: usize = 4;
-/// Size of [`GiParams::std430`] — `probegi.wgsl`'s `GiParams`. Chosen so that the light grid behind
+/// Size of [`GiParams::std430`] — `probegi.wesl`'s `GiParams`. Chosen so that the light grid behind
 /// it starts at a 256-byte offset inside the block, which is what lets the binning pass bind it (and
 /// the probe array behind THAT stays 256-aligned for the blend pass).
 pub const GI_PARAMS_BYTES: usize = 16 * 16;
@@ -83,7 +83,7 @@ pub struct GiTier {
     /// and `probegi::listed_cap` holds a moving camera's frames to the same share. fork: every tier
     /// runs 9x its P6 period (Medium 12, High 8, Ultra 6, Cinematic 4), a ninth of the trace for a
     /// field that settles over 9x as long (`SETTLE_SECS`). Keep it coprime with 7 —
-    /// `gi_classify.wgsl`'s schedule is `(idx * 7 + frame) % period`.
+    /// `gi_classify.wesl`'s schedule is `(idx * 7 + frame) % period`.
     pub period: u32,
     pub levels: usize,
     /// Voxel size (yd) per clipmap level.
@@ -264,7 +264,7 @@ pub fn gi_enabled() -> bool {
 /// fork: **does the probe trace cast its rays against the ray-traced scene this frame?** Native
 /// only: the ray tracing is live (`static_gx::rt_scene::gi_live`: capable, `rayTracing` and `rayTracingGI` on
 /// and the scene ready) and the session may trace probes ([`rt_gi_capable`]). Then each probe ray is
-/// a ray query against the TLAS (`gi_trace_rt.wgsl`) and the voxel clipmap is not kept
+/// a ray query against the TLAS (`gi_trace_rt.wesl`) and the voxel clipmap is not kept
 /// (`static_gx::render::modern_gi` frees it, and rebuilds it on the frame this turns false); the
 /// terrain heightfield still is, for the probes' under-ground test and the froxels' ground banks.
 /// Otherwise the voxel DDA runs as it always has. Per frame; a switch cuts the field's history
@@ -319,7 +319,7 @@ pub struct ModernGi {
     pub tier: GiTier,
     pub camera: Vec3,
     pub forward: Vec3,
-    /// The view's half-diagonal field of view (radians): the cone `gi_classify.wgsl` holds a probe
+    /// The view's half-diagonal field of view (radians): the cone `gi_classify.wesl` holds a probe
     /// to its full update rate inside. Pi (everything in view) without a perspective camera.
     pub view_half: f32,
     pub frame: u32,
@@ -356,7 +356,7 @@ impl Default for ModernGi {
     }
 }
 
-/// The CPU mirror of `probegi.wgsl`'s `GiParams` (field order and meaning documented there).
+/// The CPU mirror of `probegi.wesl`'s `GiParams` (field order and meaning documented there).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GiParams {
     pub params: Vec4,
@@ -389,7 +389,7 @@ impl GiParams {
     }
 }
 
-/// The CPU mirror of `probegi.wgsl`'s `GiClip` — the voxel clipmap and the terrain heightfield, as
+/// The CPU mirror of `probegi.wesl`'s `GiClip` — the voxel clipmap and the terrain heightfield, as
 /// the compute passes address them.
 #[derive(Clone, Copy, Debug)]
 pub struct GiClip {
@@ -730,7 +730,7 @@ mod tests {
                     coarsest >= t.cascade_extent(t.cascades - 1).x * 0.3,
                     "{q:?}"
                 );
-                // `gi_classify.wgsl` schedules `(idx * 7 + frame) % period`: a period sharing a
+                // `gi_classify.wesl` schedules `(idx * 7 + frame) % period`: a period sharing a
                 // factor with 7 would leave some probes never due.
                 assert!(!t.period.is_multiple_of(7), "{q:?}: period {}", t.period);
             }
@@ -738,7 +738,7 @@ mod tests {
         assert!(!gi_tier(LightingQuality::Low).on);
     }
 
-    /// The CPU twin of `gi_trace.wgsl`'s ray set and SH projection — the numbers the calibration
+    /// The CPU twin of `gi_trace.wesl`'s ray set and SH projection — the numbers the calibration
     /// below depends on live in the shader, and this is what pins them.
     fn open_field_probe(rays: u32, gradient: f32) -> (Vec3, [Vec3; 3]) {
         let mut dc = Vec3::ZERO;

@@ -19,7 +19,7 @@ crates/benilla-app/src/ui_quest/verbs.rs	the row one past a full pool is read fr
 crates/benilla-app/src/ui_social/live.rs	after a full 50 the reference reads the 160 bytes past the
 crates/benilla-app/src/ui_text/outline.rs	`r × floor(dpi)` passes as in [`outlined_cell`], the first `floor(dpi)` of them
 crates/benilla-app/src/ui_tooltip/spell_view.rs	a pet view with no pet unit costs 0, an empty cell,
-crates/benilla-assets/src/shaders/liquid.wgsl	this is the `specular`/`pixelShaders` = 1 leg the reference install runs; both
+crates/benilla-assets/src/shaders/liquid.wesl	this is the `specular`/`pixelShaders` = 1 leg the reference install runs; both
 crates/benilla-formats/src/macro_icons.rs	of names equal but for case, benilla keeps the first in source
 crates/benilla-lua/src/heap.rs	C Lua has no such bound; past it the string is `not
 crates/benilla-lua/src/heap.rs	the client's `luaM_realloc` (`0x6fc980`) has no failure path to ask from; here

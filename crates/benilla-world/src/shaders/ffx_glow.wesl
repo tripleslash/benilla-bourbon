@@ -132,7 +132,7 @@ fn combine_out(outg: vec3<f32>, alpha: f32, frag_coord: vec2<f32>) -> vec4<f32> 
         vec3<f32>(1.0),
     );
 @if(GAMMA_OUT) {
-    // The UI camera's ground pass stores premultiplied bytes like `ui_quad.wgsl`; the lane decodes.
+    // The UI camera's ground pass stores premultiplied bytes like `ui_quad.wesl`; the lane decodes.
     return vec4<f32>(dithered * alpha, alpha);
 } @else {
     return vec4<f32>(srgb_to_linear(dithered), alpha);

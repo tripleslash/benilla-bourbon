@@ -15,7 +15,7 @@
 //! - Alpha (bits 0..=5): the fade alpha, multiplying the cutout alpha. A whole payload of `0` is
 //!   the untagged, opaque sentinel.
 //! - Exterior payload (the default): bits 6..=13 are the ground-shade byte (`0` lit, `255` fully
-//!   MCSH-shadowed), mixing the batch's lit sun level toward the shaded one (`wow_model.wgsl`).
+//!   MCSH-shadowed), mixing the batch's lit sun level toward the shaded one (`wow_model.wesl`).
 //!   Entities ramp it ([`crate::entity_shade`]); statics leave it `0` and shade per material
 //!   (`sun_scale.x`). Bits 14..=18 are reserved.
 //! - Interior probe slot (an interior M2 prop or entity: interior material, `model_flags.z` set,
@@ -134,7 +134,7 @@ pub(crate) fn with_rig(tag: u32, slot: u16) -> u32 {
 }
 
 /// A fade alpha as tag bits; a zero or negative alpha writes `1` (1/63), since a `0` tag is the
-/// shader's untagged, opaque sentinel (`wow_model.wgsl`).
+/// shader's untagged, opaque sentinel (`wow_model.wesl`).
 pub fn alpha_bits(alpha: f32) -> u32 {
     if alpha <= 0.0 {
         1u32

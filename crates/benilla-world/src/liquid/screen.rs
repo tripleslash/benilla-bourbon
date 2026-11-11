@@ -28,7 +28,7 @@
 //! into single-sampled targets, and a copy that reads N samples and writes one value *is* a
 //! resolve — so the resolve is the copy, in the pass that was happening anyway, with no second
 //! target and no `resolve_target` chain. The single-sampled build is untouched: it keeps the plain
-//! binding and the plain filtered fetch, with no per-sample loop to skip. `liquid_screen.wgsl`
+//! binding and the plain filtered fetch, with no per-sample loop to skip. `liquid_screen.wesl`
 //! carries which half resolves by averaging (colour) and which by taking sample 0 (depth), and why.
 //!
 //! ## Where this runs, and why there
@@ -97,7 +97,7 @@ const REFLECT_SHIFT: u32 = 2;
 
 /// fork: the blurred mirror's mip levels ([`LiquidScreenTargets::reflect_blur`]), level 0 included:
 /// the Modern (Experimental) water reads a rough surface's reflection off the level its blur needs
-/// (`liquid_cata.wgsl`'s `mirror_read_rough`, whose `MIRROR_MIPS` a test holds to this) and grades it
+/// (`liquid_cata.wesl`'s `mirror_read_rough`, whose `MIRROR_MIPS` a test holds to this) and grades it
 /// toward the last one's local mean. Five reach a blur of ~19 mirror texels, past which the
 /// reflection of anything is its mean.
 pub(crate) const REFLECT_MIPS: u32 = 5;
@@ -325,7 +325,7 @@ struct ScreenVariant {
 
 fn init_pipelines(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(LiquidScreenPipelines {
-        shader: asset_server.load("embedded://benilla_world/shaders/liquid_screen.wgsl"),
+        shader: asset_server.load("embedded://benilla_world/shaders/liquid_screen.wesl"),
         variants: Default::default(),
     });
 }
@@ -475,7 +475,7 @@ pub(crate) fn liquid_screen_pass(
             return;
         }
         // The variant for THIS view's sample count. Multisampling does not stand these passes
-        // down; it changes one binding type and nothing else (see `liquid_screen.wgsl`).
+        // down; it changes one binding type and nothing else (see `liquid_screen.wesl`).
         let pipelines = world.resource::<LiquidScreenPipelines>();
         let Some(variant) = pipelines.variants.get(&msaa.samples()) else {
             return; // `specialize_pipelines` builds it this frame; drawn next
@@ -641,15 +641,15 @@ pub(crate) fn register(app: &mut App) {
 #[cfg(test)]
 mod tests {
     /// The blurred mirror's level count is one number in two places: [`super::REFLECT_MIPS`]
-    /// allocates the chain and `liquid_cata.wgsl`'s `MIRROR_MIPS` clamps the level it reads. A shader
+    /// allocates the chain and `liquid_cata.wesl`'s `MIRROR_MIPS` clamps the level it reads. A shader
     /// asking past the chain reads its last level as if it were blurrier than it is.
     #[test]
     fn the_water_reads_the_mirror_chain_this_allocates() {
-        let cata = include_str!("../../../benilla-assets/src/shaders/liquid_cata.wgsl");
+        let cata = include_str!("../../../benilla-assets/src/shaders/liquid_cata.wesl");
         let want = format!("const MIRROR_MIPS: f32 = {}.0;", super::REFLECT_MIPS);
         assert!(
             cata.contains(&want),
-            "liquid_cata.wgsl must declare `{want}`"
+            "liquid_cata.wesl must declare `{want}`"
         );
     }
 }

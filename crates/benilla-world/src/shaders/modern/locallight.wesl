@@ -1,9 +1,7 @@
 // Modern lighting (FORK.md, P6): the local-light grid and the shadowed-light
 // cube atlas — how a fragment finds the lights that reach it, and how much of each one it sees.
 //
-// Imported as `benilla_modern::locallight` — a module name no hooked shader uses as an identifier
-// (naga_oil substitutes a module alias for every bare identifier of that name), and with no
-// identifier in it ending in a digit (a composable module may not carry those).
+// Imported as `locallight` (`benilla_world::shaders::modern::locallight`).
 //
 // No bindings are declared here. The grid rides the shared modern storage block
 // (`sunshadow::ModernBlock`) and the cube atlas rides the last layer of the modern shadow array,
@@ -50,7 +48,7 @@ struct LightGrid {
     // w = 1 / the shadow map's edge in texels.
     shadow_misc: vec4<f32>,
     // fork: P8 — the soft filter. Named `soft` because `filter` is a WGSL RESERVED KEYWORD: naga
-    // rejects it as a struct member, and the only thing that says so is the composer.
+    // rejects it as a struct member.
     // x = taps (1 = P6's single hardware compare), y = the emitter radius the penumbra opens from
     // (yd), z = the shade floor (how much of a light a shadow may take away; below 1 the shadow is
     // faint), w = the atlas's first array layer.

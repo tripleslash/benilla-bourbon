@@ -284,7 +284,7 @@ fn sample_jitter(
         }
         None => Vec::new(),
     };
-    // Project them as `wow_model.wgsl`'s vertex stage does: camera-relative first
+    // Project them as `wow_model.wesl`'s vertex stage does: camera-relative first
     // (`p_rig + (origin - cam)`), then view rotation, clip and viewport.
     let vp = Vec2::new(
         window.physical_width() as f32,
@@ -579,7 +579,7 @@ fn sample_jitter(
     // Δ²/dt²: the velocity change the frame applied.
     let dvel = d2 * scale / (dt * dt);
     let mm = |v: f32| v * scale * 1000.0;
-    // `ORIGIN`: the two absolute terms the vertex stage sums (`wow_model.wgsl`:
+    // `ORIGIN`: the two absolute terms the vertex stage sums (`wow_model.wesl`:
     // `p_cam = frame_from_local·v + (frame_origin - view.world_position)`); at ~9.5 k yards one
     // axis has an f32 ULP of 2^-10 yd.
     if let Some(o) = rig_origin {

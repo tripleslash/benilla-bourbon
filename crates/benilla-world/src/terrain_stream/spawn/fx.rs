@@ -9,7 +9,7 @@ use crate::lighting::WorldPointLight;
 use crate::particles;
 
 /// Unit intensity in the `PointLight` convention, which the packer's `/(4π)` undoes to exactly
-/// `diffuse_color × diffuse_intensity`; `wow_model.wgsl` applies the falloff `1/(0.7d + 0.03d²)`.
+/// `diffuse_color × diffuse_intensity`; `wow_model.wesl` applies the falloff `1/(0.7d + 0.03d²)`.
 const POINT_LIGHT_INTENSITY: f32 = 4.0 * std::f32::consts::PI;
 /// The ≤3-nearest selection radius (yd) around the lit unit's anchor, not a cutoff (a GL light has
 /// none; att(48 yd) ≈ 0.01), wide enough to reach a hall's fixtures ~20 yd from its centre.

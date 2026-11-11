@@ -1,7 +1,7 @@
 //! The engine's WGSL, embedded in the binary; the game's shaders are embedded by `benilla-app`.
 //! These calls must stay in a file directly under `src/`: `embedded_asset!` derives the served
 //! path from `file!()` without normalizing it, so a call from a submodule would serve the shader
-//! under that module's directory instead of `embedded://benilla_world/shaders/<name>.wgsl`.
+//! under that module's directory instead of `embedded://benilla_world/shaders/<name>`.
 
 use bevy::prelude::*;
 
@@ -9,29 +9,29 @@ use bevy::prelude::*;
 /// [`crate::world_plugins::WorldPlugins`]; it needs `DefaultPlugins`, which creates the asset
 /// registry, added first.
 pub(crate) fn plugin(app: &mut App) {
-    bevy::asset::embedded_asset!(app, "shaders/sky_vertex.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/sky.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/star.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/cloud.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/celestial.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/ffx_glow.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/wow_effect.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/static_gx.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/ssilvb.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/liquid_screen.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/liquid_ripple.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/wet_ssr.wgsl");
-    // fork: perf — a library (`benilla_world::effect_points`): registered and held loaded, so
-    // the effect lane's and FSR's `#import` of it resolves.
-    bevy::shader::load_shader_library!(app, "shaders/effect_points.wgsl");
-    // fork: a library (`benilla_modern::skydome`): the dome's dawn/dusk warp, shared by the dome
+    bevy::asset::embedded_asset!(app, "shaders/sky_vertex.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/sky.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/star.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/cloud.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/celestial.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/ffx_glow.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/wow_effect.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/static_gx.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/ssilvb.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/liquid_screen.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/liquid_ripple.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/wet_ssr.wesl");
+    // fork: perf — a library (`benilla_world::shaders::effect_points`): registered and held
+    // loaded, so the effect lane's and FSR's import of it resolves.
+    bevy::shader::load_shader_library!(app, "shaders/effect_points.wesl");
+    // fork: a library (`modern::skydome`): the dome's dawn/dusk warp, shared by the dome
     // and the water's reflection of it. Here rather than in `modern_libraries` because the dome
     // draws under both lighting models.
-    bevy::shader::load_shader_library!(app, "shaders/modern/skydome.wgsl");
+    bevy::shader::load_shader_library!(app, "shaders/modern/skydome.wesl");
 }
 
-/// The modern lighting model's shared WGSL libraries (`benilla_modern::*`), registered AND held
-/// loaded so an `#import` of them resolves (`FORK.md`). Called by
+/// The modern lighting model's shared WESL libraries (`benilla_world::shaders::modern::*`),
+/// registered AND held loaded so an import of them resolves (`FORK.md`). Called by
 /// [`crate::modern::ModernLightingPlugin`]; lives here for the same path reason as [`plugin`].
 pub(crate) fn modern_libraries(app: &mut App) {
     // fork: perf — `$WOW_MODERN_ARRAYINDEX=1` (an A/B lever, read once) builds the two libraries
@@ -43,55 +43,49 @@ pub(crate) fn modern_libraries(app: &mut App) {
             settings.shader_defs.push("MODERN_ARRAY_INDEX".into());
         }
     };
-    bevy::shader::load_shader_library!(app, "shaders/modern/color.wgsl");
-    bevy::shader::load_shader_library!(app, "shaders/modern/frame.wgsl");
-    bevy::shader::load_shader_library!(app, "shaders/modern/sunshadow.wgsl", block_defs);
-    bevy::shader::load_shader_library!(app, "shaders/modern/froxelfog.wgsl");
-    bevy::shader::load_shader_library!(app, "shaders/modern/probegi.wgsl", block_defs);
-    bevy::shader::load_shader_library!(app, "shaders/modern/locallight.wgsl");
+    bevy::shader::load_shader_library!(app, "shaders/modern/color.wesl");
+    bevy::shader::load_shader_library!(app, "shaders/modern/frame.wesl");
+    bevy::shader::load_shader_library!(app, "shaders/modern/sunshadow.wesl", block_defs);
+    bevy::shader::load_shader_library!(app, "shaders/modern/froxelfog.wesl");
+    bevy::shader::load_shader_library!(app, "shaders/modern/probegi.wesl", block_defs);
+    bevy::shader::load_shader_library!(app, "shaders/modern/locallight.wesl");
     // fork: the bindless static_gx group 1, imported under `GX_BINDLESS` only.
-    bevy::shader::load_shader_library!(app, "shaders/modern/gx_bindless.wgsl");
+    bevy::shader::load_shader_library!(app, "shaders/modern/gx_bindless.wesl");
     // fork: the ray-traced scene's hit library and attribute repack (`rt_scene.rs`), native only:
     // nothing composes the library until a ray-traced lane imports it.
     #[cfg(not(target_arch = "wasm32"))]
     {
-        bevy::shader::load_shader_library!(app, "shaders/modern/rt_scene.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/modern/rt_scene.wesl");
         bevy::asset::embedded_asset!(app, "shaders/modern/rt_repack.wgsl");
         // fork: static_gx's Hi-Z pyramid and two-phase GPU cull (`gpu_cull.rs`), native only; the
         // Hi-Z tests the draw cull and the meshlet task stage share.
-        bevy::asset::embedded_asset!(app, "shaders/modern/gx_hiz.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/modern/gx_cull.wgsl");
-        bevy::shader::load_shader_library!(app, "shaders/modern/gx_occlusion.wgsl");
+        bevy::asset::embedded_asset!(app, "shaders/modern/gx_hiz.wesl");
+        bevy::asset::embedded_asset!(app, "shaders/modern/gx_cull.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/modern/gx_occlusion.wesl");
         // fork: the probe trace's ray-query stage (`modern::gi::rt_gi`), native only.
-        bevy::asset::embedded_asset!(app, "shaders/modern/gi_trace_rt.wgsl");
+        bevy::asset::embedded_asset!(app, "shaders/modern/gi_trace_rt.wesl");
         // fork: the ray-traced shadows' library (`modern::rt_shadow`), native only: imported under
         // `RT_SHADOWS` / `RT_FROXEL`, which only the ray-traced tier's pipelines carry.
-        bevy::shader::load_shader_library!(app, "shaders/modern/rt_shadow.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/modern/rt_shadow.wesl");
         // fork: G — the water's ray-traced reflection (`modern::rt_reflect`), native only: imported
         // under `RT_REFLECT`, which only the water's pipelines carry where the lane may run.
-        bevy::shader::load_shader_library!(app, "shaders/modern/rt_reflect.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/modern/rt_reflect.wesl");
     }
-    // fork: the browser's empty `rtshadow` and `rtreflect`. The shader cache composes every
-    // `#import` whatever the defs, and an unregistered one holds the pipeline queued, silently: the
-    // receivers that name them under an RT def (every M2, the terrain, the water) never drew.
-    #[cfg(target_arch = "wasm32")]
-    {
-        bevy::shader::load_shader_library!(app, "shaders/modern/rt_shadow_web.wgsl");
-        bevy::shader::load_shader_library!(app, "shaders/modern/rt_reflect_web.wgsl");
-    }
-    bevy::asset::embedded_asset!(app, "shaders/modern/froxel_scatter.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/modern/froxel_integrate.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/modern/fog_composite.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/modern/static_gx_shadow.wgsl");
+    // The browser registers no ray-traced library: a receiver imports one under `@if(RT_…)`
+    // alone, which the web never sets, and wesl resolves no import its conditions remove.
+    bevy::asset::embedded_asset!(app, "shaders/modern/froxel_scatter.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/modern/froxel_integrate.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/modern/fog_composite.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/modern/static_gx_shadow.wesl");
     bevy::asset::embedded_asset!(app, "shaders/modern/terrain_shadow.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/modern/entity_shadow.wgsl");
+    bevy::asset::embedded_asset!(app, "shaders/modern/entity_shadow.wesl");
     bevy::asset::embedded_asset!(app, "shaders/modern/depth_fill.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/modern/static_gx_voxel.wgsl");
+    bevy::asset::embedded_asset!(app, "shaders/modern/static_gx_voxel.wesl");
     bevy::asset::embedded_asset!(app, "shaders/modern/gi_voxel_clear.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/modern/gi_classify.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/modern/gi_trace.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/modern/gi_blend.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/modern/light_bin.wgsl");
+    bevy::asset::embedded_asset!(app, "shaders/modern/gi_classify.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/modern/gi_trace.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/modern/gi_blend.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/modern/light_bin.wesl");
 }
 
 #[cfg(test)]
@@ -116,7 +110,7 @@ mod tests {
         let mut found = 0;
         for entry in std::fs::read_dir(dir).unwrap() {
             let name = entry.unwrap().file_name().to_string_lossy().into_owned();
-            if !name.ends_with(".wgsl") {
+            if !(name.ends_with(".wgsl") || name.ends_with(".wesl")) {
                 continue;
             }
             found += 1;
@@ -137,9 +131,8 @@ mod tests {
     /// `textureSampleCompare`, and the explicit builtins `dpdx`, `dpdy`, `fwidth` with their
     /// `Coarse` and `Fine` variants) below a function body's top level. WGSL allows them only in
     /// uniform control flow, and a branch on a fragment input is not. This reads text: it does not
-    /// follow helper calls, a sample after a `return` inside a branch, or `/* */` comments. An
-    /// `#else` branch starts at the depth its `#ifdef` opened at, so one body under two signatures
-    /// (`#ifdef GX_MESHLETS fn gx_vertex(…) { #else fn vertex(…) { #endif`) counts one brace.
+    /// follow helper calls, a sample after a `return` inside a branch, or `/* */` comments. A WESL
+    /// `@if(…) {` / `@elif(…) {` / `@else {` block is no level: wesl flattens it into its parent.
     fn derivatives_in_nested_blocks(src: &str) -> Vec<usize> {
         const IMPLICIT: [&str; 12] = [
             "textureSample",
@@ -155,46 +148,68 @@ mod tests {
             "fwidthCoarse",
             "fwidthFine",
         ];
-        let mut depth = 0usize;
+        /// Whether `head`, the text before a `{`, is a bare conditional-translation attribute.
+        fn flattens(head: &str) -> bool {
+            let head = head.trim();
+            if head == "@else" {
+                return true;
+            }
+            let Some(rest) = head
+                .strip_prefix("@if")
+                .or_else(|| head.strip_prefix("@elif"))
+            else {
+                return false;
+            };
+            let rest = rest.trim_start();
+            let mut open = 0usize;
+            for (i, c) in rest.char_indices() {
+                match c {
+                    '(' => open += 1,
+                    ')' => {
+                        open = open.saturating_sub(1);
+                        if open == 0 {
+                            return rest[i + 1..].trim().is_empty();
+                        }
+                    }
+                    _ if open == 0 => return false,
+                    _ => {}
+                }
+            }
+            false
+        }
+        // Per open brace: whether it is a real block (true) or a flattened `@if` one.
+        let mut open: Vec<bool> = Vec::new();
+        let mut head = String::new();
         let mut hits = Vec::new();
-        // Per open `#if…`: the depth it opened at, and the depth its first branch closed at.
-        let mut branches: Vec<(usize, Option<usize>)> = Vec::new();
         for (n, line) in src.lines().enumerate() {
-            let directive = line.trim_start();
-            if directive.starts_with("#if") {
-                branches.push((depth, None));
-                continue;
-            }
-            if directive.starts_with("#else") {
-                if let Some((open, first)) = branches.last_mut() {
-                    first.get_or_insert(depth);
-                    depth = *open;
-                }
-                continue;
-            }
-            if directive.starts_with("#endif") {
-                if let Some((_, Some(first))) = branches.pop() {
-                    depth = first;
-                }
-                continue;
-            }
             let code = line.split("//").next().unwrap_or("");
             let mut word = String::new();
             for c in code.chars().chain(std::iter::once(' ')) {
                 if c.is_alphanumeric() || c == '_' {
                     word.push(c);
+                    head.push(c);
                     continue;
                 }
+                let depth = open.iter().filter(|real| **real).count();
                 if depth > 1 && IMPLICIT.contains(&word.as_str()) {
                     hits.push(n + 1);
                 }
                 word.clear();
                 match c {
-                    '{' => depth += 1,
-                    '}' => depth = depth.saturating_sub(1),
-                    _ => {}
+                    '{' => {
+                        open.push(!flattens(&head));
+                        head.clear();
+                    }
+                    '}' | ';' => {
+                        if c == '}' {
+                            open.pop();
+                        }
+                        head.clear();
+                    }
+                    _ => head.push(c),
                 }
             }
+            head.push(' ');
         }
         hits
     }
@@ -212,20 +227,33 @@ mod tests {
             [3],
             "the scanner finds the nested sample"
         );
-        let twin =
-            "#ifdef A\nfn a(in: V) {\n#else\nfn b(in: V) {\n#endif\n    let d = dpdx(in.uv);\n}\n";
+        let flat = "@if(A) {
+fn a(in: V) {
+    let d = dpdx(in.uv);
+}
+} @else {
+fn b(in: V) {
+    @if(B && (C || D)) {
+    let e = fwidth(in.uv);
+    }
+    if (in.flag != 0u) {
+        let f = dpdy(in.uv);
+    }
+}
+}
+";
         assert_eq!(
-            derivatives_in_nested_blocks(twin),
-            Vec::<usize>::new(),
-            "one body under two signatures is one level"
+            derivatives_in_nested_blocks(flat),
+            [11],
+            "an `@if` block is no level; a real branch inside one still is"
         );
 
         let root = env!("CARGO_MANIFEST_DIR");
         for path in [
-            "/src/shaders/static_gx.wgsl",
-            "/../benilla-assets/src/shaders/terrain.wgsl",
+            "/src/shaders/static_gx.wesl",
+            "/../benilla-assets/src/shaders/terrain.wesl",
             // fork: the water, whose footprint and shore derivatives sit at its body's top.
-            "/../benilla-assets/src/shaders/liquid_cata.wgsl",
+            "/../benilla-assets/src/shaders/liquid_cata.wesl",
         ] {
             let src = std::fs::read_to_string(format!("{root}{path}")).expect(path);
             assert_eq!(

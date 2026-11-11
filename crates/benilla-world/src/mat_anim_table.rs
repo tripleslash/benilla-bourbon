@@ -4,7 +4,7 @@
 //! Rows are deltas from the material's build-time seed (`sun_scale.zw = sample(0.0)`, the `tint`
 //! first key), and row 0 is pinned to zero, so a static material (`anim_slots = 0`), a zeroed
 //! studio buffer, a skipped tick and an exhausted table all read the seed. The region sits between
-//! the rig-origin table and the straddle clip table, the palette last; `wow_model.wgsl`'s struct
+//! the rig-origin table and the straddle clip table, the palette last; `wow_model.wesl`'s struct
 //! mirrors this order.
 
 use std::sync::Arc;
@@ -19,7 +19,7 @@ use bevy::render::{Render, RenderApp, RenderSystems};
 /// is silent: the batch freezes at its seed. 2048 costs 32 KB per `wow_light`-layout buffer.
 pub(crate) const MAX_MAT_ANIM_SLOTS: usize = 2048;
 
-/// Byte offset of the region in a `wow_light`-layout buffer, in `wow_model.wgsl`'s struct order.
+/// Byte offset of the region in a `wow_light`-layout buffer, in `wow_model.wesl`'s struct order.
 pub(crate) fn region_offset() -> u64 {
     crate::rig_palette::rig_origin_region_offset() + crate::rig_palette::rig_origin_region_bytes()
 }

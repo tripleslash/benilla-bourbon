@@ -175,7 +175,7 @@ pub fn sample(profile: WindProfile, seconds: f64, storm: f32) -> WindSample {
 }
 
 /// fork: the wrap of the published wind travel, in yards. Every wave rate in
-/// `wind_hook.wgsl` is a whole number of cycles per wrap, so the wrap is invisible.
+/// `wind_hook.wesl` is a whole number of cycles per wrap, so the wrap is invisible.
 pub const TRAVEL_WRAP: f64 = 4096.0;
 
 /// fork: the integrated travel. The waves' phase must be the integral of the speed,

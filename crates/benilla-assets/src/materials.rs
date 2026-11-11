@@ -27,8 +27,8 @@ pub const MODERN_SHADOW_CASCADES: Handle<bevy::render::storage::ShaderBuffer> =
     bevy::asset::uuid_handle!("b3c94a7e-52d1-4f6b-8e2a-7d10c4e5f9a2");
 
 /// fork: perf — `$WOW_MODERN_VERTEXWALKS=1` (an A/B lever, read once; the browser has no
-/// environment and keeps the default): the modern pipelines of `wow_model.wgsl`, `terrain.wgsl`
-/// and `static_gx.wgsl` are built with `MODERN_VERTEX_WALKS`, and every vertex walks the light
+/// environment and keeps the default): the modern pipelines of `wow_model.wesl`, `terrain.wesl`
+/// and `static_gx.wesl` are built with `MODERN_VERTEX_WALKS`, and every vertex walks the light
 /// table for the Gouraud sum and the three-nearest selection whether its fragments read them or
 /// not, as before.
 pub fn modern_vertex_walks() -> bool {
@@ -114,7 +114,7 @@ fn is_prepass(descriptor: &RenderPipelineDescriptor) -> bool {
 }
 
 /// fork: fit a depth-prepass pipeline to a material whose prepass twin runs its colour pass's own
-/// vertex stage and discards (`wow_model.wgsl`, `terrain.wgsl`), so that the depth it lays is the
+/// vertex stage and discards (`wow_model.wesl`, `terrain.wesl`), so that the depth it lays is the
 /// depth the colour pass then draws on.
 ///
 /// Bevy's prepass binds its own attribute locations (position 0, UVs 1 and 2, colour 7) and
@@ -175,12 +175,12 @@ fn fit_prepass(
 /// Compile the five WGSL files into the binary under `embedded://benilla_assets/shaders/…`. Call
 /// after Bevy's `AssetPlugin`, whose registry this fills; [`crate::register_asset_loaders`] does.
 pub fn register_shaders(app: &mut App) {
-    bevy::asset::embedded_asset!(app, "shaders/terrain.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/wow_model.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/wdl.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/liquid.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/liquid_cata.wgsl");
-    // fork: the importable libraries the world shaders call into, held loaded so the `#import`
+    bevy::asset::embedded_asset!(app, "shaders/terrain.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/wow_model.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/wdl.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/liquid.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/liquid_cata.wesl");
+    // fork: the importable libraries the world shaders call into, held loaded so the import
     // resolves. A headless app with no `Shader` asset type (the loader tests) has nothing to
     // compile them for.
     if app
@@ -189,20 +189,20 @@ pub fn register_shaders(app: &mut App) {
     {
         // `benilla::env_frame`, the block the world `WowLight` mirrors declare after the point
         // table (`benilla-world`'s `lighting/env_frame.rs`).
-        bevy::shader::load_shader_library!(app, "shaders/env_frame.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/env_frame.wesl");
         // `benilla::wind_hook`, the shared vertex displacement for grass and foliage.
-        bevy::shader::load_shader_library!(app, "shaders/wind_hook.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/wind_hook.wesl");
         // `benilla::wet_hook`, the rain-on-surfaces look terrain, model and static_gx call.
-        bevy::shader::load_shader_library!(app, "shaders/wet_hook.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/wet_hook.wesl");
     }
 }
 
 /// The WDL far-band shader's source, for the tests that live beside the renderer (`wdl.rs`).
-pub const WDL_WGSL: &str = include_str!("shaders/wdl.wgsl");
+pub const WDL_WGSL: &str = include_str!("shaders/wdl.wesl");
 
 /// Alpha-test reference for blend mode 1 (`Blend_AlphaKey`): 224 in the reference's
 /// per-blend-mode table at `0x85ad20`, `{0, 224, 1, 1, 1, 1, 1, 0, 0, 0, 0}`. Must stay in sync
-/// with `VANILLA_ALPHA_KEY` in `shaders/wow_model.wgsl`.
+/// with `VANILLA_ALPHA_KEY` in `shaders/wow_model.wesl`.
 pub const VANILLA_ALPHA_KEY_REF: f32 = 224.0 / 255.0;
 
 /// `StandardMaterial` plus the per-tile layer-blend extension.
@@ -274,14 +274,14 @@ impl From<&WowModelExt> for WowModelKey {
 }
 
 /// fork: modern lighting — whether model pipelines compile the modern lighting code
-/// (`wow_model.wgsl`'s `WOW_MODERN`). Set by `benilla_world::modern` at the lighting latch, which
+/// (`wow_model.wesl`'s `WOW_MODERN`). Set by `benilla_world::modern` at the lighting latch, which
 /// then re-prepares every model material so the new key reaches the pipelines.
 pub static MODERN_MODEL_PIPELINES: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// The model material's extension. Every `Vec4` uniform packs into binding 100, one buffer entry,
 /// to stay under Metal's 16-buffer vertex-stage cap (Bevy 0.18 ignores `visibility` on uniforms);
-/// `ModelParams` in `wow_model.wgsl` must match the field order.
+/// `ModelParams` in `wow_model.wesl` must match the field order.
 #[derive(Asset, AsBindGroup, Clone, TypePath)]
 #[bind_group_data(WowModelKey)]
 pub struct WowModelExt {
@@ -350,21 +350,21 @@ pub struct WowModelExt {
 impl MaterialExtension for WowModelExt {
     /// Bevy's mesh vertex plus the point-light term, per vertex like the reference's FFP.
     fn vertex_shader() -> ShaderRef {
-        "embedded://benilla_assets/shaders/wow_model.wgsl".into()
+        "embedded://benilla_assets/shaders/wow_model.wesl".into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        "embedded://benilla_assets/shaders/wow_model.wgsl".into()
+        "embedded://benilla_assets/shaders/wow_model.wesl".into()
     }
 
     /// fork: the depth prepass's twin (`benilla_world::entity_cull`): the same file's vertex stage
     /// up to the position, and its fragment's discards up to the depth-prime cut.
     fn prepass_vertex_shader() -> ShaderRef {
-        "embedded://benilla_assets/shaders/wow_model.wgsl".into()
+        "embedded://benilla_assets/shaders/wow_model.wesl".into()
     }
 
     fn prepass_fragment_shader() -> ShaderRef {
-        "embedded://benilla_assets/shaders/wow_model.wgsl".into()
+        "embedded://benilla_assets/shaders/wow_model.wesl".into()
     }
 
     /// The reference writes depth for every M2 batch, transparent ones too, and tests `LEQUAL`,
@@ -633,14 +633,14 @@ impl MaterialExtension for WdlExt {
     }
 
     fn vertex_shader() -> ShaderRef {
-        "embedded://benilla_assets/shaders/wdl.wgsl".into()
+        "embedded://benilla_assets/shaders/wdl.wesl".into()
     }
     fn fragment_shader() -> ShaderRef {
-        "embedded://benilla_assets/shaders/wdl.wgsl".into()
+        "embedded://benilla_assets/shaders/wdl.wesl".into()
     }
 }
 
-/// Liquid surfaces, one `liquid.wgsl` arm per reference liquid renderer: ADT MCLQ (the
+/// Liquid surfaces, one `liquid.wesl` arm per reference liquid renderer: ADT MCLQ (the
 /// `ocean0_s.bls` combine), WMO exterior and interior water, and magma and slime.
 pub type LiquidMaterial = ExtendedMaterial<StandardMaterial, LiquidExt>;
 
@@ -690,7 +690,7 @@ pub struct LiquidExt {
 ///   the default-off path for no reason.
 /// * `MaterialExtension::vertex_shader` is an associated function with no key, so a *single*
 ///   extension type cannot answer with two different WGSL files. The alternative is one file
-///   forked end to end by `#ifdef`, which would dilute `liquid.wgsl`'s header — 86 lines of
+///   forked end to end by `@if`, which would dilute `liquid.wesl`'s header — 86 lines of
 ///   byte-level reverse engineering about a *different* renderer, five previously-wrong readings
 ///   and why each was reverted. That record earns its own file.
 ///
@@ -698,13 +698,13 @@ pub struct LiquidExt {
 /// `MeshMaterial3d<LiquidCataMaterial>`), which `benilla_world`'s `liquid::surface` owns.
 pub type LiquidCataMaterial = ExtendedMaterial<StandardMaterial, LiquidCataExt>;
 
-/// Inputs for `liquid_cata.wgsl` — the ported `ProcWater` + `ProcWaterAbove`/`ProcWaterBelow`
+/// Inputs for `liquid_cata.wesl` — the ported `ProcWater` + `ProcWaterAbove`/`ProcWaterBelow`
 /// (perm 4) program family.
 ///
 /// The reference binds ten texture stages for this program; six of them belong to permutations this
 /// client does not port (the dynamic displacement maps, the third material texture, the noise
 /// volume, and the real reflection buffer). What is left is the four below plus the depth ramp,
-/// which is evaluated from the shared light rather than sampled — see `liquid_cata.wgsl`.
+/// which is evaluated from the shared light rather than sampled — see `liquid_cata.wesl`.
 #[derive(Asset, AsBindGroup, Clone, TypePath)]
 pub struct LiquidCataExt {
     /// The kind's animated frames, exactly as [`LiquidExt::frames`] carries them.
@@ -763,7 +763,7 @@ pub struct LiquidCataExt {
     /// material textures. Synthesised, like the bump map, and for the same reason: the column that
     /// names it does not exist in 1.12.1's `LiquidType.dbc`. See `benilla_world`'s `liquid::art`.
     ///
-    /// **No sampler of its own** — it takes 104 (`art_samp`), which `liquid_cata.wgsl` explains at
+    /// **No sampler of its own** — it takes 104 (`art_samp`), which `liquid_cata.wesl` explains at
     /// the declaration: this sheet, the bump map and the noise volume are built with identical
     /// descriptors, and WebGPU's 16-sampler-per-fragment-stage cap counts every one in the layout.
     #[texture(109, visibility(fragment))]
@@ -781,7 +781,7 @@ pub struct LiquidCataExt {
     /// binding serves this 3D volume and the two 2D sheets alike.
     ///
     /// fork: in the vertex stage too: the Modern (Experimental) water's displacement reads the wind
-    /// sea's phase warp and gusts off it, as the fragment's slope does (`liquid_cata.wgsl`'s
+    /// sea's phase warp and gusts off it, as the fragment's slope does (`liquid_cata.wesl`'s
     /// `wind_noise`).
     #[texture(111, dimension = "3d", visibility(vertex, fragment))]
     pub noise_vol: Handle<Image>,
@@ -939,10 +939,10 @@ impl MaterialExtension for LiquidCataExt {
     }
 
     fn vertex_shader() -> ShaderRef {
-        "embedded://benilla_assets/shaders/liquid_cata.wgsl".into()
+        "embedded://benilla_assets/shaders/liquid_cata.wesl".into()
     }
     fn fragment_shader() -> ShaderRef {
-        "embedded://benilla_assets/shaders/liquid_cata.wgsl".into()
+        "embedded://benilla_assets/shaders/liquid_cata.wesl".into()
     }
 
     /// As [`LiquidExt`]'s: `sky_order::WATER_BIAS` is a sort rung, kept out of the rasterizer. As a
@@ -972,10 +972,10 @@ impl MaterialExtension for LiquidExt {
     }
 
     fn vertex_shader() -> ShaderRef {
-        "embedded://benilla_assets/shaders/liquid.wgsl".into()
+        "embedded://benilla_assets/shaders/liquid.wesl".into()
     }
     fn fragment_shader() -> ShaderRef {
-        "embedded://benilla_assets/shaders/liquid.wgsl".into()
+        "embedded://benilla_assets/shaders/liquid.wesl".into()
     }
 
     /// `sky_order::WATER_BIAS` (−2e4) is a sort rung, kept out of the rasterizer: as a depth-bias
@@ -1017,7 +1017,7 @@ impl From<&TerrainExtension> for TerrainKey {
 }
 
 /// One repeating sampler (105) serves every array, to stay under Metal's 16 fragment samplers;
-/// `terrain.wgsl` insets the alpha UVs by half a texel so they do not wrap at a chunk edge. Every
+/// `terrain.wesl` insets the alpha UVs by half a texel so they do not wrap at a chunk edge. Every
 /// `Vec4` uniform packs into binding 106, whose `TerrainParams` field order must match.
 #[derive(Asset, AsBindGroup, Clone, TypePath)]
 #[bind_group_data(TerrainKey)]
@@ -1055,20 +1055,20 @@ pub struct TerrainExtension {
 impl MaterialExtension for TerrainExtension {
     // The sun specular is per vertex (the reference's light flush `0x59c820`).
     fn vertex_shader() -> ShaderRef {
-        "embedded://benilla_assets/shaders/terrain.wgsl".into()
+        "embedded://benilla_assets/shaders/terrain.wesl".into()
     }
     fn fragment_shader() -> ShaderRef {
-        "embedded://benilla_assets/shaders/terrain.wgsl".into()
+        "embedded://benilla_assets/shaders/terrain.wesl".into()
     }
 
     /// fork: the depth prepass's twin (`benilla_world::entity_cull`): the same file's vertex stage
     /// up to the position, and its fragment's far-clip wall.
     fn prepass_vertex_shader() -> ShaderRef {
-        "embedded://benilla_assets/shaders/terrain.wgsl".into()
+        "embedded://benilla_assets/shaders/terrain.wesl".into()
     }
 
     fn prepass_fragment_shader() -> ShaderRef {
-        "embedded://benilla_assets/shaders/terrain.wgsl".into()
+        "embedded://benilla_assets/shaders/terrain.wesl".into()
     }
 
     /// fork: modern lighting — compile one lighting model, not both ([`TerrainKey`]). The def
@@ -1106,7 +1106,7 @@ impl MaterialExtension for TerrainExtension {
 
 #[cfg(test)]
 mod tests {
-    /// `LiquidCataExt`'s `#[uniform(102)]` fields ARE `liquid_cata.wgsl`'s `LiquidParams`, name for
+    /// `LiquidCataExt`'s `#[uniform(102)]` fields ARE `liquid_cata.wesl`'s `LiquidParams`, name for
     /// name and in order, and every one is a `Vec4`/`vec4<f32>`. `AsBindGroup` packs the fields in
     /// declaration order and the shader reads them by offset, so a field added to one side only, or
     /// in another place, shifts every lane after it with no error on any backend. All-`vec4` keeps
@@ -1137,7 +1137,7 @@ mod tests {
             rust_fields.push(name.to_string());
         }
 
-        let wgsl = include_str!("shaders/liquid_cata.wgsl");
+        let wgsl = include_str!("shaders/liquid_cata.wesl");
         let block = &wgsl[wgsl.find("struct LiquidParams {").expect("LiquidParams")..];
         let block = &block[..block.find("};").expect("the struct closes")];
         let wgsl_fields: Vec<String> = block
@@ -1156,19 +1156,20 @@ mod tests {
             .collect();
         assert_eq!(
             rust_fields, wgsl_fields,
-            "LiquidCataExt's uniform(102) fields and liquid_cata.wgsl's LiquidParams disagree"
+            "LiquidCataExt's uniform(102) fields and liquid_cata.wesl's LiquidParams disagree"
         );
     }
 
     /// The sky depth law for the WMO skybox, the one sky element on the model lane.
     #[test]
     fn the_sky_lane_pins_the_far_depth_at_the_vertex() {
-        let src = include_str!("shaders/wow_model.wgsl");
-        // The pin, matched behind its ifdef: ungated, every model draw sits at the far plane.
+        let src = include_str!("shaders/wow_model.wesl");
+        // The pin, matched inside its `@if` block: ungated, every model draw sits at the far
+        // plane. The block holds no braces of its own, so it ends at the first `}`.
         let pin = src
-            .find("#ifdef WOW_SKY_DEPTH")
+            .find("@if(WOW_SKY_DEPTH) {")
             .expect("the sky-depth branch is gone");
-        let branch = &src[pin..src[pin..].find("#endif").map_or(src.len(), |e| pin + e)];
+        let branch = &src[pin..src[pin..].find("\n}").map_or(src.len(), |e| pin + e)];
         assert!(
             branch.contains("out.position.z = 0.0;"),
             "the model lane's sky branch no longer pins the far depth at the vertex — a WMO \
@@ -1188,7 +1189,7 @@ mod tests {
     /// to the interpolated `primary`, and the fragment only modulates the texel by it.
     #[test]
     fn the_model_light_is_evaluated_per_vertex() {
-        let src = include_str!("shaders/wow_model.wgsl");
+        let src = include_str!("shaders/wow_model.wesl");
         let at = |needle: &str| {
             src.find(needle)
                 .unwrap_or_else(|| panic!("`{needle}` is gone"))
@@ -1243,7 +1244,7 @@ mod tests {
     /// program and run two of them against the M2 lane.
     #[test]
     fn the_material_colour_is_lit_inside_the_one_clamp() {
-        let src = include_str!("shaders/wow_model.wgsl");
+        let src = include_str!("shaders/wow_model.wesl");
         let at = |needle: &str| {
             src.find(needle)
                 .unwrap_or_else(|| panic!("`{needle}` is gone"))
@@ -1296,7 +1297,7 @@ mod tests {
     /// (`0x59cfec`), so the grey multiplies the light sum inside the one clamp.
     #[test]
     fn a_clutter_tufts_grey_is_lit_inside_the_clamp() {
-        let src = include_str!("shaders/wow_model.wgsl");
+        let src = include_str!("shaders/wow_model.wesl");
         let at = |needle: &str| {
             src.find(needle)
                 .unwrap_or_else(|| panic!("`{needle}` is gone"))
@@ -1450,7 +1451,7 @@ mod tests {
     /// stage `k`'s output coordinate (set `k`, or `k + 2` past the pixel-shader set's two lighting
     /// sets) comes from the input `texcoord[k]` when its digit (`0x71de50`) is 0, passed, or 1,
     /// transformed, and from no input coordinate when it is 2, generated. A coordinate entry at or
-    /// below 2 picks no set, so `wow_model.wgsl` gives stage 1 the vertex's UV set 1. This pins
+    /// below 2 picks no set, so `wow_model.wesl` gives stage 1 the vertex's UV set 1. This pins
     /// the reference fact, not benilla's code, which `stage_k_reads_uv_set_k_whatever_its_entry`
     /// tests.
     #[test]
@@ -1703,7 +1704,7 @@ mod tests {
     /// E clamped only with a light bound, and `c28·E + c29` clamped once.
     #[test]
     fn vertex_light_runs_model2_programs_135_and_136() {
-        let src = include_str!("shaders/wow_model.wgsl");
+        let src = include_str!("shaders/wow_model.wesl");
         for line in [
             "let n_lit = wow_normalize(world_normal);",
             "let quad = vec4<f32>(n_lit.x * n_lit.y, n_lit.y * n_lit.z, n_lit.z * n_lit.z, n_lit.x * n_lit.z);",
@@ -1827,7 +1828,7 @@ mod tests {
     /// (`DP3`, `MUL 2`, `MAD −`), normalizes it (`RSQ`) and maps x, y by `MAD ·0.5 + 0.5`.
     #[test]
     fn stage1_samples_the_model2_environment_coordinate() {
-        let src = include_str!("shaders/wow_model.wgsl");
+        let src = include_str!("shaders/wow_model.wesl");
         assert!(
             src.contains("let refl = normalize(p_view - 2.0 * dot(p_view, n_view) * n_view);")
                 && src.contains("return refl.xy * 0.5 + vec2<f32>(0.5, 0.5);"),
@@ -1877,7 +1878,7 @@ mod tests {
     /// modulated.
     #[test]
     fn stage1_combines_by_the_gx_presets() {
-        let src = include_str!("shaders/wow_model.wgsl");
+        let src = include_str!("shaders/wow_model.wesl");
         for (line, why) in [
             (
                 "var c = prev * tex.rgb;",
@@ -1940,7 +1941,7 @@ mod tests {
     #[test]
     fn a_fade_twin_blends_by_the_stage_zero_alpha_op() {
         // As checked out: a Windows checkout under `core.autocrlf` ends its lines in CRLF.
-        let src = include_str!("shaders/wow_model.wgsl").replace("\r\n", "\n");
+        let src = include_str!("shaders/wow_model.wesl").replace("\r\n", "\n");
         for (line, why) in [
             (
                 "faded_alpha = stage_alpha(u32(m.stage1.z) - 1u, obj_fade, tex0_alpha);",
@@ -2001,7 +2002,7 @@ mod tests {
     /// the row fill `0x68a830` on `Light.dbc` id 4, map 0, t = 1440, ocean `LightIntBand` 14 to 15.
     #[test]
     fn liquid_swatch_reproduces_the_reference_row_ramp() {
-        let src = include_str!("shaders/liquid.wgsl");
+        let src = include_str!("shaders/liquid.wesl");
         // The row accumulator `c0 + floor(i*(c1 - c0)/64)`, not a lerp to the deep endpoint.
         assert!(
             src.contains("let row = c0 + floor(i * (c1 - c0) / 64.0);"),

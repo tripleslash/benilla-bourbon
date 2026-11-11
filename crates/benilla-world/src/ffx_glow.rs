@@ -1,6 +1,6 @@
 //! The reference's full-screen glow (`FFXGlow.bls`): the scene is box-downsampled to ¼ in one
 //! pass (dims floored at 8, `0x6cdb40`), blurred by Gauss4 H then V (weights ⅛ ⅜ ⅜ ⅛), and
-//! combined as `lerp(screen, blur, z) + w·blur²` in gamma bytes (`shaders/ffx_glow.wgsl`), `w` the
+//! combined as `lerp(screen, blur, z) + w·blur²` in gamma bytes (`shaders/ffx_glow.wesl`), `w` the
 //! zone glow and `z` the haze. The combine also owns the frame's one gamma decode. A world view
 //! the player-UI camera claims ([`FfxBackdrop`]) runs only the filter passes, and the UI camera
 //! draws its combine.
@@ -443,7 +443,7 @@ fn init_pipelines(
     pipeline_cache: Res<PipelineCache>,
 ) {
     let shader: Handle<Shader> =
-        asset_server.load("embedded://benilla_world/shaders/ffx_glow.wgsl");
+        asset_server.load("embedded://benilla_world/shaders/ffx_glow.wesl");
     // Filter passes bind (tex, sampler); the combine adds the blur, the uniform and the wave LUT.
     let layout_filter = BindGroupLayoutDescriptor::new(
         "ffx_glow_filter_layout",

@@ -8,7 +8,7 @@
 //! loads.
 //!
 //! benilla carries the flag in bit 31 of the per-instance `MeshTag` (`benilla_world::mesh_tag`),
-//! and `wow_model.wgsl` adds the scene ambient when it is set.
+//! and `wow_model.wesl` adds the scene ambient when it is set.
 
 use bevy::mesh::MeshTag;
 use bevy::prelude::*;

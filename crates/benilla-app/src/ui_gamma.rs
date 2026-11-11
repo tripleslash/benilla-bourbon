@@ -1,4 +1,4 @@
-//! The player-UI gamma lane's one decode. [`ui_quad.wgsl`](shaders/ui_quad.wgsl) composites the
+//! The player-UI gamma lane's one decode. [`ui_quad.wesl`](shaders/ui_quad.wesl) composites the
 //! UI in gamma bytes, as the reference's fixed-function device does into its 8-bit backbuffer:
 //! blends are gamma arithmetic clamped at each write, and `alphaMode="ADD"` is `dst + texel·α`
 //! (EGxBlend 3, `glBlendFunc(GL_SRC_ALPHA, GL_ONE)`; factor tables `0x85c1f8`/`0x85c224`). This
@@ -216,7 +216,7 @@ fn init_pipeline(
     commands.insert_resource(UiGammaPipeline {
         layout,
         sampler,
-        shader: asset_server.load("embedded://benilla_app/shaders/ui_gamma.wgsl"),
+        shader: asset_server.load("embedded://benilla_app/shaders/ui_gamma.wesl"),
         fullscreen: fullscreen_shader.clone(),
         ramp,
     });
@@ -293,8 +293,8 @@ fn use_gamma_ui_shaders(
     mut node: ResMut<UiPipeline>,
     mut slice: ResMut<UiTextureSlicePipeline>,
 ) {
-    node.shader = asset_server.load("embedded://benilla_app/shaders/ui_node_gamma.wgsl");
-    slice.shader = asset_server.load("embedded://benilla_app/shaders/ui_slice_gamma.wgsl");
+    node.shader = asset_server.load("embedded://benilla_app/shaders/ui_node_gamma.wesl");
+    slice.shader = asset_server.load("embedded://benilla_app/shaders/ui_slice_gamma.wesl");
 }
 
 pub(crate) struct UiGammaPlugin;

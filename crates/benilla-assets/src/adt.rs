@@ -80,7 +80,7 @@ fn pack_water_depth(depth: f32) -> f32 {
     depth.clamp(-WATER_DEPTH_RANGE, WATER_DEPTH_RANGE) * (WATER_DEPTH_SPAN / WATER_DEPTH_RANGE)
 }
 
-/// The inverse of [`pack_water_depth`] over a whole `UV1.x`, as `terrain.wgsl` decodes it.
+/// The inverse of [`pack_water_depth`] over a whole `UV1.x`, as `terrain.wesl` decodes it.
 #[cfg(test)]
 fn unpack_water_depth(uv1_x: f32) -> f32 {
     (uv1_x - uv1_x.round()) * (WATER_DEPTH_RANGE / WATER_DEPTH_SPAN)

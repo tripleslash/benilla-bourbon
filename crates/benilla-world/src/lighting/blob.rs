@@ -100,7 +100,7 @@ impl LightBlob {
     }
 
     /// A buffer of the full layout's size, never just what was written: wgpu validates the bound
-    /// size against `wow_model.wgsl`'s whole struct at every draw, and zeroes the unwritten rest.
+    /// size against `wow_model.wesl`'s whole struct at every draw, and zeroes the unwritten rest.
     pub fn create(&self, device: &RenderDevice, label: &'static str) -> Buffer {
         device.create_buffer(&BufferDescriptor {
             label: Some(label),

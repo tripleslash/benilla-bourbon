@@ -47,7 +47,7 @@ pub(crate) const TASK_MESHLETS: u32 = 32;
 /// Threads of a mesh workgroup: one per output vertex.
 pub(crate) const MESH_THREADS: u32 = 64;
 
-/// Bytes of the task payload (`GxTaskPayload` in `static_gx_mesh.wgsl`): four words, then one
+/// Bytes of the task payload (`GxTaskPayload` in `static_gx_mesh.wesl`): four words, then one
 /// meshlet index per task thread.
 pub(crate) const TASK_PAYLOAD_BYTES: u32 = 16 + 4 * TASK_MESHLETS;
 
@@ -248,7 +248,7 @@ fn pack_cone(axis: Vec3, cutoff: i8) -> u32 {
     byte(axis.x) | (byte(axis.y) << 8) | (byte(axis.z) << 16) | (u32::from(cutoff as u8) << 24)
 }
 
-/// The cone test the task shader runs (`static_gx_mesh.wgsl`, `backfacing`), for the tests.
+/// The cone test the task shader runs (`static_gx_mesh.wesl`, `backfacing`), for the tests.
 #[cfg(test)]
 fn backfacing(cone: u32, centre: Vec3, radius: f32, eye: Vec3) -> bool {
     let s = |shift: u32| f32::from(((cone >> shift) & 0xff) as u8 as i8) / 127.0;

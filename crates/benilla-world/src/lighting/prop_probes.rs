@@ -12,7 +12,7 @@ use bevy::math::Vec4;
 use bevy::prelude::*;
 use bevy::render::extract_resource::ExtractResource;
 
-/// Capacity of the probe table, mirrored by `wow_model.wgsl`'s `prop_probes` array (keep in sync):
+/// Capacity of the probe table, mirrored by `wow_model.wesl`'s `prop_probes` array (keep in sync):
 /// a city WMO streams in thousands of lit interior props at once.
 pub const MAX_PROP_PROBES: usize = 8192;
 

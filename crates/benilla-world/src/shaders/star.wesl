@@ -2,7 +2,7 @@
 // alpha, times a second stage's texel where the batch has one (`GL_COMBINE` MODULATE on RGB and
 // alpha), multiplied in gamma space and blended premultiplied as the reference blends onto gamma
 // bytes: alpha blend, or SRC_ALPHA, ONE for an additive batch. Depth is the far pin in
-// `sky_vertex.wgsl`.
+// `sky_vertex.wesl`.
 
 import bevy_pbr::{
     render::pbr_fragment::pbr_input_from_standard_material,
@@ -48,7 +48,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> @locatio
     }
 }
     // fork: modern lighting (FORK.md) — a linear frame takes linear colour. The
-    // alpha folds in gamma first, then the product decodes, as `wow_model.wgsl` does: a linear
+    // alpha folds in gamma first, then the product decodes, as `wow_model.wesl` does: a linear
     // `texel × a` is far brighter than the reference's gamma one. `dst`'s share decodes likewise,
     // `(1 − a)` on gamma bytes being `(1 − a)^2.2` on linear ones.
     if star.z > 0.5 {

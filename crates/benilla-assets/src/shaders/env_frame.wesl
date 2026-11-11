@@ -4,8 +4,7 @@
 // `lighting/env_frame.rs`). All zero = no visual change: every reader treats zero as "feature off".
 //
 // Coordinates are Bevy world space (Y up, 1 unit = 1 yd), the space of the receivers'
-// `world_position`. Member names carry no trailing digit: naga_oil refuses composable-module
-// identifiers that its namer would rewrite, so the rows are `wind_a/b`, `wet_a`.
+// `world_position`.
 struct EnvFrame {
     wind_a: vec4<f32>, // dir_x, dir_y (unit, world XZ: .x = world x, .y = world z), base_heading (rad, fixed profile heading), gust 0..1
     wind_b: vec4<f32>, // travel (yd, integrated speed, wrapped at 4096), sway_strength, grass_strength, tree_strength

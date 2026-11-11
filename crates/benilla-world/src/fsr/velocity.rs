@@ -7,11 +7,11 @@
 //!
 //! - **Model parts** ([`collect_motion_parts`]): a `WowModelMaterial` part that is skinned or whose
 //!   transform moved since the last world frame, and a moved `StandardMaterial` mesh (overhead
-//!   names, raid marks). Skinned parts skin twice (`velocity.wgsl`), from the live palettes and from
+//!   names, raid marks). Skinned parts skin twice (`velocity.wesl`), from the live palettes and from
 //!   last world frame's copy of the shared light buffer ([`RigPalettePrev`]).
 //! - **The effect lane** (`particles/render.rs`): the world view's merged effect draws, each vertex
 //!   displaced by the motion its writer declares ([`crate::particles::buffer::EffectMotion`]),
-//!   drawn with the lane's own raster and depth state (`effect_velocity.wgsl`).
+//!   drawn with the lane's own raster and depth state (`effect_velocity.wesl`).
 //!
 //! Nothing else moves geometry: the sky sits at depth 0 and reprojects by rotation, and terrain,
 //! WMOs, `static_gx` and water are static, their animated shading left to the shading-change
@@ -223,7 +223,7 @@ pub struct RigPalettePrev {
     valid: bool,
 }
 
-/// The per-view matrices `velocity.wgsl` projects with: the jittered raster matrix and the
+/// The per-view matrices `velocity.wesl` projects with: the jittered raster matrix and the
 /// unjittered current and previous ones.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -235,7 +235,7 @@ struct VelocityViewUniform {
 
 const VIEW_UNIFORM_SIZE: u64 = std::mem::size_of::<VelocityViewUniform>() as u64;
 
-/// One part's uniform; `VelocityPart` in `velocity.wgsl`.
+/// One part's uniform; `VelocityPart` in `velocity.wesl`.
 #[derive(Clone, Copy, ShaderType)]
 struct VelocityPartUniform {
     world_from_local: Mat4,
@@ -686,7 +686,7 @@ pub(super) fn fsr_velocity_pass(
 
 // ---------------------------------------------------------------- the effect lane
 
-/// The effect lane's velocity pipeline: `wow_effect.wgsl`'s raster and depth state, the lane's
+/// The effect lane's velocity pipeline: `wow_effect.wesl`'s raster and depth state, the lane's
 /// coverage, and the motion from each vertex's delta. Group 0 is the lane's own view group.
 #[derive(Resource)]
 pub struct EffectVelocityPipeline {

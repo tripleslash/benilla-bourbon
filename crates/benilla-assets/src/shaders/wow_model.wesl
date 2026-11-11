@@ -81,8 +81,8 @@ struct ModelParams {
 @group(constants::MATERIAL_BIND_GROUP) @binding(101) var stage1_texture: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(102) var stage1_sampler: sampler;
 
-// **How dark a fully covered character shadow gets** — the same number `terrain.wgsl` carries and
-// `benilla-world`'s `static_gx.wgsl` carries; move all three together. Here (and in `static_gx`)
+// **How dark a fully covered character shadow gets** — the same number `terrain.wesl` carries and
+// `benilla-world`'s `static_gx.wesl` carries; move all three together. Here (and in `static_gx`)
 // it scales the SUN term only — the subtract-and-restore below keeps the authored ambient — so at
 // one value a model reads slightly lighter than the ground under it, which is the intended
 // reading. 0.70, raised from the 0.45 this first shipped at (a near-black silhouette).
@@ -98,11 +98,11 @@ const MODERN_SIDN_GAIN: f32 = 2.5;
 const MODERN_SIDN_DAY: f32 = 0.35;
 const MODERN_ROOM_FLOOR: f32 = 0.30;
 // fork: a modern interior surface keeps at least this share of its classic light (the batch class's
-// bake, MOCV included); `static_gx.wgsl` carries the same number.
+// bake, MOCV included); `static_gx.wesl` carries the same number.
 const MODERN_BAKE_FLOOR: f32 = 0.9;
 // fork: the probe field's openness over which a modern interior WMO surface eases from the light
 // outside (below the first) to the room's own (above the second), in place of the line the group's
-// interior flag draws at a cave mouth or a doorway. `static_gx.wgsl` carries the same pair.
+// interior flag draws at a cave mouth or a doorway. `static_gx.wesl` carries the same pair.
 const MODERN_ROOM_OPEN_INSIDE: f32 = 0.02;
 const MODERN_ROOM_OPEN_OUTSIDE: f32 = 0.2;
 
@@ -111,7 +111,7 @@ const MODERN_ROOM_OPEN_OUTSIDE: f32 = 0.2;
 // each frame. The model reads rows 0-2 (ambient/diffuse/sun) + fog, plus rows 6-12: the disassembled
 // `Model2.bls` probe of the day/night scene light at intensity 1 — the reference's own exterior M2
 // response, and since 0803 the live law on the doodad/entity lane.
-// Shared with terrain.wgsl — a tree and the dirt under it fade into the same haze.
+// Shared with terrain.wesl — a tree and the dirt under it fade into the same haze.
 // (light_spec is part of the prefix layout but the model path never reads it.)
 struct WowLight {
     light_ambient: vec4<f32>, // rgb ambient; w = Mod2x scale
@@ -253,7 +253,7 @@ fn modern_gi_field(p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32, lite: bool)
 // that names no WMO rooms may not light an interior surface: a local light has no occluder unless
 // it holds one of the twelve cube slots, and `global_light`'s room term admits every room-less
 // light by law, so without this the street lamp outside lights the abbey's furniture through the
-// wall. The same rule `static_gx.wgsl` applies to the room's own surfaces, so a chair and the floor
+// wall. The same rule `static_gx.wesl` applies to the room's own surfaces, so a chair and the floor
 // it stands on agree.
 fn modern_local_lights(p: vec3<f32>, nrm: vec3<f32>, interior: bool, lite: bool) -> vec3<f32> {
     // fork: P8 — the near cell, the far cell, and how far into the seam between the two levels
@@ -460,7 +460,7 @@ fn wow_normalize(v: vec3<f32>) -> vec3<f32> {
 // The point lights at P: the reference commits at most three per draw, the nearest to the
 // receiving unit's own position `anchor` (`0x71bf90` gathers by squared distance, `0x71c730` seats
 // slots 1-3). Range bounds candidacy only; a selected light falls off as `1/(0.7·d + 0.03·d²)`,
-// diffuse only, on the submitted normal (no GL_LIGHT_MODEL_TWO_SIDE). Mirrored in terrain.wgsl.
+// diffuse only, on the submitted normal (no GL_LIGHT_MODEL_TWO_SIDE). Mirrored in terrain.wesl.
 // `.w` is how many are bound, the light-count digit of the `Model2.bls` program (`0x707cf6`).
 fn point_light_sum(P: vec3<f32>, N: vec3<f32>, anchor: vec3<f32>) -> vec4<f32> {
     let count = u32(wow_light.point_count.x);
@@ -548,7 +548,7 @@ fn point_light_eval(sel: vec3<u32>, P: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
 }
 
 // The centre of the MCNK chunk under P, the light anchor for world-merged clutter, since the
-// reference gathers lights per terrain chunk (mirrored in terrain.wgsl). WoW x/y are Bevy −z/−x
+// reference gathers lights per terrain chunk (mirrored in terrain.wesl). WoW x/y are Bevy −z/−x
 // and the grid is symmetric, so snapping Bevy x/z lands on the same cells. The height is the
 // vertex's own, not the chunk record's: lights sit near the surface.
 fn mcnk_cell_anchor(P: vec3<f32>) -> vec3<f32> {
@@ -1406,7 +1406,7 @@ fn wow_fragment(in: WowVsOut, is_front: bool) -> WowFragOut {
     }
 }
     // The far-clip wall: discard past `farclip` (`fog_params.w`, 0 = off) by planar eye depth, as
-    // terrain.wgsl does. Off on a part wholly inside the wall (`benilla_world::far_wall`).
+    // terrain.wesl does. Off on a part wholly inside the wall (`benilla_world::far_wall`).
 @if(WOW_FAR_WALL) {
     if (wow_light.fog_params.w > 0.0) {
         let clip_z = -(view.view_from_world * vec4<f32>(in.world_position.xyz, 1.0)).z;
@@ -1709,7 +1709,7 @@ fn wow_fragment(in: WowVsOut, is_front: bool) -> WowFragOut {
             vec3<f32>(1.0));
     }
 
-    // Linear fog by planar eye depth, as in terrain.wgsl. Per-batch colour policy (`clutter_fade.z`
+    // Linear fog by planar eye depth, as in terrain.wesl. Per-batch colour policy (`clutter_fade.z`
     // bits 4-6, the M2 state setter `0x70baf0`): 0 scene, 1 black (additive), 2 white (Mod),
     // 3 grey (Mod2x), 4 unfogged (render flag 0x02). Tag bit 30, not the static `model_flags.z`,
     // selects the interior triple: WMO content by the per-group `[0xca7f00]` gate on the pushes

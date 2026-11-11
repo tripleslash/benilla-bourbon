@@ -80,7 +80,7 @@ fn init_pipelines(
         label: Some("modern_light_bin".into()),
         layout: vec![layout.clone()],
         immediate_size: 0,
-        shader: asset_server.load("embedded://benilla_world/shaders/modern/light_bin.wgsl"),
+        shader: asset_server.load("embedded://benilla_world/shaders/modern/light_bin.wesl"),
         shader_defs: vec![],
         entry_point: Some("bin_lights".into()),
         zero_initialize_workgroup_memory: false,

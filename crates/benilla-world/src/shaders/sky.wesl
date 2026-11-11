@@ -1,6 +1,6 @@
 // The sky-dome gradient (`SkyExt`): the five Light.dbc SkyColor stops at the reference's ring
 // elevations, then the fog colour at and below the horizon (`0x6d0d10`, `0x6d0f50`), interpolated
-// per fragment by elevation. Depth is the far pin in `sky_vertex.wgsl`; this writes colour only.
+// per fragment by elevation. Depth is the far pin in `sky_vertex.wesl`; this writes colour only.
 import bevy_pbr::{
     render::forward_io::VertexOutput,
     render::mesh_view_bindings::view,

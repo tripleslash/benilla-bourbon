@@ -14,7 +14,7 @@ import bevy_render::view::{View, position_ndc_to_view, uv_to_ndc};
 @group(0) @binding(1) var scene_color: texture_2d<f32>;
 // Its quarter-size blur.
 @group(0) @binding(2) var scene_blur: texture_2d<f32>;
-// Linear view depth in yards, `R32Float`; the sky reads `liquid_screen.wgsl`'s `NO_DEPTH` (1e9).
+// Linear view depth in yards, `R32Float`; the sky reads `liquid_screen.wesl`'s `NO_DEPTH` (1e9).
 @group(0) @binding(3) var scene_depth: texture_2d<f32>;
 @group(0) @binding(4) var scene_samp: sampler;
 // rgb = the sky colour a ray that finds nothing reflects.

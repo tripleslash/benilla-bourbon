@@ -1,7 +1,7 @@
 // Modern lighting (FORK.md, P2 stage 3): entity-lane model parts — fading and
 // animated doodads, game objects, creatures and characters — drawn depth-only into the modern sun's
 // cascades. SKINNED reads the owned palettes from the shared light buffer exactly as
-// `wow_model.wgsl` does; CUTOUT alpha-keys the base texture at the vanilla 224/255 reference.
+// `wow_model.wesl` does; CUTOUT alpha-keys the base texture at the vanilla 224/255 reference.
 struct CasterView {
     clip_from_world: mat4x4<f32>,
     // fork: a lamp cube face's fixture box (xyz its light, w the half-extent; 0 = none). Read only by
@@ -27,7 +27,7 @@ struct EntityDraw {
 @group(1) @binding(0) var<uniform> part: EntityDraw;
 
 @if(SKINNED) {
-// The shared light buffer, laid out exactly as `wow_model.wgsl`'s `WowLight`; only the rig
+// The shared light buffer, laid out exactly as `wow_model.wesl`'s `WowLight`; only the rig
 // regions are read.
 struct SkinRegions {
     _header: array<vec4<f32>, 21>,
@@ -46,7 +46,7 @@ struct SkinRegions {
 }
 @group(1) @binding(1) var<storage, read> skin: SkinRegions;
 
-// wow_model.wgsl's `wow_rig_row`: the table word packs the base bone and the body's bone count.
+// wow_model.wesl's `wow_rig_row`: the table word packs the base bone and the body's bone count.
 fn wow_rig_row(word: u32, joint: u32) -> u32 {
     let base = word & 0x1ffffu;
     return select(base + joint, base + (word >> 17u) + (joint & 0x7fffu), joint >= 0x8000u);

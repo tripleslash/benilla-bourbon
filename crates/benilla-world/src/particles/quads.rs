@@ -264,7 +264,7 @@ pub(super) fn expand_quads(
         // The model's render alpha scales alpha alone, never RGB (`0x7b9b10`, the `0x7b9b42` fmul).
         rgba[3] *= frame.alpha;
         // Raw authored gamma RGB: additive stacks sum in gamma like the reference's bytes, and
-        // the FFX chain's scene reads apply their 255 saturation (`ffx_glow.wgsl`), not this.
+        // the FFX chain's scene reads apply their 255 saturation (`ffx_glow.wesl`), not this.
         let center = particle_center(frame, placement, p);
         // `size` is the half-extent (corners ±1.0, `0x7b2d0c`), times the gated twinkle and the
         // flagged instance scale; a twinkle range with min == max burns steady.

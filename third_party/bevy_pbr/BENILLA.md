@@ -60,7 +60,7 @@ the per-view pass spans still nest under nothing that queries statistics.
 
 `src/material.rs`, `DrawMaterial`. benilla's ray-traced shadows (`benilla-world`
 `modern/rt_shadow.rs`, native only) cast rays from the fragment stages of its own materials
-(`wow_model.wgsl`, `terrain.wgsl`, `liquid_cata.wgsl`), which needs the ray-traced scene's bind
+(`wow_model.wesl`, `terrain.wesl`, `liquid_cata.wesl`), which needs the ray-traced scene's bind
 group (a TLAS and a texture binding array, neither of which `AsBindGroup` can declare) bound beside
 the material's. The materials' `MaterialExtension::specialize` appends its layout as group 4, and the
 hunk adds `SetMaterialExtraBindGroup<{ MATERIAL_BIND_GROUP_INDEX + 1 }>` to `DrawMaterial` ahead of
@@ -73,7 +73,7 @@ devices whose `max_bind_groups` reaches it. The prepass and shadow draw function
 ## The fifth delta: the view uniform is visible to task and mesh stages where the device has them
 
 `src/render/mesh_view_bindings.rs`. benilla's static_gx mesh-shader lane (`benilla-world`
-`static_gx/render/meshlets.rs`, native, Vulkan) runs `static_gx.wgsl`'s vertex work in a mesh
+`static_gx/render/meshlets.rs`, native, Vulkan) runs `static_gx.wesl`'s vertex work in a mesh
 stage and its meshlet cull in a task stage, and both read `view` (group 0, binding 0) as the vertex
 stage does. A binding a stage reads must name that stage, so `MeshPipelineViewLayoutParams` gains
 `view_stages`, set by `init_mesh_pipeline_view_layouts` to `VERTEX_FRAGMENT | TASK | MESH` where the

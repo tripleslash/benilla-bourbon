@@ -39,7 +39,7 @@
 //! One per static_gx view, [`GxHiZ::pyramid`]: `R32Float`, level 0 the previous power of two of
 //! the view's depth texture in each axis, a full mip chain down to 1x1. Each texel holds the
 //! farthest reverse-Z depth (the minimum) of the depth texels it covers, footprints taken
-//! conservatively (`gx_hiz.wgsl`); uv (0, 0) is the depth texture's top left. It holds the static
+//! conservatively (`gx_hiz.wesl`); uv (0, 0) is the depth texture's top left. It holds the static
 //! world's early-phase depth only: the regions drawn in step 2, no terrain, no entity, no late
 //! draw. It is valid from step 3 of this frame until step 3 of the next, and reads as a
 //! `texture_2d<f32>` (unfilterable) with `textureLoad`.
@@ -73,10 +73,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 /// The lane's startup decision, for the main world's [`arm_depth`].
 static LANE: AtomicBool = AtomicBool::new(false);
 
-/// Threads per cull workgroup (`gx_cull.wgsl`).
+/// Threads per cull workgroup (`gx_cull.wesl`).
 const CULL_WORKGROUP: u32 = 64;
 
-/// Texels per pyramid workgroup side (`gx_hiz.wgsl`).
+/// Texels per pyramid workgroup side (`gx_hiz.wesl`).
 const HIZ_TILE: u32 = 8;
 
 /// `CullUniform::flags`: the pyramid holds a frame built under `prev_clip_from_world`.
@@ -97,7 +97,7 @@ const READBACKS: usize = 3;
 /// Frames a view's pyramid outlives its last frame (a mirror that stands down and comes back).
 pub(super) const KEEP_FRAMES: u32 = 300;
 
-/// The cull's uniform. Keep in sync with `CullView` in `gx_occlusion.wgsl`.
+/// The cull's uniform. Keep in sync with `CullView` in `gx_occlusion.wesl`.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct CullUniform {
@@ -500,7 +500,7 @@ fn init_gpu_cull(
     );
     let cull_layout = BindGroupLayoutDescriptor::new("static_gx_cull_layout", &cull_entries);
     // fork: meshlets — the same entries, then the mesh meta (read) and the task dispatches and
-    // candidate refs the survivors write (`gx_cull.wgsl` under `GX_MESHLETS`).
+    // candidate refs the survivors write (`gx_cull.wesl` under `GX_MESHLETS`).
     let cull_mesh_layout = indirect.meshlet_lane().then(|| {
         let extra = BindGroupLayoutEntries::with_indices(
             ShaderStages::COMPUTE,
@@ -515,9 +515,9 @@ fn init_gpu_cull(
         BindGroupLayoutDescriptor::new("static_gx_cull_mesh_layout", &entries)
     });
     let hiz: Handle<Shader> =
-        asset_server.load("embedded://benilla_world/shaders/modern/gx_hiz.wgsl");
+        asset_server.load("embedded://benilla_world/shaders/modern/gx_hiz.wesl");
     let cull: Handle<Shader> =
-        asset_server.load("embedded://benilla_world/shaders/modern/gx_cull.wgsl");
+        asset_server.load("embedded://benilla_world/shaders/modern/gx_cull.wesl");
     let queue = |label: &'static str,
                  layout: &BindGroupLayoutDescriptor,
                  shader: &Handle<Shader>,
@@ -881,7 +881,7 @@ impl<'w> GxCullPass<'w> {
     }
 
     /// fork: meshlets — the survivors carry their task dispatches and candidate refs this frame
-    /// (`gx_cull.wgsl` under `GX_MESHLETS`), so the mesh-shader lane can draw them.
+    /// (`gx_cull.wesl` under `GX_MESHLETS`), so the mesh-shader lane can draw them.
     pub(super) fn meshlets(&self) -> bool {
         self.meshlets
     }
@@ -1004,9 +1004,9 @@ mod tests {
     fn the_uniform_and_the_pyramid_agree_with_the_shaders() {
         assert_eq!(
             CULL_UNIFORM_SIZE, 176,
-            "CullView in gx_occlusion.wgsl is 176 bytes"
+            "CullView in gx_occlusion.wesl is 176 bytes"
         );
-        let lib = include_str!("../../shaders/modern/gx_occlusion.wgsl");
+        let lib = include_str!("../../shaders/modern/gx_occlusion.wesl");
         assert!(lib.contains(&format!("const PREV_VALID: u32 = {PREV_VALID}u;")));
         assert!(lib.contains(&format!("const STATS: u32 = {STATS}u;")));
         assert!(lib.contains(&format!("const MIRRORED: u32 = {MIRRORED}u;")));
@@ -1014,9 +1014,9 @@ mod tests {
             "const NO_CONE: i32 = {};",
             crate::static_gx::meshlet::NO_CONE
         )));
-        let src = include_str!("../../shaders/modern/gx_cull.wgsl");
+        let src = include_str!("../../shaders/modern/gx_cull.wesl");
         assert!(src.contains(&format!("@workgroup_size({CULL_WORKGROUP}, 1, 1)")));
-        let hiz = include_str!("../../shaders/modern/gx_hiz.wgsl");
+        let hiz = include_str!("../../shaders/modern/gx_hiz.wesl");
         assert!(hiz.contains(&format!("@workgroup_size({HIZ_TILE}, {HIZ_TILE}, 1)")));
         assert_eq!(
             [1, 1919, 1920, 2048, 2049].map(prev_pow2),

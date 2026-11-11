@@ -5,7 +5,7 @@
 // The raster position goes through the frame's JITTERED clip-from-world, the matrix the main pass
 // drew the part with, so the depth test meets its own depth; the motion goes through the
 // UNJITTERED current and previous matrices, so it carries no sub-pixel offset. SKINNED skins twice,
-// with `entity_shadow.wgsl`'s code: once from the live palettes in the shared light buffer, once
+// with `entity_shadow.wesl`'s code: once from the live palettes in the shared light buffer, once
 // from last world frame's copy of it.
 
 struct VelocityView {
@@ -27,7 +27,7 @@ struct VelocityPart {
 @group(1) @binding(0) var<uniform> part: VelocityPart;
 
 @if(SKINNED) {
-// The shared light buffer, laid out exactly as `wow_model.wgsl`'s `WowLight`; only the rig
+// The shared light buffer, laid out exactly as `wow_model.wesl`'s `WowLight`; only the rig
 // regions are read.
 struct SkinRegions {
     _header: array<vec4<f32>, 21>,
@@ -68,7 +68,7 @@ struct PartVsOut {
 }
 
 @if(SKINNED) {
-// wow_model.wgsl's `wow_rig_row`: the table word packs the base bone and the body's bone count.
+// wow_model.wesl's `wow_rig_row`: the table word packs the base bone and the body's bone count.
 fn wow_rig_row(word: u32, joint: u32) -> u32 {
     let base = word & 0x1ffffu;
     return select(base + joint, base + (word >> 17u) + (joint & 0x7fffu), joint >= 0x8000u);

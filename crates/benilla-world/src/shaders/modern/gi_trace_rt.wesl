@@ -1,8 +1,8 @@
 // fork: the probe trace's ray stage at the ray-traced tier (`modern::gi::rt_gi`, native only): the
-// twin of `gi_trace.wgsl`'s `trace_rays` that casts each ray as a ray query against the TLAS of
+// twin of `gi_trace.wesl`'s `trace_rays` that casts each ray as a ray query against the TLAS of
 // `benilla_modern::rt_scene` (the static world and the terrain, cutout texels alpha-tested) instead
 // of marching the voxel clipmap and the heightfield. `setup_probes` and `sum_probes` are
-// `gi_trace.wgsl`'s own, over the same group 0, so a probe is set up, summed and blended exactly as
+// `gi_trace.wesl`'s own, over the same group 0, so a probe is set up, summed and blended exactly as
 // on the voxel path; only what a ray finds differs.
 //
 // A hit is shaded as the voxel path shades a voxel: the surface's albedo (its texel at the voxel
@@ -22,13 +22,13 @@ import benilla_world::shaders::modern::rt_scene;
 enable wgpu_ray_query;
 
 
-// `gi_trace.wgsl`'s `LightRows`.
+// `gi_trace.wesl`'s `LightRows`.
 struct LightRows {
     rows: array<vec4<f32>, 21>,
     points: array<vec4<f32>, 512>,
 }
 
-// `gi_trace.wgsl`'s `GiTrace`; `clip.info.w` is the ray's reach (yd).
+// `gi_trace.wesl`'s `GiTrace`; `clip.info.w` is the ray's reach (yd).
 struct GiTrace {
     gi: probegi::GiParams,
     clip: probegi::GiClip,
@@ -54,7 +54,7 @@ struct GiWork {
 }
 @group(0) @binding(9) var<storage, read> work: GiWork;
 
-// `gi_trace.wgsl`'s `GiSetup`, as `setup_probes` leaves it.
+// `gi_trace.wesl`'s `GiSetup`, as `setup_probes` leaves it.
 struct GiSetup {
     pos: vec4<f32>,
     info: vec4<u32>,
@@ -66,15 +66,15 @@ struct GiSetup {
 
 const LANES: u32 = 64u;
 const NEAR_LIGHTS: u32 = 4u;
-// `static_gx_voxel.wgsl`'s albedo mip (`modern_gi::VOXEL_ALBEDO_MIP`): a texel's worth of detail is
+// `static_gx_voxel.wesl`'s albedo mip (`modern_gi::VOXEL_ALBEDO_MIP`): a texel's worth of detail is
 // noise to a probe, and the two paths have to bounce the same colour.
 const ALBEDO_MIP: f32 = 3.0;
-// `static_gx_voxel.wgsl`'s untextured albedo.
+// `static_gx_voxel.wesl`'s untextured albedo.
 const UNTEXTURED: vec3<f32> = vec3<f32>(0.5);
 var<private> near_light: array<u32, 4>;
 var<private> near_count: u32;
 
-// `gi_trace.wgsl`'s `local_light_at`.
+// `gi_trace.wesl`'s `local_light_at`.
 fn local_light_at(p: vec3<f32>, nrm: vec3<f32>) -> vec3<f32> {
     var sum = vec3<f32>(0.0);
     for (var k = 0u; k < near_count; k = k + 1u) {
@@ -88,7 +88,7 @@ fn local_light_at(p: vec3<f32>, nrm: vec3<f32>) -> vec3<f32> {
     return sum;
 }
 
-// `gi_trace.wgsl`'s `fib_dir`, `rotate`, `bounce_at`, `listed_count` and `ray_slot`, unchanged: the
+// `gi_trace.wesl`'s `fib_dir`, `rotate`, `bounce_at`, `listed_count` and `ray_slot`, unchanged: the
 // sum stage recomputes the same directions to project these rays.
 fn fib_dir(i: u32, n: f32) -> vec3<f32> {
     let k = f32(i) + 0.5;
@@ -163,14 +163,14 @@ fn cast_ray(origin: vec3<f32>, dir: vec3<f32>, t_min: f32, reach: f32) -> RtHit 
     if ((word & rt_scene::WORD_TEXTURED) != 0u) {
         let uv = rt_scene::vertex_uv(v.x) * w.x + rt_scene::vertex_uv(v.y) * w.y + rt_scene::vertex_uv(v.z) * w.z;
         // The pool keeps the images' unorm formats, so the sample is the authored value the probes
-        // light in, as `static_gx_voxel.wgsl` writes the voxel.
+        // light in, as `static_gx_voxel.wesl` writes the voxel.
         albedo = rt_scene::texel(inst.row, word, uv, ALBEDO_MIP).rgb;
     }
     let two_sided = select(0.0, 1.0, hit.geometry_index == inst.cutout_geometry);
     return RtHit(1.0, hit.t, pos, albedo, nrm, two_sided);
 }
 
-// One ray per lane, ray-major across consecutive probes: `gi_trace.wgsl`'s `trace_rays`, with the
+// One ray per lane, ray-major across consecutive probes: `gi_trace.wesl`'s `trace_rays`, with the
 // ray query in place of `probegi::march`. Its output rows are the voxel stage's, so `sum_probes`
 // and the blend read them unchanged.
 @compute @workgroup_size(64)

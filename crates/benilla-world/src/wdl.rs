@@ -1,7 +1,7 @@
 //! Distant low-detail terrain (WDL): the map's coarse horizon heightmap streamed around the view
 //! beyond the ADT ring, drawn unlit under a fog pair of its own that saturates it to the flat
 //! scene-fog colour. The parse and mesh are `benilla_formats::wdl`; the reference's backdrop law
-//! that partitions it from the detailed world is `wdl.wgsl`'s header.
+//! that partitions it from the detailed world is `wdl.wesl`'s header.
 
 use std::collections::HashMap;
 
@@ -350,12 +350,12 @@ fn the_far_band_stays_a_depth_pushed_backdrop() {
     let src = benilla_assets::materials::WDL_WGSL;
     assert!(
         src.contains("const WDL_OVERLAP: f32 = 33.0;"),
-        "wdl.wgsl: the far band's 33 yd overlap into the wall is gone — the coarse-vs-fine seam \
+        "wdl.wesl: the far band's 33 yd overlap into the wall is gone — the coarse-vs-fine seam \
          reopens as a hole at the horizon (the reference's far-band near plane, [0x8101b0])"
     );
     assert!(
         src.contains("out.depth = depth;") && src.contains("view_z_to_depth_ndc(-farclip)"),
-        "wdl.wgsl: the far band no longer clamps its depth behind the far-clip wall — its overlap \
+        "wdl.wesl: the far band no longer clamps its depth behind the far-clip wall — its overlap \
          now pokes THROUGH the detailed terrain (the reference's compressed far-band depth range)"
     );
 }
@@ -368,12 +368,12 @@ fn the_far_band_is_a_fog_hull_not_a_fogged_surface() {
     let src = benilla_assets::materials::WDL_WGSL;
     assert!(
         src.contains("rgb = w.fog_color.xyz;"),
-        "wdl.wgsl: the hull no longer paints the flat fog colour (the reference's own start-0 / \
+        "wdl.wesl: the hull no longer paints the flat fog colour (the reference's own start-0 / \
          end-1.0 fog pair, saturated beyond one yard)"
     );
     assert!(
         !src.contains("w.fog_params.x") && !src.contains("w.fog_params.y"),
-        "wdl.wgsl: the hull reads the SCENE fog distances again — the 33 yd overlap goes partly \
+        "wdl.wesl: the hull reads the SCENE fog distances again — the 33 yd overlap goes partly \
          white at low view distances"
     );
 }

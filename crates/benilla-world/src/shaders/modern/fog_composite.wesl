@@ -22,7 +22,7 @@ import benilla_world::shaders::modern::froxelfog;
 @group(0) @binding(4) var<storage, read> modern_block: sunshadow::ModernBlock;
 
 // The shared light buffer's prefix (`lighting::global_light`): the header rows and the point table,
-// packed nearest-to-camera first (`froxel_scatter.wgsl` binds the same).
+// packed nearest-to-camera first (`froxel_scatter.wesl` binds the same).
 struct LightTable {
     rows: array<vec4<f32>, 21>,
     points: array<vec4<f32>, 512>,
@@ -43,7 +43,7 @@ const HALO_REACH: f32 = 3.0;
 const HALO_TAPS: u32 = 8u;
 
 // fork: **the halo along this pixel's own ray.** For each halo light (`froxelfog::is_halo_light`),
-// the halo share the froxels leave out (`froxel_scatter.wgsl`'s `point_in_scatter`):
+// the halo share the froxels leave out (`froxel_scatter.wesl`'s `point_in_scatter`):
 // `(gain - far) · exp(-dl / halo_yd)` over the same falloff and phase, scattered by the medium and by
 // the light's own lamp air (`froxelfog::lamp_air`), integrated from the eye to the surface `seg`
 // yards out — so a surface in front of a lamp cuts its halo, and a lamp in the open stands in a glow
@@ -162,7 +162,7 @@ fn fs_composite(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let mirror = sunshadow::mirror_view(modern_block.cascades, view.world_position);
 
     // The seam: over the last stretch before the view distance the detailed world dissolves into the
-    // distant band's own silhouette (`wdl.wgsl`: the distant terrain's albedo under the ambient, flat),
+    // distant band's own silhouette (`wdl.wesl`: the distant terrain's albedo under the ambient, flat),
     // so where the detailed terrain ends and the WDL band begins there is no line. (The band itself is drawn behind the wall — its depth sits past `farclip`.)
     let farclip = f.phase.y;
     if (!sky && farclip > 0.0 && !mirror) {

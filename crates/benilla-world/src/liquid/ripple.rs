@@ -1,7 +1,7 @@
 //! **The dynamic ripple displacement map** — the height field a wading body pushes into the water,
 //! and the wave that spreads out from it.
 //!
-//! `liquid_ripple.wgsl` carries the integration and the reprojection; this file carries the wiring
+//! `liquid_ripple.wesl` carries the integration and the reprojection; this file carries the wiring
 //! and the three decisions the wiring exists for.
 //!
 //! ## One square of world, following the camera, snapped to texels
@@ -107,7 +107,7 @@ const MAX_CATCHUP: u32 = 2;
 /// The reference's own damping (`PropagateDisplMap`'s `c0.z`).
 const DAMPING: f32 = 0.97;
 
-/// The most disturbances integrated in one step — **must match `liquid_ripple.wgsl`'s
+/// The most disturbances integrated in one step — **must match `liquid_ripple.wesl`'s
 /// `MAX_STAMPS`**, and this file is where the number lives.
 ///
 /// Sized for RAIN, which is the reference's own source and by far the heaviest: [`RAIN_DROPS`] a
@@ -198,7 +198,7 @@ const PERTURB_SCALE: f32 = 1.25;
 /// defect rather than as a wake.
 const RIPPLE_SLOPE: f32 = 2.0;
 
-/// The packed uniform both `liquid_ripple.wgsl` and `liquid_cata.wgsl` read. Field order is the
+/// The packed uniform both `liquid_ripple.wesl` and `liquid_cata.wesl` read. Field order is the
 /// WGSL `Ripple` struct's; reordering is a breaking change.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -211,7 +211,7 @@ pub(super) struct RippleStd430 {
     /// fork: modern lighting — the sky dome's five gradient stops (zenith → 1.8°) and its horizon
     /// colour ([`crate::sky::dome_stops`]), for the water's sky reflection wherever the mirror has
     /// no picture. On this buffer because it is the water's own and already rewritten every frame:
-    /// the tail costs 96 bytes of an upload that happens anyway, and no binding. `liquid_ripple.wgsl`
+    /// the tail costs 96 bytes of an upload that happens anyway, and no binding. `liquid_ripple.wesl`
     /// declares the struct only up to `stamps`, which a larger buffer binds against.
     sky: [[f32; 4]; SKY_ROWS],
 }
@@ -543,7 +543,7 @@ pub(super) fn collect_stamps(
     //
     // The field's only weather source: a point stamp spreads as a ring, which reads as a raindrop
     // whatever made it, so nothing stamps the open water in clear weather. A modern frame's wind
-    // is in the shader's normal (`sunshadow::wind_swell`, `liquid_cata.wgsl`'s ripple trains).
+    // is in the shader's normal (`sunshadow::wind_swell`, `liquid_cata.wesl`'s ripple trains).
     let Some(weather) = weather else {
         return;
     };
@@ -598,7 +598,7 @@ fn init_pipeline(
     device: Res<RenderDevice>,
 ) {
     let shader: Handle<Shader> =
-        asset_server.load("embedded://benilla_world/shaders/liquid_ripple.wgsl");
+        asset_server.load("embedded://benilla_world/shaders/liquid_ripple.wesl");
     let layout = BindGroupLayoutDescriptor::new(
         "liquid_ripple_layout",
         &BindGroupLayoutEntries::with_indices(
@@ -845,24 +845,24 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
     use std::time::Duration;
 
-    /// The blob's layout is copied by hand into both shaders that bind it, and `liquid_cata.wgsl`
+    /// The blob's layout is copied by hand into both shaders that bind it, and `liquid_cata.wesl`
     /// reads the sky rows PAST the stamp array — so a stamp count that drifts in one copy shifts the
     /// water's sky reflection onto stamp data with no error anywhere. Pin all three copies.
     #[test]
     fn both_shaders_declare_the_blob_this_packs() {
-        let cata = include_str!("../../../benilla-assets/src/shaders/liquid_cata.wgsl");
-        let step = include_str!("../shaders/liquid_ripple.wgsl");
+        let cata = include_str!("../../../benilla-assets/src/shaders/liquid_cata.wesl");
+        let step = include_str!("../shaders/liquid_ripple.wesl");
         let stamps = format!("stamps: array<vec4<f32>, {MAX_STAMPS}>");
         assert!(
             cata.contains(&stamps),
-            "liquid_cata.wgsl must declare `{stamps}`"
+            "liquid_cata.wesl must declare `{stamps}`"
         );
         let sky = format!("sky: array<vec4<f32>, {SKY_ROWS}>");
-        assert!(cata.contains(&sky), "liquid_cata.wgsl must declare `{sky}`");
+        assert!(cata.contains(&sky), "liquid_cata.wesl must declare `{sky}`");
         let count = format!("const MAX_STAMPS: u32 = {MAX_STAMPS}u;");
         assert!(
             step.contains(&count),
-            "liquid_ripple.wgsl must declare `{count}`"
+            "liquid_ripple.wesl must declare `{count}`"
         );
     }
 

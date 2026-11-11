@@ -2063,7 +2063,7 @@ pub(crate) fn apply_self_model_fade(
         if tag.value != bits {
             tag.value = bits;
         }
-        // The blend twin too: an additive card fades by alpha alone (`wow_model.wgsl`), an opaque
+        // The blend twin too: an additive card fades by alpha alone (`wow_model.wesl`), an opaque
         // one only through the twin. `Visibility` is the card's hidden-owner mirror's.
         if let (Some(fm), Some(mut mat)) = (fm, mat) {
             let want = benilla_world::model_render::far_resolved(

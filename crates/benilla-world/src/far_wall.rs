@@ -1,4 +1,4 @@
-//! The far-clip wall, compiled out where it cannot cut. `wow_model.wgsl` clips the detailed world
+//! The far-clip wall, compiled out where it cannot cut. `wow_model.wesl` clips the detailed world
 //! per pixel at `farclip` on planar eye-Z (the reference's far plane), and a reachable `discard`
 //! costs a draw a tile GPU's hidden-surface removal even where it never fires. A part whose bound
 //! lies wholly inside the wall draws through an opaque twin without it ([`NO_FAR_WALL_MARKER`]).

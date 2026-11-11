@@ -1,5 +1,5 @@
 //! The owned skin palette: every skinned rig's joint palette, computed here and uploaded to a
-//! region of the shared light buffer that `wow_model.wgsl`'s vertex stage skins from, in place of
+//! region of the shared light buffer that `wow_model.wesl`'s vertex stage skins from, in place of
 //! Bevy's `SkinnedMesh`. Rows are rig-relative (`rig_from_joint × inverse_bindpose`, the rig's
 //! origin subtracted) and the vertex stage adds `origin − camera` back, so no vertex is an
 //! absolute f32 world coordinate, whose ~1 mm ULP at ~9.5 k yards shimmers every frame.
@@ -20,15 +20,15 @@ use crate::mesh_tag::MAX_RIG_SLOTS;
 use crate::vis_chain::VisChainOnly;
 
 /// Bone capacity across every live rig, about twice a Lower Blackrock Spire census (~61 k).
-/// Mirrored by `wow_model.wgsl`'s region declaration: keep in sync.
+/// Mirrored by `wow_model.wesl`'s region declaration: keep in sync.
 pub(crate) const MAX_PALETTE_BONES: usize = 131_072;
 
 /// Bytes a bone: 3 `vec4` rows of the affine.
 const BONE_BYTES: u64 = 48;
 
 /// A slot table word: the base bone in bits 0..=16 (`MAX_PALETTE_BONES` is `1 << 17`), the body's
-/// own bone count above it, where its rider rows start. `wow_model.wgsl`, `entity_shadow.wgsl` and
-/// `velocity.wgsl` decode it (`wow_rig_row`): keep in sync.
+/// own bone count above it, where its rider rows start. `wow_model.wesl`, `entity_shadow.wesl` and
+/// `velocity.wesl` decode it (`wow_rig_row`): keep in sync.
 const TABLE_BASE_BITS: u32 = 17;
 const TABLE_BASE_MASK: u32 = (1 << TABLE_BASE_BITS) - 1;
 const _: () = assert!(MAX_PALETTE_BONES == 1 << TABLE_BASE_BITS);
@@ -55,7 +55,7 @@ pub(crate) fn rig_origin_region_bytes() -> u64 {
 }
 
 /// Byte offset of the palette rows, after the slot, tint, origin, mat-anim and straddle-clip
-/// tables: last, because `wow_model.wgsl` declares them as the struct's one runtime-sized array.
+/// tables: last, because `wow_model.wesl` declares them as the struct's one runtime-sized array.
 pub(crate) fn palette_region_offset() -> u64 {
     crate::straddle::region_offset() + crate::straddle::region_bytes()
 }
@@ -1675,7 +1675,7 @@ mod tests {
 
     #[test]
     fn region_layout_is_consistent() {
-        // `wow_model.wgsl` mirrors this layout, and wgpu checks the bound size against its struct
+        // `wow_model.wesl` mirrors this layout, and wgpu checks the bound size against its struct
         // at draw time, so a mismatch fails there.
         assert_eq!(
             crate::instance_tint::region_offset() - rig_table_region_offset(),

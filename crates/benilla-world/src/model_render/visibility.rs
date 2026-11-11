@@ -277,7 +277,7 @@ pub(super) fn apply_model_visibility(
             *vis = want;
         }
         // The reference's WMO liquid pass pushes interior fog under the same `[0xca7f00]` as the
-        // geometry. `liquid.wgsl` ANDs it with the surface's own class.
+        // geometry. `liquid.wesl` ANDs it with the surface's own class.
         if let Some(mut tag) = tag {
             let on = instances
                 .get(gv.instance)

@@ -7,11 +7,11 @@ use bevy::prelude::*;
 /// Register the five shaders under `embedded://benilla_app/shaders/…`; added after `DefaultPlugins`
 /// creates the registry it fills.
 pub(crate) fn plugin(app: &mut App) {
-    bevy::asset::embedded_asset!(app, "shaders/ui_quad.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/ui_add.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/ui_gamma.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/ui_node_gamma.wgsl");
-    bevy::asset::embedded_asset!(app, "shaders/ui_slice_gamma.wgsl");
+    bevy::asset::embedded_asset!(app, "shaders/ui_quad.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/ui_add.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/ui_gamma.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/ui_node_gamma.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/ui_slice_gamma.wesl");
     bevy::asset::embedded_asset!(app, "shaders/shadow_caster.wgsl");
 }
 
@@ -33,7 +33,7 @@ mod tests {
         let mut found = 0;
         for entry in std::fs::read_dir(dir).unwrap() {
             let name = entry.unwrap().file_name().to_string_lossy().into_owned();
-            if !name.ends_with(".wgsl") {
+            if !(name.ends_with(".wgsl") || name.ends_with(".wesl")) {
                 continue;
             }
             found += 1;
@@ -50,7 +50,7 @@ mod tests {
         assert_eq!(found, 6, "the game's shader set changed size");
     }
 
-    /// Every `.wgsl` file under `dir` of the embedded source, as the asset server would serve it.
+    /// Every `.wgsl` and `.wesl` file under `dir` of the embedded source, as the asset server would serve it.
     /// The tests' `ShaderCache` loader: bevy 0.20 composes to WGSL text, which naga parses.
     fn naga_module(
         _: &(),
@@ -94,7 +94,7 @@ mod tests {
         for path in entries {
             if bevy::tasks::block_on(reader.is_directory(&path)).unwrap_or(false) {
                 embedded_shaders(source, &path, out);
-            } else if path.extension().is_some_and(|e| e == "wgsl") {
+            } else if path.extension().is_some_and(|e| e == "wgsl" || e == "wesl") {
                 let text = bevy::tasks::block_on(async {
                     let mut bytes = Vec::new();
                     let mut r = reader.read(&path).await.ok()?;
@@ -115,7 +115,7 @@ mod tests {
         }
     }
 
-    /// No gate draws a frame, so `ui_quad.wgsl` is composed here as the pipeline cache composes it:
+    /// No gate draws a frame, so `ui_quad.wesl` is composed here as the pipeline cache composes it:
     /// bevy's `ShaderCache` over every embedded shader library, with the defs the 2D mesh pipeline
     /// gives each of the two vertex layouts it draws (the batch mesh and the minimap's tile quad).
     /// The module must validate and translate for the backend this platform renders with.
@@ -135,12 +135,12 @@ mod tests {
             let id = AssetId::<Shader>::Uuid {
                 uuid: bevy::asset::uuid::Uuid::from_u128(i as u128 + 1),
             };
-            if path == "benilla_app/shaders/ui_quad.wgsl" {
+            if path == "benilla_app/shaders/ui_quad.wesl" {
                 ui_quad = Some(id);
             }
             cache.set_shader(id, shader_of(text, &path));
         }
-        let ui_quad = ui_quad.expect("ui_quad.wgsl is embedded");
+        let ui_quad = ui_quad.expect("ui_quad.wesl is embedded");
 
         let storage =
             bevy::render::settings::WgpuLimits::default().max_storage_buffers_per_shader_stage;
@@ -156,13 +156,13 @@ mod tests {
             ));
             let module = cache
                 .get(0, ui_quad, &defs)
-                .unwrap_or_else(|e| panic!("{layout:?}: ui_quad.wgsl does not compose: {e:?}"));
+                .unwrap_or_else(|e| panic!("{layout:?}: ui_quad.wesl does not compose: {e:?}"));
             let info = naga::valid::Validator::new(
                 naga::valid::ValidationFlags::all(),
                 naga::valid::Capabilities::default(),
             )
             .validate(&module)
-            .unwrap_or_else(|e| panic!("{layout:?}: ui_quad.wgsl does not validate: {e:?}"));
+            .unwrap_or_else(|e| panic!("{layout:?}: ui_quad.wesl does not validate: {e:?}"));
             #[cfg(target_os = "macos")]
             naga::back::msl::write_string(
                 &module,
@@ -176,12 +176,12 @@ mod tests {
                 &naga::back::msl::PipelineOptions::default(),
             )
             .unwrap_or_else(|e| {
-                panic!("{layout:?}: ui_quad.wgsl does not translate to MSL: {e:?}")
+                panic!("{layout:?}: ui_quad.wesl does not translate to MSL: {e:?}")
             });
             #[cfg(not(target_os = "macos"))]
             naga::back::spv::write_vec(&module, &info, &naga::back::spv::Options::default(), None)
                 .unwrap_or_else(|e| {
-                    panic!("{layout:?}: ui_quad.wgsl does not translate to SPIR-V: {e:?}")
+                    panic!("{layout:?}: ui_quad.wesl does not translate to SPIR-V: {e:?}")
                 });
         }
     }
@@ -192,14 +192,12 @@ mod tests {
         /// Every library this platform's client registers.
         Here,
         /// The browser's set: the ray-query libraries out (`benilla_world::shaders`' native-only
-        /// block), the empty `rtshadow` and `rtreflect` it registers in their place in.
+        /// block).
         Web,
-        /// The browser's set without those two stand-ins, as it stood before them.
-        WebWithoutStandIns,
     }
 
     /// A `ShaderCache` over `libraries` plus the cata water (`benilla_assets`'s
-    /// `liquid_cata.wgsl`), and the water's id in it. Bevy 0.20's cache composes to WGSL text
+    /// `liquid_cata.wesl`), and the water's id in it. Bevy 0.20's cache composes to WGSL text
     /// whatever the device; each test validates against the capabilities it names.
     fn cata_water_cache(
         libraries: Libraries,
@@ -217,23 +215,13 @@ mod tests {
             // The web registers no library that needs ray queries.
             files.retain(|(_, text)| !text.contains("enable wgpu_ray_query;"));
         }
-        if libraries == Libraries::Web {
-            files.push((
-                "benilla_world/shaders/modern/rt_shadow_web.wgsl".into(),
-                include_str!("../../benilla-world/src/shaders/modern/rt_shadow_web.wgsl").into(),
-            ));
-            files.push((
-                "benilla_world/shaders/modern/rt_reflect_web.wgsl".into(),
-                include_str!("../../benilla-world/src/shaders/modern/rt_reflect_web.wgsl").into(),
-            ));
-        }
 
         let mut cache: ShaderCache<naga::Module, ()> = ShaderCache::new((), naga_module);
         // The material registers its shader with the world's plugins, which the headless client
         // does not build; it takes its import libraries (bevy's, `benilla_modern`'s) from there.
         files.push((
-            "benilla_assets/shaders/liquid_cata.wgsl".into(),
-            include_str!("../../benilla-assets/src/shaders/liquid_cata.wgsl").into(),
+            "benilla_assets/shaders/liquid_cata.wesl".into(),
+            include_str!("../../benilla-assets/src/shaders/liquid_cata.wesl").into(),
         ));
         let water = AssetId::<Shader>::Uuid {
             uuid: bevy::asset::uuid::Uuid::from_u128(files.len() as u128),
@@ -287,7 +275,7 @@ mod tests {
         for colors in [false, true] {
             let defs = cata_water_defs(colors);
             let module = cache.get(0, water, &defs).unwrap_or_else(|e| {
-                panic!("colors {colors}: liquid_cata.wgsl does not compose: {e:?}")
+                panic!("colors {colors}: liquid_cata.wesl does not compose: {e:?}")
             });
             let info = naga::valid::Validator::new(
                 naga::valid::ValidationFlags::all(),
@@ -295,7 +283,7 @@ mod tests {
             )
             .validate(&module)
             .unwrap_or_else(|e| {
-                panic!("colors {colors}: liquid_cata.wgsl does not validate: {e:?}")
+                panic!("colors {colors}: liquid_cata.wesl does not validate: {e:?}")
             });
             #[cfg(target_os = "macos")]
             naga::back::msl::write_string(
@@ -308,39 +296,29 @@ mod tests {
                 &naga::back::msl::PipelineOptions::default(),
             )
             .unwrap_or_else(|e| {
-                panic!("colors {colors}: liquid_cata.wgsl does not translate to MSL: {e:?}")
+                panic!("colors {colors}: liquid_cata.wesl does not translate to MSL: {e:?}")
             });
             #[cfg(not(target_os = "macos"))]
             naga::back::spv::write_vec(&module, &info, &naga::back::spv::Options::default(), None)
                 .unwrap_or_else(|e| {
-                    panic!("colors {colors}: liquid_cata.wgsl does not translate to SPIR-V: {e:?}")
+                    panic!("colors {colors}: liquid_cata.wesl does not translate to SPIR-V: {e:?}")
                 });
         }
     }
 
-    /// The cata water composes over the browser's libraries, where `rtshadow` and `rtreflect`
-    /// are the empty stand-ins: it names both under `RT_SHADOWS` / `RT_REFLECT`, which the web
-    /// never sets, and the shader cache composes every `#import` whatever the defs. Without the
-    /// stand-ins the cache answers "import not yet available", which the pipeline cache retries
-    /// for ever: every M2, terrain and water pipeline on the web stayed queued and drew nothing.
+    /// The cata water composes over the browser's libraries, which hold no `rtshadow` and no
+    /// `rtreflect`: it imports both under `RT_SHADOWS` / `RT_REFLECT` alone, which the web never
+    /// sets, and wesl resolves no import its conditions remove. Were one resolved, the cache
+    /// would answer "import not yet available", which the pipeline cache retries for ever: every
+    /// M2, terrain and water pipeline on the web would stay queued and draw nothing.
     #[test]
     fn the_cata_water_shader_composes_over_the_web_libraries() {
-        let (mut cache, water) = cata_water_cache(Libraries::WebWithoutStandIns);
-        let unstood = cache.get(0, water, &cata_water_defs(false));
-        assert!(
-            matches!(
-                unstood,
-                Err(bevy::shader::ShaderCacheError::ShaderImportNotYetAvailable)
-            ),
-            "without the stand-ins the web's water should wait on its RT import, got {:?}",
-            unstood.map(|_| ())
-        );
         let (mut cache, water) = cata_water_cache(Libraries::Web);
         for colors in [false, true] {
             let module = cache
                 .get(0, water, &cata_water_defs(colors))
                 .unwrap_or_else(|e| {
-                    panic!("colors {colors}: liquid_cata.wgsl does not compose on the web: {e:?}")
+                    panic!("colors {colors}: liquid_cata.wesl does not compose on the web: {e:?}")
                 });
             naga::valid::Validator::new(
                 naga::valid::ValidationFlags::all(),
@@ -348,7 +326,7 @@ mod tests {
             )
             .validate(&module)
             .unwrap_or_else(|e| {
-                panic!("colors {colors}: liquid_cata.wgsl does not validate on the web: {e:?}")
+                panic!("colors {colors}: liquid_cata.wesl does not validate on the web: {e:?}")
             });
         }
     }
@@ -356,7 +334,7 @@ mod tests {
     /// fork: F and G — the cata water's native ray-traced variant, as `benilla_assets`'
     /// `push_rt_water` builds its colour pipeline where both lanes may run: `RT_SHADOWS` and
     /// `RT_REFLECT`, the scene at `RT_GROUP` 4 (the group after the material's), composed with
-    /// the ray-query and binding-array capabilities the native device has (`rt_scene.wgsl`'s
+    /// the ray-query and binding-array capabilities the native device has (`rt_scene.wesl`'s
     /// `binding_array` of the texture pool) and the native libraries (`rt_scene`, `rtshadow`,
     /// `rtreflect`), then validated and written as SPIR-V. Vulkan and DX12 only: neither the web
     /// nor Metal compiles it.
@@ -367,7 +345,7 @@ mod tests {
         use naga::valid::Capabilities;
         let (mut cache, water) = cata_water_cache(Libraries::Here);
         // What `wgpu_naga_bridge::features_to_naga_capabilities` makes of those features and of
-        // `DownlevelFlags::all()`, which the composer validates against.
+        // `DownlevelFlags::all()`, which the pipeline cache validates against.
         let capabilities = Capabilities::RAY_QUERY
             | Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY
             | Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY_NON_UNIFORM_INDEXING
@@ -381,26 +359,26 @@ mod tests {
             defs.push("RT_REFLECT".into());
             defs.push(ShaderDefVal::UInt("RT_GROUP".into(), 4));
             let module = cache.get(0, water, &defs).unwrap_or_else(|e| {
-                panic!("colors {colors}: the ray-traced liquid_cata.wgsl does not compose: {e:?}")
+                panic!("colors {colors}: the ray-traced liquid_cata.wesl does not compose: {e:?}")
             });
             let info =
                 naga::valid::Validator::new(naga::valid::ValidationFlags::all(), capabilities)
                     .validate(&module)
                     .unwrap_or_else(|e| {
                         panic!(
-                        "colors {colors}: the ray-traced liquid_cata.wgsl does not validate: {e:?}"
+                        "colors {colors}: the ray-traced liquid_cata.wesl does not validate: {e:?}"
                     )
                     });
             naga::back::spv::write_vec(&module, &info, &naga::back::spv::Options::default(), None)
                 .unwrap_or_else(|e| {
                     panic!(
-                        "colors {colors}: the ray-traced liquid_cata.wgsl does not translate to \
+                        "colors {colors}: the ray-traced liquid_cata.wesl does not translate to \
                          SPIR-V: {e:?}"
                     )
                 });
         }
     }
-    /// fork: N — the modern entity shadow caster (`benilla_world`'s `modern/entity_shadow.wgsl`)
+    /// fork: N — the modern entity shadow caster (`benilla_world`'s `modern/entity_shadow.wesl`)
     /// in every variant `EntityShadowPipelines::descriptor` builds: `SKINNED`, `CUTOUT` and
     /// `FIXTURE_CLIP` (with `CUTOUT_OR_CLIP`) in each combination, and the sun parts' `MULTIVIEW`
     /// variants (no fixture clip) under the `MULTIVIEW` capability the multiview lane requires,
@@ -418,12 +396,12 @@ mod tests {
             };
             cache.set_shader(
                 id,
-                Shader::from_wgsl(
-                    include_str!("../../benilla-world/src/shaders/modern/entity_shadow.wgsl"),
-                    "embedded://benilla_world/shaders/modern/entity_shadow.wgsl",
+                Shader::from_wesl(
+                    include_str!("../../benilla-world/src/shaders/modern/entity_shadow.wesl"),
+                    "embedded://benilla_world/shaders/modern/entity_shadow.wesl",
                 ),
             );
-            // `DownlevelFlags::all()`'s share of what the composer validates against.
+            // `DownlevelFlags::all()`'s share of what the pipeline cache validates against.
             let mut capabilities = Capabilities::SHADER_FLOAT16_IN_FLOAT32
                 | Capabilities::MULTISAMPLED_SHADING
                 | Capabilities::CUBE_ARRAY_TEXTURES;
@@ -449,13 +427,13 @@ mod tests {
                     }
                 }
                 let module = cache.get(0, id, &defs).unwrap_or_else(|e| {
-                    panic!("{defs:?}: entity_shadow.wgsl does not compose: {e:?}")
+                    panic!("{defs:?}: entity_shadow.wesl does not compose: {e:?}")
                 });
                 let info =
                     naga::valid::Validator::new(naga::valid::ValidationFlags::all(), capabilities)
                         .validate(&module)
                         .unwrap_or_else(|e| {
-                            panic!("{defs:?}: entity_shadow.wgsl does not validate: {e:?}")
+                            panic!("{defs:?}: entity_shadow.wesl does not validate: {e:?}")
                         });
                 naga::back::spv::write_vec(
                     &module,
@@ -464,7 +442,170 @@ mod tests {
                     None,
                 )
                 .unwrap_or_else(|e| {
-                    panic!("{defs:?}: entity_shadow.wgsl does not translate to SPIR-V: {e:?}")
+                    panic!("{defs:?}: entity_shadow.wesl does not translate to SPIR-V: {e:?}")
+                });
+            }
+        }
+    }
+
+    /// fork: meshlets — static_gx's mesh-shader lane (`benilla_world`'s `static_gx_mesh.wesl`), as
+    /// `meshlets::queue_pipeline` builds it over each of static_gx's prepassed pipelines: the task
+    /// and both mesh entries under the vertex defs, the two fragment entries under the fragment
+    /// defs (the colour pass's with the ray-traced shadows at `RT_GROUP` 3 and the mesh group at
+    /// 4), over every library the client registers plus `static_gx.wesl`, which the module
+    /// imports. Composed, validated with the mesh-shader and draw-index capabilities the lane
+    /// requires, and written as SPIR-V: the lane runs on Vulkan, so not on wasm32 or macOS.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "macos")))]
+    #[test]
+    fn the_meshlet_lane_composes_over_static_gx() {
+        use bevy::shader::{Shader, ShaderCache, ShaderDefVal};
+        use naga::valid::Capabilities;
+        let app = crate::game_plugins::schedule_tests::headless_client_unrun();
+        let server = app.world().resource::<AssetServer>();
+        let source = server.get_source(AssetSourceId::from("embedded")).unwrap();
+        let mut files = Vec::new();
+        embedded_shaders(source, std::path::Path::new(""), &mut files);
+        // static_gx and the lane's module, and `benilla_assets`' libraries static_gx imports:
+        // the headless client registers neither the static pass's shaders nor the materials'.
+        for (path, text) in [
+            (
+                "benilla_assets/shaders/env_frame.wesl",
+                include_str!("../../benilla-assets/src/shaders/env_frame.wesl"),
+            ),
+            (
+                "benilla_assets/shaders/wind_hook.wesl",
+                include_str!("../../benilla-assets/src/shaders/wind_hook.wesl"),
+            ),
+            (
+                "benilla_assets/shaders/wet_hook.wesl",
+                include_str!("../../benilla-assets/src/shaders/wet_hook.wesl"),
+            ),
+            (
+                "benilla_world/shaders/static_gx.wesl",
+                include_str!("../../benilla-world/src/shaders/static_gx.wesl"),
+            ),
+            (
+                "benilla_world/shaders/modern/static_gx_mesh.wesl",
+                include_str!("../../benilla-world/src/shaders/modern/static_gx_mesh.wesl"),
+            ),
+        ] {
+            files.retain(|(p, _)| p != path);
+            files.push((path.into(), text.into()));
+        }
+        let mut cache: ShaderCache<naga::Module, ()> = ShaderCache::new((), naga_module);
+        let mut mesh = None;
+        for (i, (path, text)) in files.into_iter().enumerate() {
+            let id = AssetId::<Shader>::Uuid {
+                uuid: bevy::asset::uuid::Uuid::from_u128(i as u128 + 1),
+            };
+            if path == "benilla_world/shaders/modern/static_gx_mesh.wesl" {
+                mesh = Some(id);
+            }
+            cache.set_shader(id, shader_of(text, &path));
+        }
+        let mesh = mesh.expect("the lane's module is in the cache");
+
+        // What `wgpu_naga_bridge::features_to_naga_capabilities` makes of the lane's features
+        // (mesh shaders, draw index, ray queries for the colour pass) and `DownlevelFlags::all()`.
+        let capabilities = Capabilities::MESH_SHADER
+            | Capabilities::DRAW_INDEX
+            | Capabilities::IMMEDIATES
+            | Capabilities::RAY_QUERY
+            | Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY
+            | Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY_NON_UNIFORM_INDEXING
+            | Capabilities::STORAGE_BUFFER_BINDING_ARRAY_NON_UNIFORM_INDEXING
+            | Capabilities::SHADER_FLOAT16_IN_FLOAT32
+            | Capabilities::MULTISAMPLED_SHADING
+            | Capabilities::CUBE_ARRAY_TEXTURES;
+        let storage =
+            bevy::render::settings::WgpuLimits::default().max_storage_buffers_per_shader_stage;
+        for bits in 0..8u32 {
+            let (cutout, two_sided, modern) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0);
+            // `static_gx::render`'s defs for a prepassed bindless frame.
+            let mut defs: Vec<ShaderDefVal> = vec![
+                "GX_BINDLESS".into(),
+                "SHADOW_FILTER_METHOD_GAUSSIAN".into(),
+                "GX_PREPASSED".into(),
+                ShaderDefVal::UInt("AVAILABLE_STORAGE_BUFFER_BINDINGS".into(), storage),
+                ShaderDefVal::UInt("MAX_DIRECTIONAL_LIGHTS".into(), 10),
+                ShaderDefVal::UInt("MAX_CASCADES_PER_LIGHT".into(), 4),
+                ShaderDefVal::UInt("MAX_RECT_LIGHTS".into(), 8),
+            ];
+            for (on, def) in [
+                (cutout, "GX_CUTOUT"),
+                (two_sided, "GX_TWO_SIDED"),
+                (modern, "WOW_MODERN"),
+            ] {
+                if on {
+                    defs.push(def.into());
+                }
+            }
+            // The prepass (three groups, the mesh group at 3) and the colour pass, which traces
+            // its shadows in a modern frame (the scene at 3, the mesh group at 4).
+            let prepass = [
+                defs.clone(),
+                vec![ShaderDefVal::UInt("GX_MESH_GROUP".into(), 3)],
+            ]
+            .concat();
+            let colour = if modern {
+                [
+                    defs.clone(),
+                    vec![
+                        "RT_SHADOWS".into(),
+                        ShaderDefVal::UInt("RT_GROUP".into(), 3),
+                        ShaderDefVal::UInt("GX_MESH_GROUP".into(), 4),
+                    ],
+                ]
+                .concat()
+            } else {
+                prepass.clone()
+            };
+            let mesh_defs = [
+                defs.clone(),
+                vec![ShaderDefVal::UInt(
+                    "GX_MESH_GROUP".into(),
+                    if modern { 4 } else { 3 },
+                )],
+            ]
+            .concat();
+            for (what, defs, entries) in [
+                (
+                    "prepass",
+                    &prepass,
+                    &["meshlet_task", "meshlet_mesh_prepass", "prepass_fragment"][..],
+                ),
+                (
+                    "colour mesh",
+                    &mesh_defs,
+                    &["meshlet_task", "meshlet_mesh"][..],
+                ),
+                ("colour fragment", &colour, &["fragment"][..]),
+            ] {
+                let module = cache.get(0, mesh, defs).unwrap_or_else(|e| {
+                    panic!("{what} {defs:?}: static_gx_mesh.wesl does not compose: {e:?}")
+                });
+                for entry in entries {
+                    assert!(
+                        module.entry_points.iter().any(|e| e.name == *entry),
+                        "{what} {defs:?}: `{entry}` is missing from the composed module"
+                    );
+                }
+                let info =
+                    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), capabilities)
+                        .validate(&module)
+                        .unwrap_or_else(|e| {
+                            panic!("{what} {defs:?}: static_gx_mesh.wesl does not validate: {e:?}")
+                        });
+                // SPIR-V 1.4 at least: the mesh-shading extension asks it, and wgpu-hal writes
+                // 1.6 on the Vulkan 1.3 devices the lane runs on.
+                let spirv = naga::back::spv::Options {
+                    lang_version: (1, 6),
+                    ..Default::default()
+                };
+                naga::back::spv::write_vec(&module, &info, &spirv, None).unwrap_or_else(|e| {
+                    panic!(
+                        "{what} {defs:?}: static_gx_mesh.wesl does not translate to SPIR-V: {e:?}"
+                    )
                 });
             }
         }

@@ -29,7 +29,7 @@ use benilla_assets::AssetSet;
 /// The unlit gradient sky; the `StandardMaterial` shell only supplies `unlit` and no culling.
 pub type SkyMaterial = ExtendedMaterial<StandardMaterial, SkyExt>;
 
-/// The five sky stops, zenith to horizon, and the fog colour on one binding (100); `sky.wgsl`'s
+/// The five sky stops, zenith to horizon, and the fog colour on one binding (100); `sky.wesl`'s
 /// struct must match this field order.
 #[derive(Asset, AsBindGroup, Clone, TypePath)]
 pub struct SkyExt {
@@ -77,7 +77,7 @@ impl MaterialExtension for SkyExt {
     }
 
     fn fragment_shader() -> ShaderRef {
-        "embedded://benilla_world/shaders/sky.wgsl".into()
+        "embedded://benilla_world/shaders/sky.wesl".into()
     }
 
     /// No depth write, as every sky element inherits from `CSky::Render` (`0x6d4940`); the depth
@@ -209,7 +209,7 @@ fn setup_sky(
 }
 
 /// Pin the dome to the camera, world-aligned, just inside the far plane; the radius only keeps it
-/// unclipped, since occlusion is `sky_vertex.wgsl`'s far-depth pin.
+/// unclipped, since occlusion is `sky_vertex.wesl`'s far-depth pin.
 #[allow(clippy::type_complexity)]
 fn follow_camera(
     cam: Query<(&GlobalTransform, &Projection), With<WorldCamera>>,
@@ -285,7 +285,7 @@ pub(crate) fn dome_stops(light: &WowLighting) -> ([Vec4; 5], Vec4) {
 }
 
 /// fork: modern lighting — the dome's six colours as a modern frame draws them (linear): its five
-/// stops, zenith first, and the horizon (`sky.wgsl`'s `fog`).
+/// stops, zenith first, and the horizon (`sky.wesl`'s `fog`).
 pub(crate) fn dome_radiance(light: &WowLighting) -> [Vec3; 6] {
     let tint = |c: [f32; 3], t: [f32; 3]| {
         Vec3::from(std::array::from_fn::<f32, 3, _>(|i| {

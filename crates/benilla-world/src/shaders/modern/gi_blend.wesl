@@ -24,7 +24,7 @@ const RESEED_VALIDITY: f32 = 0.2;
 @group(0) @binding(1) var<storage, read> scratch: array<probegi::GiProbe>;
 @group(0) @binding(2) var<storage, read_write> probes: array<probegi::GiProbe>;
 
-// The same work list the trace ran over (`gi_classify.wgsl`), dispatched the same way: only the
+// The same work list the trace ran over (`gi_classify.wesl`), dispatched the same way: only the
 // probes traced this frame are folded in, and every one of them has a fresh scratch entry.
 struct GiWork {
     count: u32,
@@ -41,7 +41,7 @@ fn blend_probes(
     if (g.params.x < 0.5) {
         return;
     }
-    // Rows of workgroups, as the trace dispatches them (`gi_classify.wgsl`'s `GROUP_ROW`).
+    // Rows of workgroups, as the trace dispatches them (`gi_classify.wesl`'s `GROUP_ROW`).
     let t = id.y * (groups.x * 64u) + id.x;
     // fork: no further than the classify pass's cap (`probegi::listed_cap`).
     if (t >= min(work.count, probegi::listed_cap(g))) {
@@ -63,7 +63,7 @@ fn blend_probes(
     // RELATIVE change every update — which used to throw the history away and let each probe jump to
     // its latest noisy estimate every period: the field sparkled.
     var history = blend.fwd.w;
-    // A probe off screen is traced every fourth period (`gi_classify.wgsl`), so each of its updates
+    // A probe off screen is traced every fourth period (`gi_classify.wesl`), so each of its updates
     // eases as far as four would: the same time constant, on or off screen.
     if ((item & 0x80000000u) != 0u) {
         history = history * history;

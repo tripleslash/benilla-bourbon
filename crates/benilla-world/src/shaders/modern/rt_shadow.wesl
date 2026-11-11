@@ -11,15 +11,14 @@ enable wgpu_ray_query;
 // is the product of two terms: rays for what the TLAS holds, the maps for what it does not.
 //
 // A receiver calls the twin of the `sunshadow` / `locallight` function it called before, under
-// `#ifdef RT_SHADOWS`; its pipeline binds the scene at `RT_GROUP` (`rt_scene::shader_defs`). The
+// `@if(RT_SHADOWS)`; its pipeline binds the scene at `RT_GROUP` (`rt_scene::shader_defs`). The
 // pipeline is the same whether the ray tracing is on or off: each twin asks `rt_scene::live()`
 // first, and on the stand-in (the option off, or the scene not ready yet: `RtScene::lane_bind`) it
 // returns exactly what the original returns, with the maps holding the static casters again. The
-// importer declares no ray-query type itself, so it needs no `enable` of its own: the composer's
-// header for this module carries the scene's acceleration structure, and the directive with it.
+// importer declares no ray-query type itself, so it needs no `enable` of its own: `rt_scene`'s
+// reaches the linked output with the scene's acceleration structure.
 //
-// Imported as `benilla_modern::rtshadow`, a name no hooked shader uses as an identifier, and with no
-// identifier in it ending in a digit (a composable module may not carry those).
+// Imported as `rtshadow` (`import benilla_world::shaders::modern::rt_shadow as rtshadow;`).
 
 
 const TAU: f32 = 6.2831853;

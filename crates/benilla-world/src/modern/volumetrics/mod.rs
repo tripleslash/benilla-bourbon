@@ -41,7 +41,7 @@ pub(crate) use node::froxel_pass;
 // fork: fsr (FORK.md) — FSR's opaque copy and velocity pass order against these two.
 pub(crate) use node::{fog_composite_pass, lamp_halo_pass};
 
-/// Size of [`FroxelFog::std430`] — `froxelfog.wgsl`'s `FroxelFog`.
+/// Size of [`FroxelFog::std430`] — `froxelfog.wesl`'s `FroxelFog`.
 pub const FOG_BYTES: usize = 3 * 64 + 27 * 16;
 /// Offset of the `ground_x` row inside the tail: the render world writes the terrain heightfield's
 /// addressing there (`node::prepare_froxels`), which only it knows.
@@ -99,7 +99,7 @@ fn lamp_halo() -> f32 {
         .unwrap_or(LAMP_HALO)
 }
 /// fork: **ground fog** — the volume's banks' extinction at the ground (1/yd) at the full SIDN night,
-/// which falls off within a few yards of the terrain under each froxel (`froxel_scatter.wgsl`'s
+/// which falls off within a few yards of the terrain under each froxel (`froxel_scatter.wesl`'s
 /// `BANK_INV_FALLOFF`; the GI heightfield, past it the ground under the camera). Overnight a zone
 /// look's `night_banks` takes its share (none in an ordinary zone, the whole bank in a dark one), and
 /// its `ground_fog` keeps a share by day. Anchored to one plane at the camera's ground, 0.035 filled
@@ -152,7 +152,7 @@ pub struct FroxelTier {
 /// fork: F — **the froxel rays' lane, this frame**: the ray tracing is live (`rt_scene::froxels_live()`:
 /// native, capable, `rayTracing` and `rayTracingVolumetrics` on and the scene ready) and the session may trace froxels
 /// ([`rt_froxel_capable`]). Then the scatter pass takes the sun's visibility per froxel as a ray
-/// query times the cascade tap, and each shadowed lamp's as a ray to it (`froxel_scatter.wgsl`
+/// query times the cascade tap, and each shadowed lamp's as a ray to it (`froxel_scatter.wesl`
 /// under `RT_FROXEL`, span `modern_froxel_scatter_rt`). Independent of
 /// [`crate::modern::shadow::rt_shadows`]. Per frame: both scatter pipelines are queued at startup
 /// and `prepare_froxels` picks one, dropping the volume's history on a switch. False before render
@@ -199,7 +199,7 @@ pub fn froxel_tier(quality: LightingQuality) -> FroxelTier {
             0.0,
         ),
         // fork: P8b — the point-light count is only the fallback walk's now (`?modern_lights=0`): with
-        // the light grid live a froxel reads the lights of its own cell (`froxel_scatter.wgsl`).
+        // the light grid live a froxel reads the lights of its own cell (`froxel_scatter.wesl`).
         // Ultra lights from glowing things as Cinematic does, so it takes Cinematic's count.
         LightingQuality::Ultra => (
             FogMode::Froxel,
@@ -230,7 +230,7 @@ pub fn froxel_tier(quality: LightingQuality) -> FroxelTier {
     }
 }
 
-/// The CPU mirror of `froxelfog.wgsl`'s `FroxelFog` (field order and meaning documented there).
+/// The CPU mirror of `froxelfog.wesl`'s `FroxelFog` (field order and meaning documented there).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FroxelFog {
     pub clip_from_world: Mat4,
@@ -689,7 +689,7 @@ fn update_volume(
     let grid = tier.grid;
     // A hard cut (no history, a new grid, a jump) drops the whole volume's history. A quick turn only
     // the near froxels': far air reprojects exactly under a rotation, and what the turn brings on screen
-    // fails the reprojection's bounds test anyway (`froxel_scatter.wgsl`'s depth ramp).
+    // fails the reprojection's bounds test anyway (`froxel_scatter.wesl`'s depth ramp).
     let cut =
         hist.prev_clip.is_none() || hist.prev_grid != grid || hist.prev_camera.distance(cam) > 12.0;
     let turned = hist.prev_forward.dot(forward) < 0.9;
@@ -790,7 +790,7 @@ fn update_volume(
             },
             bank_ground,
             0.0,
-            // fork: the zone look's sea fog (`froxel_scatter.wgsl`'s `sea_fog`).
+            // fork: the zone look's sea fog (`froxel_scatter.wesl`'s `sea_fog`).
             if super::banks_enabled() {
                 look.0.sea_fog
             } else {
@@ -889,7 +889,7 @@ pub(crate) fn sky_through(sigma: f32, inv_height: f32) -> f32 {
 /// the key at its elevation `sun_up`), which none does. Haze lit by them, seen level and deep,
 /// converges on the sky at the horizon, as real haze does.
 pub(crate) fn air_ambient(dome: &[Vec3; 6], ambient: Vec3, key: Vec3, sun_up: f32) -> (Vec3, Vec3) {
-    // The dome's stops' elevations (deg): zenith, 16.8, 9.8, 3.7, 1.8, the horizon (`sky.wgsl`).
+    // The dome's stops' elevations (deg): zenith, 16.8, 9.8, 3.7, 1.8, the horizon (`sky.wesl`).
     const ELEV: [f32; 6] = [90.0, 16.8, 9.8, 3.7, 1.8, 0.0];
     let mut sky = Vec3::ZERO;
     for i in 0..5 {

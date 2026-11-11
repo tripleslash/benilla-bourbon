@@ -1,5 +1,5 @@
 // FSR motion vectors for the effect lane (`fsr/velocity.rs`): each merged effect draw of the world
-// view drawn a second time into the velocity target, with the lane's own raster (`wow_effect.wgsl`'s
+// view drawn a second time into the velocity target, with the lane's own raster (`wow_effect.wesl`'s
 // vertex path, the same depth state) so the depth test meets the depth the lane drew against, and
 // its motion from each vertex's world displacement since the last world frame (`EffectMotion`).
 //
@@ -22,7 +22,7 @@ struct EffectMotionMatrices {
 @group(2) @binding(0) var<uniform> motion: EffectMotionMatrices;
 
 @if(EFFECT_POINTS) {
-// A point draw's row of the lane's params (`wow_effect.wgsl`): its shape.
+// A point draw's row of the lane's params (`wow_effect.wesl`): its shape.
 struct EffectParams {
     fog: vec4<f32>,
     clip: vec4<f32>,
@@ -31,7 +31,7 @@ struct EffectParams {
 }
 @group(3) @binding(0) var<uniform> wow_params: EffectParams;
 
-// A point draw (`effect_points.wgsl`): still in the world, so it has no displacement.
+// A point draw (`effect_points.wesl`): still in the world, so it has no displacement.
 struct Vertex {
     @builtin(vertex_index) index: u32,
     @location(0) point_a: vec4<f32>,

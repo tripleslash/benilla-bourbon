@@ -1,4 +1,4 @@
-//! The celestial and star [`ExtendedMaterial`]s, drawn by `celestial.wgsl` and `star.wgsl`.
+//! The celestial and star [`ExtendedMaterial`]s, drawn by `celestial.wesl` and `star.wesl`.
 
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::pbr::{
@@ -44,7 +44,7 @@ impl MaterialExtension for CelestialExt {
     }
 
     fn fragment_shader() -> ShaderRef {
-        "embedded://benilla_world/shaders/celestial.wgsl".into()
+        "embedded://benilla_world/shaders/celestial.wesl".into()
     }
 
     fn specialize(
@@ -62,7 +62,7 @@ impl MaterialExtension for CelestialExt {
 /// `clamp(30·dir.y, 0, 1)`, a soft edge over the bottom ~1.9° of elevation; at or below 0 it clips.
 pub(super) const DISC_HORIZON_FADE: f32 = 30.0;
 
-/// The `Stars.m2` batches, blended premultiplied in gamma space by `star.wgsl`, like the reference.
+/// The `Stars.m2` batches, blended premultiplied in gamma space by `star.wesl`, like the reference.
 pub type StarMaterial = ExtendedMaterial<StandardMaterial, StarExt>;
 
 /// A star batch's second stage and blend. The base colour carries stage 0 and the vertex alpha,
@@ -105,7 +105,7 @@ impl MaterialExtension for StarExt {
     }
 
     fn fragment_shader() -> ShaderRef {
-        "embedded://benilla_world/shaders/star.wgsl".into()
+        "embedded://benilla_world/shaders/star.wesl".into()
     }
 
     fn specialize(

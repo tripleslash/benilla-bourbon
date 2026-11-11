@@ -131,13 +131,13 @@ fn init_pipelines(
     let scatter = compute(
         "modern_froxel_scatter",
         &scatter_layout,
-        "embedded://benilla_world/shaders/modern/froxel_scatter.wgsl",
+        "embedded://benilla_world/shaders/modern/froxel_scatter.wesl",
         "scatter",
     );
     let integrate = compute(
         "modern_froxel_integrate",
         &integrate_layout,
-        "embedded://benilla_world/shaders/modern/froxel_integrate.wgsl",
+        "embedded://benilla_world/shaders/modern/froxel_integrate.wesl",
         "integrate",
     );
     // fork: F — the froxel rays: the same scatter over the same group 0, with the ray-traced scene
@@ -153,7 +153,7 @@ fn init_pipelines(
             layout: vec![scatter_layout.clone(), crate::static_gx::rt_scene::layout()],
             immediate_size: 0,
             shader: asset_server
-                .load("embedded://benilla_world/shaders/modern/froxel_scatter.wgsl"),
+                .load("embedded://benilla_world/shaders/modern/froxel_scatter.wesl"),
             shader_defs,
             entry_point: Some("scatter".into()),
             zero_initialize_workgroup_memory: false,
@@ -174,7 +174,7 @@ fn init_pipelines(
         integrate,
         scatter_rt,
         composite_shader: asset_server
-            .load("embedded://benilla_world/shaders/modern/fog_composite.wgsl"),
+            .load("embedded://benilla_world/shaders/modern/fog_composite.wesl"),
         composites: HashMap::default(),
     });
 }
@@ -487,7 +487,7 @@ fn specialize_composites(
                     texture_3d(TextureSampleType::Float { filterable: true }),
                     sampler(SamplerBindingType::Filtering),
                     storage_buffer_read_only_sized(false, None),
-                    // The point table, for the per-pixel lamp halos (`fog_composite.wgsl`).
+                    // The point table, for the per-pixel lamp halos (`fog_composite.wesl`).
                     storage_buffer_read_only_sized(false, None),
                 ),
             ),
@@ -630,7 +630,7 @@ pub(crate) fn fog_composite_pass(
     }
 }
 
-/// fork: the nearest lamps' halos (`fog_composite.wgsl`'s `fs_halo`), added after the transparent
+/// fork: the nearest lamps' halos (`fog_composite.wesl`'s `fs_halo`), added after the transparent
 /// pass so an alpha-blended tree behind a lamp cannot paint over its glow.
 pub(crate) fn lamp_halo_pass(
     world: &World,

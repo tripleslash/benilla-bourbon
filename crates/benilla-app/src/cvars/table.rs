@@ -876,7 +876,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // device whose caps field `[0x58a230()+0x98]` is above -1, setting bits 28 and 27 of the render
     // flags `[0xc7b2a4]`, which gate the shader negotiation `0x6941f0` for terrain, water and
     // models; `pixelShaders` also gates the FFX pass (`0x6cd8b6`). No effect here: benilla always
-    // draws the shader leg (`liquid.wgsl` records it), and the stock Okay carries this box into
+    // draws the shader leg (`liquid.wesl` records it), and the stock Okay carries this box into
     // `ffx`, which is wired.
     overridden(
         "pixelShaders",
@@ -1205,7 +1205,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // The name and the value space are the REFERENCE's, taken from a later client rather than
     // invented here: `Liquid::CMaterialWater::InitResources` (WoW 4.1.0) switches on exactly this
     // CVar, binding `Water` at 0, `MediumWater` at 1 and `ProcWaterAbove`/`ProcWaterBelow` at 2.
-    // benilla implements 0 (its 1.12.1 renderer, `liquid.wgsl`) and 2 (`liquid_cata.wgsl`), and
+    // benilla implements 0 (its 1.12.1 renderer, `liquid.wesl`) and 2 (`liquid_cata.wesl`), and
     // deliberately leaves the 1 slot EMPTY rather than renumbering to a dense 0/1 — a medium tier
     // is a real thing that could land later, and it should land on its own number instead of
     // shifting a value players already have in `config.toml`. (fork: 1 is since the SSR-only cata

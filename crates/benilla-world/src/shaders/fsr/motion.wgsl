@@ -13,7 +13,7 @@
 //
 // Keeping the point homogeneous is what makes the sky right: reverse-Z with an infinite far plane
 // puts it at depth 0, which unprojects to `w = 0`, a direction; the translation between the two eyes
-// drops out and the vector is the camera's rotation alone. Moving content (`velocity.wgsl`) writes its
+// drops out and the vector is the camera's rotation alone. Moving content (`velocity.wesl`) writes its
 // own vector into the velocity target, and where that target is written its `xy` wins.
 //
 // **Reactive.** The SDK's `GenerateReactiveMask` (`ffx_fsr3upscaler_autogen_reactive_pass.hlsl`), with

@@ -1,7 +1,7 @@
 // The cloud dome. Its colour is CPU-side as in the reference: the kernel's `0x6cfb00` port builds
 // the image the reference binds as its texture (`0x58ac70`). This stage applies the dome's rim
 // fade (`0x6d0530`) and blends the raw gamma texels premultiplied. Depth is the far pin in
-// `sky_vertex.wgsl`.
+// `sky_vertex.wesl`.
 
 import bevy_pbr::render::forward_io::VertexOutput;
 // fork: modern lighting (FORK.md, P4) — the key light for the modern cloud layer

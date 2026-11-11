@@ -20,7 +20,7 @@
 // write into — and reconstructs view-space normals from it.
 //
 // **Gamma, and why the composite is a BLEND.** The pass runs before FFXGlow, so a classic frame's
-// buffer holds GAMMA bytes (decision 0161; ffx_glow.wgsl owns the frame's single decode) and a
+// buffer holds GAMMA bytes (decision 0161; ffx_glow.wesl owns the frame's single decode) and a
 // modern frame's holds linear HDR radiance (`frame_is_linear`) — and it cannot use the ping-pong
 // every other post pass uses, because it runs mid-graph: flipping the view target here
 // would hand MainTransparentPass a texture it has not drawn into yet, and Bevy clears a colour

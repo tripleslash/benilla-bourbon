@@ -34,7 +34,7 @@ use crate::view::WorldCamera;
 pub mod emissive;
 pub mod node;
 
-/// Lights one cell can name. Mirrors `locallight.wgsl`'s `PER_CELL`.
+/// Lights one cell can name. Mirrors `locallight.wesl`'s `PER_CELL`.
 ///
 /// Eight, and not more, because the cell is one `vec4<u32>`: two words of eight byte indices and
 /// one of eight nibble slots. Widening it widens the grid's 864 KB region by the same factor for
@@ -53,7 +53,7 @@ pub const ATLAS_TILES: u32 = 6;
 pub const CELL_ALLOC: usize = 48 * 24 * 48;
 /// Bytes of one cell (`vec4<u32>`).
 pub const CELL_BYTES: usize = 16;
-/// Size of [`LightParams::std430`] — `locallight.wgsl`'s `LightGrid` prefix. A multiple of 256, so
+/// Size of [`LightParams::std430`] — `locallight.wesl`'s `LightGrid` prefix. A multiple of 256, so
 /// the GI block behind it keeps the 256-aligned probe offset the blend pass binds. P8 doubled the
 /// shadowed set (6 → 12 rows) and added a filter row; the region was 512 B with 22 spare rows, so
 /// it absorbed both without moving the probe offset a byte.
@@ -123,7 +123,7 @@ const SWAP_RATIO: f32 = 1.5;
 /// tiles of retained world), so this is also the ceiling on what contesting can cost.
 const SWAP_COOLDOWN: f32 = 0.5;
 
-/// The softened core of the modern light falloff: `locallight.wgsl`'s `CORE`; move them together.
+/// The softened core of the modern light falloff: `locallight.wesl`'s `CORE`; move them together.
 pub const FALLOFF_CORE: f32 = 0.8;
 
 /// fork: **what a lamp is worth to the frame** — its luminance through the grid's own falloff
@@ -472,7 +472,7 @@ pub struct ShadowLight {
     pub range: f32,
     /// **The fixture's box** (half-extent in yd, axis-aligned about [`Self::pos`]; 0 = none): the
     /// fixture's geometry inside it is not drawn into this light's cube (`FIXTURE_CLIP` in
-    /// `static_gx_shadow.wgsl` and `entity_shadow.wgsl`) — every static caster, and the entity parts
+    /// `static_gx_shadow.wesl` and `entity_shadow.wesl`) — every static caster, and the entity parts
     /// whose own bounds hold the light (a swaying lantern on the entity lane).
     ///
     /// A synthesized light sits INSIDE the thing that emits it: a lantern's flame is behind the
@@ -516,7 +516,7 @@ impl ShadowLight {
     }
 
     /// Whether fixture geometry at `p` is dropped from this cube — the Rust twin of the
-    /// `FIXTURE_CLIP` discard (`static_gx_shadow.wgsl`, `entity_shadow.wgsl`).
+    /// `FIXTURE_CLIP` discard (`static_gx_shadow.wesl`, `entity_shadow.wesl`).
     pub fn clears(&self, p: Vec3) -> bool {
         (p - self.pos).abs().max_element() < self.clear
     }
@@ -593,7 +593,7 @@ impl Default for LightTier {
     }
 }
 
-/// The CPU mirror of `locallight.wgsl`'s `LightGrid` prefix (field order documented there).
+/// The CPU mirror of `locallight.wesl`'s `LightGrid` prefix (field order documented there).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LightParams {
     pub dims: Vec4,
@@ -605,7 +605,7 @@ pub struct LightParams {
     /// `w` the atlas's first layer. Named `soft` in the WGSL, where `filter` is a reserved keyword.
     pub soft: Vec4,
     /// fork: P8 — `x` the far level's horizontal cells, `y` its vertical cells, `z` its cell as a
-    /// multiple of the near cell, `w` the drawn fraction of an atlas tile. `locallight.wgsl`'s
+    /// multiple of the near cell, `w` the drawn fraction of an atlas tile. `locallight.wesl`'s
     /// `LightGrid.far`, taken from the padding that follows the struct.
     pub far: Vec4,
     pub shadow: [Vec4; MAX_SHADOWED],
@@ -616,7 +616,7 @@ pub struct LightParams {
     /// The twelve per-slot cross-fades — the next three `spare` rows, still inside the padding.
     pub slot_fade: [Vec4; MAX_SHADOWED / 4],
     /// fork: the twelve per-slot match radii ([`ShadowLight::slack`]) — `spare` rows 6-8, read by
-    /// `light_bin.wgsl`'s `shadow_slot`.
+    /// `light_bin.wesl`'s `shadow_slot`.
     pub slot_slack: [Vec4; MAX_SHADOWED / 4],
     /// fork: F — the twelve per-slot fixture boxes ([`ShadowLight::clear`]) — `spare` rows 9-11,
     /// where a ray-traced lamp shadow stops short of the lamp's own glass and frame
@@ -678,7 +678,7 @@ pub fn params(lights: &ModernLights, shadow_map_size: u32) -> LightParams {
         flags |= 2;
     }
     // Written BY SLOT, holes and all: a hole stays `Vec4::ZERO`, whose `w` (the range) is 0, and
-    // `light_bin.wgsl`'s `shadow_slot` skips a zero-range slot rather than matching a light that
+    // `light_bin.wesl`'s `shadow_slot` skips a zero-range slot rather than matching a light that
     // happens to stand at the world origin against it.
     let mut shadow = [Vec4::ZERO; MAX_SHADOWED];
     let slot_near = [Vec4::splat(CUBE_NEAR); MAX_SHADOWED / 4];
@@ -1838,7 +1838,7 @@ mod tests {
     #[test]
     fn the_light_tables_w_channel_says_whether_a_light_may_reach_an_interior() {
         // The packer writes 1 for a light that names rooms and 0 for one that names none; the gate
-        // in `static_gx.wgsl` is `interior && w < 0.5 -> skip`. Both halves of that, as arithmetic.
+        // in `static_gx.wesl` is `interior && w < 0.5 -> skip`. Both halves of that, as arithmetic.
         let street = 0.0f32;
         let chapel = 1.0f32;
         let admits = |interior: bool, w: f32| !(interior && w < 0.5);

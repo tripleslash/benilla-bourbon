@@ -1,8 +1,7 @@
 // Modern lighting (FORK.md, P4): the froxel fog volume's parameters, its lookup, and
 // the analytic height fog that stands in for it beyond its far plane and on the Low tier.
 //
-// Imported as `benilla_modern::froxelfog` — a module name no hooked shader uses as an identifier
-// (naga_oil substitutes a module alias for every bare identifier of that name).
+// Imported as `froxelfog` (`benilla_world::shaders::modern::froxelfog`).
 //
 // No bindings are declared here: each lane binds the integrated volume and its sampler itself and
 // passes them in, beside the parameter block (`sunshadow::ModernBlock.fog`).
@@ -451,7 +450,7 @@ fn seen_through(back: vec4<f32>, front: vec4<f32>) -> vec4<f32> {
 }
 
 // fork: **the sea fog past the froxel grid.** Inside the grid the sea fog is the scatter pass's
-// (`froxel_scatter.wgsl`'s `sea_fog`); without this the bank stopped dead at the grid's far plane and the
+// (`froxel_scatter.wesl`'s `sea_fog`); without this the bank stopped dead at the grid's far plane and the
 // sea and horizon beyond it stood in clear air, a hard line across the water. Past the plane it is the
 // same bank in the mean: exponential over sea level with the swell's mean top (`SEA_HEIGHT` 16 yd x
 // 1.25) and the billows' mean cover, lit as the tail's own air is, so the two converge into one
@@ -482,7 +481,7 @@ fn sea_tail(f: FroxelFog, p: vec3<f32>, t_start: f32) -> vec4<f32> {
     let tr = exp(-tau);
     let phase = dual_phase(f, dot(ray / len, f.sun_dir.xyz));
     // The key lights only the stretch above the surface: under it the air takes the ambient alone, as
-    // in the volume (`froxel_scatter.wgsl`'s `under_sea`).
+    // in the volume (`froxel_scatter.wesl`'s `under_sea`).
     let ya = f.camera.y + ray.y * t;
     let yb = p.y;
     var lit = select(0.0, 1.0, ya > 0.0 && yb > 0.0);

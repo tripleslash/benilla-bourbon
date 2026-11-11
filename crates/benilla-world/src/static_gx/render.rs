@@ -164,7 +164,7 @@ pub(crate) struct GxWorld {
 use super::pool::GxTexturePool;
 use crate::modern::caps::HwCaps;
 
-/// Record column w, bit 14: the item's interior fog lane, read by `static_gx.wgsl`. Bit 0 is the
+/// Record column w, bit 14: the item's interior fog lane, read by `static_gx.wesl`. Bit 0 is the
 /// kill bit and bits 1..=13 the probe slot.
 const RECORD_FOG_BIT: u32 = 1 << 14;
 
@@ -322,7 +322,7 @@ fn init_pipelines(
     // Use Bevy's real mesh-view layout for the retained pass. Besides the view and light records,
     // this carries the directional shadow textures and comparison samplers produced for the
     // world camera. The old two-binding layout could render the city, but it had no legal way for
-    // `static_gx.wgsl` to receive the shadow map.
+    // `static_gx.wesl` to receive the shadow map.
     let view_layout = mesh_pipeline
         .get_view_layout(MeshPipelineViewLayoutKey::empty())
         .main_layout
@@ -417,7 +417,7 @@ fn init_pipelines(
     });
 }
 
-/// fork: does a modern frame lay the static world's depth before shading it (`static_gx.wgsl`'s
+/// fork: does a modern frame lay the static world's depth before shading it (`static_gx.wesl`'s
 /// prepass)? On by default; `$WOW_STATIC_GX_PREPASS=0` (browser `?static_gx_prepass=0`) is the A/B
 /// lever. Classic frames never take it: their fragment is cheap, and their pixels stay the
 /// reference's byte for byte.
@@ -436,7 +436,7 @@ type GxViewKey = (
 
 /// The bake's interleaved vertex layout, in the attribute-id order Bevy interleaves by: position,
 /// normal, uv, colour, then the word and anchor (988_101, 988_102). Keep in sync with `bake_cell`
-/// and `static_gx.wgsl`.
+/// and `static_gx.wesl`.
 fn vertex_layout() -> VertexBufferLayout {
     VertexBufferLayout {
         array_stride: 64,
@@ -521,7 +521,7 @@ fn prepare_static_gx(
             .main_layout
             .clone();
         let shader: Handle<Shader> =
-            asset_server.load("embedded://benilla_world/shaders/static_gx.wgsl");
+            asset_server.load("embedded://benilla_world/shaders/static_gx.wesl");
         pipes.pipelines.clear();
         pipes.prepass.clear();
         let prepassed = modern && prepass_enabled();

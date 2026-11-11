@@ -11,7 +11,7 @@
 // and every pixel a triangle touches runs: each triangle writes only in the sweep down its plane's
 // dominant axis, the one or more voxels its plane crosses over that pixel.
 //
-// Group 1 is static_gx's own cell layout, bound unchanged (see `static_gx.wgsl`); under
+// Group 1 is static_gx's own cell layout, bound unchanged (see `static_gx.wesl`); under
 // `GX_BINDLESS` the shared region table (`benilla_modern::gx_bindless`).
 @if(GX_BINDLESS) import benilla_world::shaders::modern::gx_bindless;
 

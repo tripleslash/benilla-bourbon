@@ -658,7 +658,7 @@ impl FadeMaterials {
 
 /// The materials a spawning batch fades through. `blend: None` means it cannot feather (a
 /// WMO-display batch), the one reason to spawn opaque during the unit's ramp. A multiply batch
-/// (Mod, Mod2x) passes its steady self: its blend reads no alpha, so `wow_model.wgsl` lerps its
+/// (Mod, Mod2x) passes its steady self: its blend reads no alpha, so `wow_model.wesl` lerps its
 /// colour toward the blend identity by the tag alpha, as the reference's preset 5 does.
 pub struct FadeSet<'a> {
     pub steady: &'a Handle<WowModelMaterial>,

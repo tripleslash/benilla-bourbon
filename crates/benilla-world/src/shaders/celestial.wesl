@@ -3,7 +3,7 @@
 // at height 0 with alpha 0 there, `clamp(2.5 * height, 0, 1)` in the 0.4-unit band above
 // (`0x6d1ac5`), the colour's alpha byte beyond. Glares skip the clip (`0x7e57e0`) and add,
 // saturating, like the reference's SRC_ALPHA, ONE blend (`0x7e5a16`). Depth is the far pin in
-// `sky_vertex.wgsl`.
+// `sky_vertex.wesl`.
 
 import bevy_pbr::{
     render::pbr_fragment::pbr_input_from_standard_material,

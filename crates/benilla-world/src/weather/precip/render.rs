@@ -1,5 +1,5 @@
 //! The live pools as points on the shared effect stream: one record per drop, splash and flake,
-//! each built into its streak, patter or sprite by the vertex stage (`effect_points.wgsl`), with
+//! each built into its streak, patter or sprite by the vertex stage (`effect_points.wesl`), with
 //! the shapes' numbers.
 //!
 //! fork: perf — the triangles and quads were built here, on the CPU, three or four 36-byte

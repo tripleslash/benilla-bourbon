@@ -2,10 +2,11 @@
 // over a BLAS per static_gx region and per terrain cell, and what a hit needs to become a surface.
 // Imported by the ray-traced lanes (probe GI, shadows, water reflections) on native only.
 //
-// An importer starts with `enable wgpu_ray_query;` itself (naga_oil keeps each module's enables)
-// and passes `rt_scene::shader_defs(group)`: `RT_GROUP` is the bind group this library's bindings
-// sit in, laid out by `rt_scene::layout()`.
+// This module's enables (ray queries; naga 30's binding arrays, for the texture pool) reach every
+// importer's linked output. An importer passes `rt_scene::shader_defs(group)`: `RT_GROUP` is the
+// bind group this library's bindings sit in, laid out by `rt_scene::layout()`.
 enable wgpu_ray_query;
+enable wgpu_binding_array;
 
 
 // The scene: instances carry their entry's slot as the custom index.
@@ -70,7 +71,7 @@ const WORD_WRAP_X: u32 = 65536u;
 const WORD_WRAP_Y: u32 = 131072u;
 const WORD_TEXTURED: u32 = 2097152u;
 
-// The alpha-test cutout reference 224/255, as static_gx.wgsl's VANILLA_ALPHA_KEY.
+// The alpha-test cutout reference 224/255, as static_gx.wesl's VANILLA_ALPHA_KEY.
 const ALPHA_KEY: f32 = 0.8784314;
 // The mip a candidate's alpha is tested at: the draw lane keys the full-size texel.
 const ALPHA_LEVEL: f32 = 0.0;
@@ -143,7 +144,7 @@ fn record(row: u32, word: u32) -> vec4<u32> {
 }
 
 // A static item's texel at an explicit level, through the sampler its wrap bits pick (as
-// static_gx.wgsl's `gx_sample`); white where the item is untextured.
+// static_gx.wesl's `gx_sample`); white where the item is untextured.
 fn texel(row: u32, word: u32, uv: vec2<f32>, level: f32) -> vec4<f32> {
     if ((word & WORD_TEXTURED) == 0u) {
         return vec4<f32>(1.0);

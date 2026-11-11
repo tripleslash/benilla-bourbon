@@ -56,7 +56,7 @@ pub(super) fn setup_sun(
             base_color_texture: Some(sun_tex),
             unlit: true,
             cull_mode: None,
-            alpha_mode: AlphaMode::Premultiplied, // gamma-correct blend (celestial.wgsl)
+            alpha_mode: AlphaMode::Premultiplied, // gamma-correct blend (celestial.wesl)
             depth_bias: sky_order::SUN_DISC_BIAS, // second sky draw, under the moons and clouds
             ..default()
         },

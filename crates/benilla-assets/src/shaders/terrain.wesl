@@ -85,7 +85,7 @@ fn modern_gi_ambient(p: vec3<f32>, nrm: vec3<f32>, recv_interior: f32, lite: boo
 }
 
 // **How dark a fully covered character shadow gets.** One number, carried by value in all three
-// receivers — `wow_model.wgsl` beside this file, and `benilla-world`'s `static_gx.wgsl`. Move the
+// receivers — `wow_model.wesl` beside this file, and `benilla-world`'s `static_gx.wesl`. Move the
 // three together; they are separate files in two crates only because WGSL has no shared header.
 //
 // Terrain's copy reads DEEPEST of the three at the same value, because here the factor multiplies
@@ -281,7 +281,7 @@ const TERRAIN_REACH: f32 = 33.570166;
 // copied at `0x71bc47`) of half-width `w + 10`, at least `TERRAIN_REACH`. A committed light is
 // diffuse only (the ambient and specular slots are zeroed at `0x71c7e3`), falls off as
 // `1/(0.7·d + 0.03·d²)` on the vertex normal, and has no distance cutoff. The M2 lane in
-// wow_model.wgsl uses the packed per-light range: the lanes differ on purpose.
+// wow_model.wesl uses the packed per-light range: the lanes differ on purpose.
 fn point_light_sum(P: vec3<f32>, N: vec3<f32>, anchor: vec3<f32>) -> vec3<f32> {
     let count = u32(wow_light.point_count.x);
     var sel = array<u32, 3>(0u, 0u, 0u);
@@ -407,7 +407,7 @@ fn point_light_eval(sel: vec3<u32>, P: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
 // The MCNK chunk cell centre under a world point: the reference's light anchor, the chunk's world
 // AABB centre `CMapChunk+0x5c..0x64` (written by `0x6b0e50`). The grid is fixed world-wide (chunk
 // 533.33333/16 yd, half-extent 32 tiles) and symmetric, and WoW x/y are Bevy −z/−x, so snapping
-// Bevy x/z lands on the same cells; wow_model.wgsl mirrors it for clutter.
+// Bevy x/z lands on the same cells; wow_model.wesl mirrors it for clutter.
 // The anchor height is the vertex's own y, not the chunk's mid-height `(minH + maxH)/2`, so on
 // relief one chunk's vertices can select different lights: the per-chunk constant is not plumbed
 // to the vertex stage. On flat ground the two agree.

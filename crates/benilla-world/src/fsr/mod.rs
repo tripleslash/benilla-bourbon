@@ -180,9 +180,9 @@ pub struct FsrShaders {
     /// `disocclusion`, `interpolate`, `color_pyramid_seed`, the colour pyramid's reduce, `inpaint`,
     /// and the present copy.
     pub framegen: [Handle<Shader>; 10],
-    /// Model parts' motion (`velocity.wgsl`).
+    /// Model parts' motion (`velocity.wesl`).
     pub velocity: Handle<Shader>,
-    /// The effect lane's motion (`effect_velocity.wgsl`).
+    /// The effect lane's motion (`effect_velocity.wesl`).
     pub effect_velocity: Handle<Shader>,
     /// `WOW_FSR_DEBUG=residual`'s measurement (`residual.wgsl`).
     pub residual: Handle<Shader>,
@@ -255,8 +255,8 @@ const FG_PASSES: [(&str, Option<&str>); 10] = [
         Some(include_str!("../shaders/fsr/fg_present.wgsl")),
     ),
 ];
-const VELOCITY: &str = include_str!("../shaders/fsr/velocity.wgsl");
-const EFFECT_VELOCITY: &str = include_str!("../shaders/fsr/effect_velocity.wgsl");
+const VELOCITY: &str = include_str!("../shaders/fsr/velocity.wesl");
+const EFFECT_VELOCITY: &str = include_str!("../shaders/fsr/effect_velocity.wesl");
 const RESIDUAL: &str = include_str!("../shaders/fsr/residual.wgsl");
 
 /// One upscaler pass's full source: the shared prelude, then the pass with its placeholders
@@ -563,10 +563,10 @@ impl Plugin for FsrPlugin {
             motion_only_source(formats),
             "benilla_fsr/motion_only.wgsl",
         ));
-        let velocity = shaders.add(Shader::from_wgsl(VELOCITY, "benilla_fsr/velocity.wgsl"));
-        let effect_velocity = shaders.add(Shader::from_wgsl(
+        let velocity = shaders.add(Shader::from_wesl(VELOCITY, "benilla_fsr/velocity.wesl"));
+        let effect_velocity = shaders.add(Shader::from_wesl(
             EFFECT_VELOCITY,
-            "benilla_fsr/effect_velocity.wgsl",
+            "benilla_fsr/effect_velocity.wesl",
         ));
         let residual = shaders.add(Shader::from_wgsl(
             pass_source(RESIDUAL, formats),

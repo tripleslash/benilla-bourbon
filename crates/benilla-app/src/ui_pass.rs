@@ -281,7 +281,7 @@ pub(crate) struct UiQuadBatch;
 struct UiWhiteTexture(Handle<Image>);
 
 /// The quad material: a texture and the [`UiQuad`] flags as uniforms, drawn through the
-/// premultiplied-alpha pipeline (`ui_quad.wgsl`), or the multiply one for `MOD` ([`UiQuadKey`]). It
+/// premultiplied-alpha pipeline (`ui_quad.wesl`), or the multiply one for `MOD` ([`UiQuadKey`]). It
 /// holds no colour, so it is its identity key alone and a steady frame re-prepares none.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 #[bind_group_data(UiQuadKey)]
@@ -332,7 +332,7 @@ impl From<&UiQuadMaterial> for UiQuadKey {
     }
 }
 
-/// A run's one colour for the batch entity's [`MeshTag`], unpacked by `ui_quad.wgsl`'s vertex
+/// A run's one colour for the batch entity's [`MeshTag`], unpacked by `ui_quad.wesl`'s vertex
 /// stage, so a colour pulse is a component write, never a mesh or material write. One byte per
 /// channel, `×255 + 0.5`, as the reference packs a vertex colour (`CImVector`; `SetVertexColor`
 /// at `0x79abd0`, the frame-alpha fold at `0x77fac0`). Complemented, so an entity with no tag
@@ -380,11 +380,11 @@ pub(crate) fn tile_quad_mesh() -> Mesh {
 impl Material2d for UiQuadMaterial {
     /// Our own vertex stage, which unpacks the run's tint from the instance tag ([`tint_tag`]).
     fn vertex_shader() -> ShaderRef {
-        "embedded://benilla_app/shaders/ui_quad.wgsl".into()
+        "embedded://benilla_app/shaders/ui_quad.wesl".into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        "embedded://benilla_app/shaders/ui_quad.wgsl".into()
+        "embedded://benilla_app/shaders/ui_quad.wesl".into()
     }
 
     fn alpha_mode(&self) -> bevy::sprite_render::AlphaMode2d {

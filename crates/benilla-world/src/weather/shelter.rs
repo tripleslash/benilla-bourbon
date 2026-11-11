@@ -1,7 +1,7 @@
 //! fork (Everwood port): the rain-occlusion height map. A camera-centred top-down grid
 //! ([`GRID`]² cells of [`CELL`] yd, ~96 yd across, recentred in [`STEP`]-cell steps) that says,
 //! per cell, how high the topmost surface is and whether open air lies under it, so the wet lane
-//! (`wet_hook.wgsl`) keeps ground and walls under porches, bridges and roofs dry.
+//! (`wet_hook.wesl`) keeps ground and walls under porches, bridges and roofs dry.
 //!
 //! Source: CPU vertical rays against the collision world, the same `SpatialQuery` and
 //! [`WorldCollision::body_filter`](crate::collision::WorldCollision::body_filter) the precip

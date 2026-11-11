@@ -2,7 +2,7 @@
 //! material asked for?
 //!
 //! An additive glow card needs two halves to agree: the material's marker (`clutter_fade.z`
-//! bit 2) makes `wow_model.wgsl` fold the radial alpha into the colour, and the same marker,
+//! bit 2) makes `wow_model.wesl` fold the radial alpha into the colour, and the same marker,
 //! through `WowModelExt::specialize`, gives the pipeline its pure `(ONE, ONE)` add. A folded
 //! colour on an alpha-blend pipeline draws a dim skirt; an unfolded colour on the pure add draws
 //! a hard, saturated disc.

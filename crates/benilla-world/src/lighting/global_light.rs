@@ -356,7 +356,7 @@ pub struct LightRooms(pub(crate) crate::wmo_portal::WmoGroupVis);
 /// which may hang three levels down a bone hierarchy from it.
 ///
 /// **Without this every entity light was refused by every interior surface in the game.** The
-/// receiver-side gate is `static_gx.wgsl`'s `if (interior && …w < 0.5) { continue; }` — a light
+/// receiver-side gate is `static_gx.wesl`'s `if (interior && …w < 0.5) { continue; }` — a light
 /// that names no rooms may not light an interior one, because a local light has no occluder unless
 /// it holds a cube slot and a street lamp would otherwise light the inside of the chapel beside it
 /// through the wall. That rule reads "names no rooms" as "is outdoors", which is true of an ADT
@@ -469,7 +469,7 @@ impl Default for WowLightData {
 /// with no flame flicker on it, in the point table's own order (entries past the count are 0).
 ///
 /// The modern grid keeps eight lights a cell and ranks the ones that reach it
-/// (`light_bin.wgsl`). Ranked by the committed colour, which carries the flicker, two flames a few
+/// (`light_bin.wesl`). Ranked by the committed colour, which carries the flicker, two flames a few
 /// percent apart at a cell's cut traded places as they breathed, and the one that lost its place
 /// stopped lighting that cell: around Northshire Abbey, where sixteen and more lights reach every
 /// cell of the walls, whole 3 yd cells of stone stepped a tenth in brightness several times a
@@ -553,7 +553,7 @@ pub fn new_shared_light_buffer(device: &RenderDevice) -> SharedLightBuffer {
 
 /// The shared light buffer's full size: the per-frame blob ([`LIGHT_HEADER_ROWS`] rows and the
 /// point table), the interior-prop probe region and the skin-palette regions. Every buffer bound
-/// as `wow_light` must be this big: wgpu validates the bound size against `wow_model.wgsl`'s
+/// as `wow_light` must be this big: wgpu validates the bound size against `wow_model.wesl`'s
 /// whole layout at each draw.
 pub fn light_blob_bytes() -> u64 {
     per_frame_blob_bytes()
@@ -831,7 +831,7 @@ fn build_light_data(
                 let s = steady * flick.intensity;
                 let rgb = commit_raw([c[0] * s, c[1] * s, c[2] * s * flick.blue]);
                 // What the grid ranks this light by ([`LightRank`]): the same commit with no
-                // flicker on it, as the luminance `light_bin.wgsl` used to take from `rgb`.
+                // flicker on it, as the luminance `light_bin.wesl` used to take from `rgb`.
                 let [r, g, b] = commit_raw(c.map(|c| c * steady));
                 let rank = 0.2126 * r + 0.7152 * g + 0.0722 * b;
                 // The `w` channel (see the pack below): INDOORS, not merely "names rooms".
@@ -975,7 +975,7 @@ fn build_light_data(
         let now = time.elapsed_secs_f64();
         if now - *last_dump >= every {
             *last_dump = now;
-            // Candidates for the camera chunk's three slots: the Chebyshev box of `terrain.wgsl`'s
+            // Candidates for the camera chunk's three slots: the Chebyshev box of `terrain.wesl`'s
             // `TERRAIN_REACH` (keep in sync), with the 48 yd sphere's count beside it.
             let cell = 533.333_3 / 16.0;
             let half = 32.0 * 533.333_3;
@@ -1097,7 +1097,7 @@ mod tests {
     /// GOLDEN — **an entity light inherits the room its body stands in**, and loses it again when
     /// the body walks out.
     ///
-    /// The gate this feeds is `static_gx.wgsl`'s `interior && w < 0.5 -> skip`, and `w` is just
+    /// The gate this feeds is `static_gx.wesl`'s `interior && w < 0.5 -> skip`, and `w` is just
     /// "does this light name rooms". That rule reads "names no rooms" as "is outdoors", which is
     /// true of a placed ADT lamp and false of every light on the entity lane — and nothing in
     /// `benilla-app` attached [`LightRooms`], so a GameObject brazier standing inside Orgrimmar
@@ -1153,7 +1153,7 @@ mod tests {
         );
     }
 
-    /// `wow_model.wgsl`'s exterior doodad and entity lane over the packed rows gives
+    /// `wow_model.wesl`'s exterior doodad and entity lane over the packed rows gives
     /// `E = A + I·D·(4/17)(0.375 + 2μ + 1.875μ²)`: ambient never scales by the intensity I, and
     /// every sun band scales by it once. `eval_sh_lane` mirrors the WGSL line for line, so a swap
     /// in the shader shows only when the two are read side by side.
@@ -1166,7 +1166,7 @@ mod tests {
         let mut rows = [[0.0f32; 4]; LIGHT_HEADER_ROWS];
         pack_model_core_rows(&mut rows, ambient, diffuse, sun_dir);
 
-        /// The SH branch of `wow_model.wgsl`'s exterior lane, verbatim.
+        /// The SH branch of `wow_model.wesl`'s exterior lane, verbatim.
         fn eval_sh_lane(rows: &[[f32; 4]; LIGHT_HEADER_ROWS], n: Vec3, intensity: f32) -> [f32; 3] {
             let quad = [n.x * n.y, n.y * n.z, n.z * n.z, n.x * n.z];
             let x2y2 = n.x * n.x - n.y * n.y;

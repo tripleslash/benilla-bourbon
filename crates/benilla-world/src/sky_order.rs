@@ -23,7 +23,7 @@ use bevy::render::render_resource::RenderPipelineDescriptor;
 
 /// The vertex stage every sky material draws through, the far-depth pin (the depth law); each
 /// returns it from `vertex_shader()`, and the test below holds them to it.
-pub(crate) const SKY_VERTEX_SHADER: &str = "embedded://benilla_world/shaders/sky_vertex.wgsl";
+pub(crate) const SKY_VERTEX_SHADER: &str = "embedded://benilla_world/shaders/sky_vertex.wesl";
 
 /// Every sky material's `specialize` (the depth law): zero the rasterizer depth-bias constant, so
 /// the rung in `StandardMaterial::depth_bias` stays a sort key and the pinned depth is untouched.
@@ -207,18 +207,18 @@ fn the_sky_depth_is_pinned_at_the_vertex_and_nowhere_else() {
     use bevy::pbr::Material;
     use bevy::shader::ShaderRef;
 
-    let vertex = include_str!("shaders/sky_vertex.wgsl");
+    let vertex = include_str!("shaders/sky_vertex.wesl");
     assert!(
         vertex.contains("const SKY_FAR_CLIP_Z: f32 = 0.0;")
             && vertex.contains("out.position.z = SKY_FAR_CLIP_Z;"),
-        "sky_vertex.wgsl no longer pins the far depth — every shell radius is deciding occlusion \
+        "sky_vertex.wesl no longer pins the far depth — every shell radius is deciding occlusion \
          again (sky_order.rs, \"The depth law\")"
     );
     for (name, src) in [
-        ("sky.wgsl", include_str!("shaders/sky.wgsl")),
-        ("star.wgsl", include_str!("shaders/star.wgsl")),
-        ("cloud.wgsl", include_str!("shaders/cloud.wgsl")),
-        ("celestial.wgsl", include_str!("shaders/celestial.wgsl")),
+        ("sky.wesl", include_str!("shaders/sky.wesl")),
+        ("star.wesl", include_str!("shaders/star.wesl")),
+        ("cloud.wesl", include_str!("shaders/cloud.wesl")),
+        ("celestial.wesl", include_str!("shaders/celestial.wesl")),
         // The WMO skybox draws on the shared model lane, whose `WOW_SKY_DEPTH` branch is held to
         // the same law in `benilla_assets::materials`.
     ] {

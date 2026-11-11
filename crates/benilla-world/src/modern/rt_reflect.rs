@@ -5,7 +5,7 @@
 //! (`liquid::reflect`'s second scene render, about 4 ms of render-thread CPU at a waterside town)
 //! stands down, and the water takes the reflection it would have read from the mirror along the same
 //! ray instead: one ray query against the ray-traced scene (`static_gx::rt_scene`), its hit lit as
-//! the mirror's own render lights that surface (`liquid_cata.wgsl`'s `lane_shade`, over
+//! the mirror's own render lights that surface (`liquid_cata.wesl`'s `lane_shade`, over
 //! `benilla_modern::rtreflect`) and fogged as the mirror fogs it. A ray that finds nothing reads the
 //! sky the water already falls back to.
 //!

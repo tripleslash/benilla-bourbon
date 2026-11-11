@@ -1,6 +1,6 @@
 //! fork: **the ray-traced scene** — a BLAS per static_gx region and per terrain cell, one TLAS over
 //! them, and the bind group the ray-traced lanes (probe GI, shadows, water reflections) trace
-//! through with `benilla_modern::rt_scene` (`shaders/modern/rt_scene.wgsl`). Native only.
+//! through with `benilla_modern::rt_scene` (`shaders/modern/rt_scene.wesl`). Native only.
 //!
 //! A child of `static_gx::render` because its scene is this pass's: the regions the GPU cache has
 //! assembled, read through their blocks of the bindless region table and index arena
@@ -103,13 +103,13 @@ use super::*;
 use crate::modern::shadow::ModernTerrainCasters;
 use crate::static_gx::ATTRIBUTE_GX_WORD;
 
-/// `u32` words of a vertex's attribute row. Keep in sync with `rt_scene.wgsl` and `rt_repack.wgsl`.
+/// `u32` words of a vertex's attribute row. Keep in sync with `rt_scene.wesl` and `rt_repack.wgsl`.
 const ATTRIBUTE_WORDS: u32 = 5;
-/// Instance-table rows per slot. Keep in sync with `rt_scene.wgsl`.
+/// Instance-table rows per slot. Keep in sync with `rt_scene.wesl`.
 const INSTANCE_ROWS: usize = 2;
 /// An attribute word offset the repack reads as "the mesh has none".
 const NONE: u32 = u32::MAX;
-/// Instance kinds; the TLAS mask bit is `1 << kind`. Keep in sync with `rt_scene.wgsl`.
+/// Instance kinds; the TLAS mask bit is `1 << kind`. Keep in sync with `rt_scene.wesl`.
 const KIND_CELL: u32 = 0;
 const KIND_WMO: u32 = 1;
 const KIND_PROP: u32 = 2;
@@ -141,7 +141,7 @@ const READY_FRAMES: u32 = 8;
 /// Frames in a row with every entry built but regions still unassembled after which the scene
 /// counts as ready anyway: a region whose mesh never reaches the slab must not hold the lanes off.
 const READY_GRACE: u32 = 300;
-/// The stand-in's instance rows (`rt_scene.wgsl`'s `STUB_MARK`): a kind no entry has, which the
+/// The stand-in's instance rows (`rt_scene.wesl`'s `STUB_MARK`): a kind no entry has, which the
 /// library reads as "this is not the scene" (`rt_scene::live`). Keep in sync.
 const STUB_MARK: u32 = u32::MAX;
 
@@ -1791,7 +1791,7 @@ mod tests {
     /// The WGSL agrees with the layout here: the array size, the row counts, the kinds.
     #[test]
     fn the_shaders_agree_with_the_scene() {
-        let lib = include_str!("../../shaders/modern/rt_scene.wgsl");
+        let lib = include_str!("../../shaders/modern/rt_scene.wesl");
         assert!(lib.contains(&format!(
             "binding_array<texture_2d_array<f32>, {GX_CLASS_SLOTS}>"
         )));

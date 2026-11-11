@@ -10,7 +10,7 @@ import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
 // padding (a uniform is 16-byte aligned).
 @group(0) @binding(2) var<uniform> ramp: vec4<f32>;
 
-// sRGB to linear (IEC 61966-2-1), the exact inverse of `ui_quad.wgsl`'s `linear_to_srgb`.
+// sRGB to linear (IEC 61966-2-1), the exact inverse of `ui_quad.wesl`'s `linear_to_srgb`.
 fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     let higher = pow((max(c, vec3<f32>(0.0)) + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
     let lower = c / 12.92;

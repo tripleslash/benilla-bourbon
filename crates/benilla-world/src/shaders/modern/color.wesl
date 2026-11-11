@@ -4,8 +4,8 @@
 // Modern lanes decode their INPUTS instead — albedo texels, vertex colours, packed DBC bytes — and
 // write linear radiance. The transfer here is the exact piecewise sRGB curve, not a 2.2 power:
 // the parity check against classic (relight R^2) is sensitive to the toe.
-// Imported as `benilla_modern::colorspace`, not `::color`: naga_oil substitutes a module alias for every
-// bare identifier of that name, and `color` is a common local/field name in the hooked shaders.
+// Imported as `colorspace` (`import benilla_world::shaders::modern::color as colorspace;`), not
+// `color`, a common local and field name in the hooked shaders.
 
 fn srgb_to_linear_channel(c: f32) -> f32 {
     let x = max(c, 0.0);

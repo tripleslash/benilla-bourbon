@@ -87,7 +87,7 @@ pub struct MatKey {
     /// A depth-prime twin ([`zfill_material`], the reference's `M2UseZFill` clone at `0x707f7d`).
     zfill: bool,
     /// fork: a classified tree or bush leaf batch's exile copy, marker bit 14
-    /// ([`FOLIAGE_WIND_MARKER`]); `wow_model.wgsl` sways only these.
+    /// ([`FOLIAGE_WIND_MARKER`]); `wow_model.wesl` sways only these.
     foliage_wind: bool,
     /// A WMO skybox batch ([`crate::skybox`]), with its own pipeline and sort rung.
     sky_depth: bool,
@@ -117,7 +117,7 @@ pub enum ShadeSel {
 }
 
 impl ShadeSel {
-    /// The `sun_scale.x` value, matching `wow_model.wgsl`'s thresholds (1.5 rig, 0.85 lit,
+    /// The `sun_scale.x` value, matching `wow_model.wesl`'s thresholds (1.5 rig, 0.85 lit,
     /// 0.5 matte, else shaded).
     pub fn selector(self) -> f32 {
         match self {
@@ -531,7 +531,7 @@ pub(crate) const ENV_MAP_MARKER: u16 = 1 << 12;
 pub(crate) const SKY_DEPTH_MARKER: u16 = 1 << 13;
 
 /// fork: `clutter_fade.z` marker bit 14: a classified tree or bush leaf batch's exile copy, the
-/// only entity draw `wow_model.wgsl` applies `tree_offset` to. Vertex-only uniform data, not a
+/// only entity draw `wow_model.wesl` applies `tree_offset` to. Vertex-only uniform data, not a
 /// `WowModelKey` axis; a `MeshTag` bit would alias the lane weight and the interior probe slot.
 pub(crate) const FOLIAGE_WIND_MARKER: u16 = 1 << 14;
 
@@ -1307,7 +1307,7 @@ mod tests {
         assert_eq!((p.x, p.y, p.z, p.w), (1.0, 3.0, 1.0, 0.0));
     }
 
-    /// A stage 1 on the vertex's UV set says so in `stage1.w`, which `wow_model.wgsl` reads to
+    /// A stage 1 on the vertex's UV set says so in `stage1.w`, which `wow_model.wesl` reads to
     /// take `uv_b` and the stage's own transform, and keys a material of its own: its own
     /// coordinates and its own translation loop are each part of the look.
     #[test]

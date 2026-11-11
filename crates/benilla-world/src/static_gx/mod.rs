@@ -62,10 +62,10 @@ const REBAKE_FRAMES: u32 = 120;
 /// A dirty cell this old (~10 s) bakes even if never quiet, so a trickle cannot starve it.
 const MAX_DIRTY_FRAMES: u32 = 600;
 
-/// Per-vertex word: the item index in bits 0..16, flag bits above, as `static_gx.wgsl` reads it.
+/// Per-vertex word: the item index in bits 0..16, flag bits above, as `static_gx.wesl` reads it.
 pub const ATTRIBUTE_GX_WORD: MeshVertexAttribute =
     MeshVertexAttribute::new("Gx_Word", 988_101, VertexFormat::Uint32);
-/// Per-vertex point-light anchor: the placement's world origin, as in `wow_model.wgsl`.
+/// Per-vertex point-light anchor: the placement's world origin, as in `wow_model.wesl`.
 pub const ATTRIBUTE_GX_ANCHOR: MeshVertexAttribute =
     MeshVertexAttribute::new("Gx_Anchor", 988_102, VertexFormat::Float32x3);
 
@@ -916,32 +916,46 @@ mod tests {
     use super::testkit::{batch, batch_of, object, tri};
     use super::*;
 
-    /// `src` without its `#ifdef WOW_MODERN` blocks, `#else` branches kept, nesting followed.
+    /// `src` without what only `WOW_MODERN` compiles: its `@if(WOW_MODERN) {` blocks and items,
+    /// and the `@else` arm of an `@if(!WOW_MODERN) {` block. Every other condition keeps both
+    /// arms, and the block lines themselves go.
     fn classic_only(src: &str) -> String {
-        // Per open `#if…`: whether it is a `WOW_MODERN` block, and whether its branch is skipped.
-        let mut open: Vec<(bool, bool)> = Vec::new();
+        const MODERN: &str = "@if(WOW_MODERN)";
+        const CLASSIC: &str = "@if(!WOW_MODERN)";
+        // Per open brace: `None` for a scope of the code, else a conditional block's
+        // (`WOW_MODERN` decides it, its arm is skipped).
+        let mut open: Vec<Option<(bool, bool)>> = Vec::new();
         let mut out = String::new();
         for line in src.lines() {
-            let d = line.trim_start();
-            let outer_skip = open.iter().any(|&(_, skip)| skip);
-            if d.starts_with("#if") {
-                let modern = d.starts_with("#ifdef WOW_MODERN");
-                open.push((modern, modern));
+            let d = line.trim();
+            let skipped = open.iter().flatten().any(|&(_, skip)| skip);
+            if d.starts_with("@if(") && d.ends_with(") {") {
+                let modern = d == format!("{MODERN} {{") || d == format!("{CLASSIC} {{");
+                open.push(Some((modern, d.starts_with(MODERN))));
                 continue;
             }
-            if d.starts_with("#else") {
-                if let Some((modern, skip)) = open.last_mut() {
+            if d == "} @else {" {
+                if let Some(Some((modern, skip))) = open.last_mut() {
                     if *modern {
                         *skip = !*skip;
                     }
                 }
                 continue;
             }
-            if d.starts_with("#endif") {
+            if d == "}" && matches!(open.last(), Some(Some(_))) {
                 open.pop();
                 continue;
             }
-            if !outer_skip {
+            for c in d.split("//").next().unwrap_or("").chars() {
+                match c {
+                    '{' => open.push(None),
+                    '}' => {
+                        open.pop();
+                    }
+                    _ => {}
+                }
+            }
+            if !skipped && !d.starts_with(MODERN) {
                 out.push_str(line);
                 out.push('\n');
             }
@@ -952,10 +966,10 @@ mod tests {
     /// The static pass lights as the entity pass does, per vertex: `vertex_light` holds every
     /// lane, the vertex stage writes its clamped colour to the interpolated `primary`, and the
     /// fragment only modulates the texel by it. The modern lane lights per pixel by design, so its
-    /// `#ifdef WOW_MODERN` blocks are left out of the fragment this reads.
+    /// `@if(WOW_MODERN)` blocks are left out of the fragment this reads.
     #[test]
     fn the_static_light_is_evaluated_per_vertex() {
-        let src = include_str!("../shaders/static_gx.wgsl");
+        let src = include_str!("../shaders/static_gx.wesl");
         let at = |needle: &str| {
             src.find(needle)
                 .unwrap_or_else(|| panic!("`{needle}` is gone"))
@@ -996,12 +1010,12 @@ mod tests {
         }
     }
 
-    /// The vertex colour is the lit material inside the one clamp, as in `wow_model.wgsl`: MOCV
+    /// The vertex colour is the lit material inside the one clamp, as in `wow_model.wesl`: MOCV
     /// under GL_COLOR_MATERIAL (`0x59cfec`), a doodad's baked M2Color as `Model2.bls`'s `c28`,
     /// whose light sum clamps first only with a point light bound.
     #[test]
     fn the_static_vertex_colour_is_lit_inside_the_one_clamp() {
-        let src = include_str!("../shaders/static_gx.wgsl");
+        let src = include_str!("../shaders/static_gx.wesl");
         let at = |needle: &str| {
             src.find(needle)
                 .unwrap_or_else(|| panic!("`{needle}` is gone"))

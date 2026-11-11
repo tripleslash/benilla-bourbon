@@ -16,7 +16,7 @@
 // order the atomics hand out slots in is invisible.
 import benilla_world::shaders::modern::probegi;
 
-// The trace's parameters, as `gi_trace.wgsl` declares them (the layout is `gi::trace_bytes`).
+// The trace's parameters, as `gi_trace.wesl` declares them (the layout is `gi::trace_bytes`).
 struct GiTrace {
     gi: probegi::GiParams,
     clip: probegi::GiClip,
@@ -69,7 +69,7 @@ fn classify_probes(@builtin(global_invocation_id) id: vec3<u32>) {
     let cascade = probegi::logical_cascade(g, idx / per_cascade);
     let w = probegi::slot_probe(g, cascade, idx % per_cascade);
     let previous = probes[idx];
-    // The trace's own four reasons, verbatim (`gi_trace.wgsl` documents each).
+    // The trace's own four reasons, verbatim (`gi_trace.wesl` documents each).
     let scrolled = previous.sh_y.w != probegi::key_lo(w) || previous.sh_z.w != probegi::key_hi(w);
     let cold = previous.depth.w < 0.5;
     let period = max(u32(g.misc.y), 1u);
@@ -106,7 +106,7 @@ fn classify_probes(@builtin(global_invocation_id) id: vec3<u32>) {
     // Bit 31 marks a throttled probe, whose blend eases four updates' worth at once.
     work.items[slot] = idx | select(0x80000000u, 0u, seen);
     // The trace spends one workgroup per `group_probes(rays)` listed probes — one lane per ray
-    // (`gi_trace.wgsl`, whose arithmetic this repeats) — so every that-many-th probe listed adds a
+    // (`gi_trace.wesl`, whose arithmetic this repeats) — so every that-many-th probe listed adds a
     // workgroup, and every `GROUP_ROW`-th workgroup opens a new row of the dispatch. The blend reuses
     // the dispatch, which then launches at least one thread per probe.
     let rays = clamp(u32(g.misc.x), 1u, 64u);

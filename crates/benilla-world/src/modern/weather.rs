@@ -100,7 +100,7 @@ pub fn storm_atmosphere(clear: &Atmosphere, stormy: &Atmosphere, t: f32) -> Atmo
 }
 
 /// fork: **rain clears around the eye.** A streak keeps its whole size from this many yards out
-/// and shrinks to nothing inside a quarter of it (`effect_points.wgsl`): the reference's streaks
+/// and shrinks to nothing inside a quarter of it (`effect_points.wesl`): the reference's streaks
 /// are fixed world-size triangles, so the few drops beside the camera were the widest marks on the
 /// screen and a downpour hid the view behind them.
 pub const STREAK_NEAR_YD: f32 = 4.0;

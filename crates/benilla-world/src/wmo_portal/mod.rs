@@ -733,7 +733,7 @@ fn lighting_reach(model: &WmoModel, eye_local: [f32; 3], terrain_z: Option<f32>)
         //
         // The two cases differ by the RECEIVER, not by the light, so they cannot be separated
         // here at all: that belongs to the indoor/outdoor class test the surface lanes already
-        // carry (`static_gx.wgsl`'s `modern_local_lights`, which rejects an outdoor light on an
+        // carry (`static_gx.wesl`'s `modern_local_lights`, which rejects an outdoor light on an
         // interior surface and wants the mirror-image rejection for the bleed).
         None => return vec![true; nav.len()],
     }

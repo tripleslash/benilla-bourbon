@@ -89,10 +89,10 @@ use crate::modern::caps::HwCaps;
 
 /// Elements of the texture binding array: the most pool classes the bindless layout binds. A
 /// class past it is held back like an unready texture (warned once). Keep in sync with
-/// `shaders/modern/gx_bindless.wgsl`.
+/// `shaders/modern/gx_bindless.wesl`.
 pub(super) const GX_CLASS_SLOTS: u32 = 1024;
 
-/// A region block's header rows, ahead of its records. Keep in sync with `gx_bindless.wgsl`.
+/// A region block's header rows, ahead of its records. Keep in sync with `gx_bindless.wesl`.
 pub(super) const HEADER_ROWS: u32 = 3;
 
 /// Bytes of a table row.
@@ -741,7 +741,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn the_cull_shader_agrees_with_the_table() {
-        let src = include_str!("../../shaders/modern/gx_cull.wgsl");
+        let src = include_str!("../../shaders/modern/gx_cull.wesl");
         assert!(src.contains(&format!("const HEADER_ROWS: u32 = {HEADER_ROWS}u;")));
         assert!(src.contains("row + HEADER_ROWS + head.w + 2u * key"));
     }
@@ -749,7 +749,7 @@ mod tests {
     /// The WGSL library declares the same array size and header length as the layout here.
     #[test]
     fn the_shader_library_agrees_with_the_layout() {
-        let src = include_str!("../../shaders/modern/gx_bindless.wgsl");
+        let src = include_str!("../../shaders/modern/gx_bindless.wesl");
         assert!(src.contains(&format!(
             "binding_array<texture_2d_array<f32>, {GX_CLASS_SLOTS}>"
         )));

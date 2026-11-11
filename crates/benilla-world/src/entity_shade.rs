@@ -762,7 +762,7 @@ mod tests {
     /// entity expression carries no `min(I, 1)`.
     #[test]
     fn the_entity_intensity_is_not_capped_in_the_shader() {
-        let src = include_str!("../../benilla-assets/src/shaders/wow_model.wgsl");
+        let src = include_str!("../../benilla-assets/src/shaders/wow_model.wesl");
         let line = src
             .lines()
             .find(|l| l.trim_start().starts_with("let intensity ="))

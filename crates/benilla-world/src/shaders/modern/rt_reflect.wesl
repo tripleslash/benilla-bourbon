@@ -36,7 +36,7 @@ struct ReflectHit {
     albedo: vec3<f32>,
     // The interpolated vertex colour (MOCV or the baked tint); white where the vertex has none.
     color: vec4<f32>,
-    // The static item's vertex word (`static_gx.wgsl`'s WORD_* bits); 0 on terrain.
+    // The static item's vertex word (`static_gx.wesl`'s WORD_* bits); 0 on terrain.
     word: u32,
     // The item's SIDN night glow colour, 0..1 (its record's z); zero on terrain.
     sidn: vec3<f32>,

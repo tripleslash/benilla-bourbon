@@ -4,7 +4,7 @@
 //! One resource, [`EnvFrame`], that the wind and wetness systems write. The light packer
 //! (`global_light::build_light_data`) copies it every frame into [`ENV_FRAME_ROWS`] rows appended
 //! to the shared light buffer right after the point-light table, so no earlier offset moves. The
-//! WGSL mirror is `benilla::env_frame::EnvFrame` (`benilla-assets/src/shaders/env_frame.wgsl`).
+//! WGSL mirror is `benilla::env_frame::EnvFrame` (`benilla-assets/src/shaders/env_frame.wesl`).
 //!
 //! All zero (the default) is "every feature off": every reader treats a zero row as identity.
 //!
@@ -140,7 +140,7 @@ mod tests {
     /// bender and every region behind the block.
     #[test]
     fn the_wgsl_mirror_has_the_same_rows() {
-        let src = include_str!("../../../benilla-assets/src/shaders/env_frame.wgsl")
+        let src = include_str!("../../../benilla-assets/src/shaders/env_frame.wesl")
             .replace("\r\n", "\n");
         let body = src.split_once("struct EnvFrame {").unwrap().1;
         let body = body.split_once("\n}").unwrap().0;
@@ -166,17 +166,17 @@ mod tests {
         let cells = SHELTER_GRID * SHELTER_GRID;
         for (name, src) in [
             (
-                "wow_model.wgsl",
-                include_str!("../../../benilla-assets/src/shaders/wow_model.wgsl"),
+                "wow_model.wesl",
+                include_str!("../../../benilla-assets/src/shaders/wow_model.wesl"),
             ),
-            ("static_gx.wgsl", include_str!("../shaders/static_gx.wgsl")),
+            ("static_gx.wesl", include_str!("../shaders/static_gx.wesl")),
             (
-                "fsr/velocity.wgsl",
-                include_str!("../shaders/fsr/velocity.wgsl"),
+                "fsr/velocity.wesl",
+                include_str!("../shaders/fsr/velocity.wesl"),
             ),
             (
-                "modern/entity_shadow.wgsl",
-                include_str!("../shaders/modern/entity_shadow.wgsl"),
+                "modern/entity_shadow.wesl",
+                include_str!("../shaders/modern/entity_shadow.wesl"),
             ),
         ] {
             let points = src.find("points: array<vec4<f32>, 512>").expect(name);

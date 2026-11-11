@@ -1,10 +1,13 @@
 // fork: the bindless static_gx group 1 (`static_gx/render/bindless.rs` has the contract): one
-// region table and one texture-class array for every retained region. Imported by static_gx.wgsl,
-// static_gx_shadow.wgsl and static_gx_voxel.wgsl under `GX_BINDLESS` only.
+// region table and one texture-class array for every retained region. Imported by static_gx.wesl,
+// static_gx_shadow.wesl and static_gx_voxel.wesl under `GX_BINDLESS` only.
 //
 // A draw's `first_instance` is its region's row in the table. Each entry point calls `enter` with
 // it first (the vertex stage from `instance_index`, the fragment from the flat varying the vertex
 // passed on); everything after reads the region through the helpers below.
+
+// naga 30 refuses a `binding_array` without it; it reaches every importer's linked output.
+enable wgpu_binding_array;
 
 // The region table: per region `HEADER_ROWS` header rows, then one record per item.
 //   row + 0: origin xyz (f32 bits), item count

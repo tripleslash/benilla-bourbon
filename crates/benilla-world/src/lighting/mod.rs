@@ -85,7 +85,7 @@ pub struct WowLighting {
     pub(crate) water_ocean_alpha: [f32; 2],
     /// The FFXGlow composite weight, `LightParams.glow` quantised as the reference packs it.
     pub(crate) glow: f32,
-    /// The dawn/dusk sky warp strength `curve(dayfrac) × highlightSky` for `sky.wgsl`'s warp
+    /// The dawn/dusk sky warp strength `curve(dayfrac) × highlightSky` for `sky.wesl`'s warp
     /// (`0x6d0f50`): 0, the identity, except at dawn and dusk in flagged zones.
     pub(crate) sky_warp: f32,
     /// The sun disc size multiplier (`0xce8cac`): 1 across midday, 2 at the dawn and dusk horizon.
@@ -129,7 +129,7 @@ pub struct WowLighting {
 impl WowLighting {
     /// Per-kind water swatch endpoints `(shallow_rgb, deep_rgb, shallow_alpha, deep_alpha)`, the
     /// IntBand rows raw: the × 0.711 dim belongs to the sky fill `0x68c250`, not to water. The ADT
-    /// swatch is the reference's 64-row byte ramp between them (`0x68a830`, in `liquid.wgsl`);
+    /// swatch is the reference's 64-row byte ramp between them (`0x68a830`, in `liquid.wesl`);
     /// WMO liquid's opacity is the 256-entry `shallow + d·(deep − shallow)/256` (`0x6b6b60`). One
     /// depth `V` indexes colour and alpha: `clamp(byte/42)` for river and lake (`0x68d790`, opaque
     /// by about 5 yd), `clamp(byte/255)` for ocean (`0x68d690`), both built in `0x68c4c0`.

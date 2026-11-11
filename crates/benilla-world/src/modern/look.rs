@@ -72,7 +72,7 @@ pub struct ZoneLook {
     /// fork: how far the key moves to [`Self::noon_key`] (0 keeps the authored row).
     pub noon_mix: f32,
     /// fork: the sea fog's extinction at sea level (1/yd): a bank lying on the ocean along the
-    /// whole coast, clear over the beach (`froxel_scatter.wgsl`'s `sea_fog`). 0 = none.
+    /// whole coast, clear over the beach (`froxel_scatter.wesl`'s `sea_fog`). 0 = none.
     pub sea_fog: f32,
     /// fork: the share of the fog's forward lobe kept while the moon keys (`sun_arc::moon_key`):
     /// in a dense zone fog the lobe that glows salmon around the sun made a second sun of the moon.

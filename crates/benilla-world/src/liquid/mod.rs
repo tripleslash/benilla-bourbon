@@ -1,6 +1,6 @@
 //! Liquid: the animated surfaces (`surface`), where the liquid is and whether a subject or the
 //! camera eye is in it (`query`, indexed by `spatial`), and the underwater drift cloud (`drift`).
-//! The MCLQ parse and flat mesh are `benilla_formats::liquid`; the shading is `liquid.wgsl`.
+//! The MCLQ parse and flat mesh are `benilla_formats::liquid`; the shading is `liquid.wesl`.
 //!
 //! The reference has three liquid renderers, each with its own arm in the shader: ADT MCLQ, WMO
 //! MLIQ water (`0x6b62e0` category 0, exterior `0x6b6630` or interior `0x6b6420` by the group's
@@ -59,8 +59,8 @@ pub(crate) use surface::{
 /// **Which liquid renderer the client is running** — the `waterDetail` CVar, in the reference's own
 /// value space.
 ///
-/// `0` is the 1.12.1 path (`liquid.wgsl`, a port of `Water.bls` and the fixed-function combine
-/// around it) and `2` is the Cataclysm path (`liquid_cata.wgsl`, `ProcWater` + `ProcWaterAbove`).
+/// `0` is the 1.12.1 path (`liquid.wesl`, a port of `Water.bls` and the fixed-function combine
+/// around it) and `2` is the Cataclysm path (`liquid_cata.wesl`, `ProcWater` + `ProcWaterAbove`).
 /// Those are the reference's numbers, not ours: `Liquid::CMaterialWater::InitResources` switches on
 /// exactly this cvar, and its `1` is the *medium* tier (`MediumWater`), which benilla does not
 /// implement. Leaving the gap rather than renumbering means a medium tier can land later without
@@ -84,7 +84,7 @@ pub const WATER_DETAIL_SSR: u8 = 1;
 /// The Cataclysm renderer — `ProcWaterAbove` perm 4 / `ProcWaterBelow` perm 0.
 pub const WATER_DETAIL_CATA: u8 = 2;
 /// fork: modern lighting — the Cataclysm renderer, mirror and all, whose above-water combine is
-/// the fork's stylised clear water (`liquid_cata.wgsl`'s `modern_water`, tuned against WoW Forever's
+/// the fork's stylised clear water (`liquid_cata.wesl`'s `modern_water`, tuned against WoW Forever's
 /// rivers) instead of the reference's: the bed seen through the water and filtered toward its hue,
 /// Beer–Lambert toward the zone's deep colour, a calm surface whose refraction scales with the
 /// water crossed, and a soft, capped reflection. "Modern (Experimental)" on the options page, under

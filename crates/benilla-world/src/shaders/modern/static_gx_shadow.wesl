@@ -1,6 +1,6 @@
 // Modern lighting (FORK.md, P2a): the retained static world — ADT doodad cells,
 // WMO groups, interior props — drawn depth-only into the modern sun's cascade shadow views.
-// Group 1 is static_gx's own cell layout, bound unchanged; see `static_gx.wgsl` for its contract.
+// Group 1 is static_gx's own cell layout, bound unchanged; see `static_gx.wesl` for its contract.
 // Under `GX_BINDLESS` it is the shared region table (`benilla_modern::gx_bindless`).
 @if(GX_BINDLESS) import benilla_world::shaders::modern::gx_bindless;
 // Group 0: this cascade's light clip (`static_gx::render::modern_shadow::CasterView`).
@@ -36,7 +36,7 @@ fn gx_origin() -> vec3<f32> {
 }
 }
 
-const WORD_TEXTURED: u32 = 2097152u; // 1 << 21, as static_gx.wgsl
+const WORD_TEXTURED: u32 = 2097152u; // 1 << 21, as static_gx.wesl
 const VANILLA_ALPHA_KEY: f32 = 0.8784314;
 
 struct GxVertex {

@@ -61,12 +61,12 @@ struct GiPipelines {
     trace_layout: BindGroupLayoutDescriptor,
     blend_layout: BindGroupLayoutDescriptor,
     classify: CachedComputePipelineId,
-    /// The trace's three stages (`gi_trace.wgsl`): per probe, per ray, per probe again.
+    /// The trace's three stages (`gi_trace.wesl`): per probe, per ray, per probe again.
     setup: CachedComputePipelineId,
     trace: CachedComputePipelineId,
     sum: CachedComputePipelineId,
     blend: CachedComputePipelineId,
-    /// fork: the ray stage as a ray query against the ray-traced scene (`gi_trace_rt.wgsl`), queued
+    /// fork: the ray stage as a ray query against the ray-traced scene (`gi_trace_rt.wesl`), queued
     /// where the session may trace probes ([`super::rt_gi_capable`]) and used in place of `trace`
     /// in a frame [`super::rt_gi`] holds; `None` otherwise.
     rt_trace: Option<CachedComputePipelineId>,
@@ -83,7 +83,7 @@ struct GiPipelines {
     async_trace: bool,
 }
 
-/// The trace's dispatch is rows of this many workgroups (`gi_classify.wgsl`'s `GROUP_ROW`): one
+/// The trace's dispatch is rows of this many workgroups (`gi_classify.wesl`'s `GROUP_ROW`): one
 /// axis of a dispatch stops at 65535 workgroups, and a frame listing every probe of Ultra's field at
 /// one a workgroup is 65536 — dropped whole, which left every probe cold for good.
 const GROUP_ROW: u32 = 256;
@@ -98,7 +98,7 @@ struct GiFrame {
     /// The trace's per-probe setup records and per-ray results, sized for a frame's listed cap.
     setups: Option<Buffer>,
     rays: Option<Buffer>,
-    /// The work list `gi_classify.wgsl` packs — a count, then one probe index per listed probe —
+    /// The work list `gi_classify.wesl` packs — a count, then one probe index per listed probe —
     /// and the indirect dispatch it grows. Both are reset every frame before the passes run.
     work: Option<Buffer>,
     dispatch: Option<Buffer>,
@@ -214,13 +214,13 @@ fn init_pipelines(
     let classify = compute(
         "modern_gi_classify",
         &classify_layout,
-        "embedded://benilla_world/shaders/modern/gi_classify.wgsl",
+        "embedded://benilla_world/shaders/modern/gi_classify.wesl",
         "classify_probes",
     );
     let setup = compute(
         "modern_gi_setup",
         &trace_layout,
-        "embedded://benilla_world/shaders/modern/gi_trace.wgsl",
+        "embedded://benilla_world/shaders/modern/gi_trace.wesl",
         "setup_probes",
     );
     // fork: F — the voxel path's hits take their sun through the scene, where the session may trace
@@ -239,7 +239,7 @@ fn init_pipelines(
             label: Some("modern_gi_trace".into()),
             layout: vec![trace_layout.clone(), crate::static_gx::rt_scene::layout()],
             immediate_size: 0,
-            shader: asset_server.load("embedded://benilla_world/shaders/modern/gi_trace.wgsl"),
+            shader: asset_server.load("embedded://benilla_world/shaders/modern/gi_trace.wesl"),
             shader_defs,
             entry_point: Some("trace_rays".into()),
             zero_initialize_workgroup_memory: false,
@@ -248,7 +248,7 @@ fn init_pipelines(
         compute(
             "modern_gi_trace",
             &trace_layout,
-            "embedded://benilla_world/shaders/modern/gi_trace.wgsl",
+            "embedded://benilla_world/shaders/modern/gi_trace.wesl",
             "trace_rays",
         )
     };
@@ -256,19 +256,19 @@ fn init_pipelines(
     let trace = compute(
         "modern_gi_trace",
         &trace_layout,
-        "embedded://benilla_world/shaders/modern/gi_trace.wgsl",
+        "embedded://benilla_world/shaders/modern/gi_trace.wesl",
         "trace_rays",
     );
     let sum = compute(
         "modern_gi_sum",
         &trace_layout,
-        "embedded://benilla_world/shaders/modern/gi_trace.wgsl",
+        "embedded://benilla_world/shaders/modern/gi_trace.wesl",
         "sum_probes",
     );
     let blend = compute(
         "modern_gi_blend",
         &blend_layout,
-        "embedded://benilla_world/shaders/modern/gi_blend.wgsl",
+        "embedded://benilla_world/shaders/modern/gi_blend.wesl",
         "blend_probes",
     );
     // fork: the ray-query stage, over the same group 0 plus the scene at group 1, queued beside the
@@ -286,7 +286,7 @@ fn init_pipelines(
             label: Some("modern_gi_trace_rt".into()),
             layout: vec![trace_layout.clone(), crate::static_gx::rt_scene::layout()],
             immediate_size: 0,
-            shader: asset_server.load("embedded://benilla_world/shaders/modern/gi_trace_rt.wgsl"),
+            shader: asset_server.load("embedded://benilla_world/shaders/modern/gi_trace_rt.wesl"),
             shader_defs,
             entry_point: Some("trace_rays".into()),
             zero_initialize_workgroup_memory: false,
@@ -728,7 +728,7 @@ impl<'a> TracePlan<'a> {
     /// span (the journal's `gpu_modern` column, where the device times passes).
     fn record(self, encoder: &mut CommandEncoder, diagnostics: Option<&DiagnosticsRecorder>) {
         // Classify sweeps every probe and packs the ones due a trace; the trace and the blend then
-        // launch one thread per packed probe (`gi_classify.wgsl` says why that is the whole win).
+        // launch one thread per packed probe (`gi_classify.wesl` says why that is the whole win).
         {
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("modern_gi_classify"),
@@ -753,7 +753,7 @@ impl<'a> TracePlan<'a> {
             });
             let span = diagnostics.pass_span(&mut pass, label);
             pass.set_bind_group(0, self.trace_bind, &[]);
-            // Setup, rays, sums — one dispatch each over the same rows (`gi_trace.wgsl`).
+            // Setup, rays, sums — one dispatch each over the same rows (`gi_trace.wesl`).
             pass.set_pipeline(self.setup);
             pass.dispatch_workgroups_indirect(self.dispatch, 0);
             match self.rt_stage {

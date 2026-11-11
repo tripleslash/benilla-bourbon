@@ -565,7 +565,7 @@ fn init_shadow_pipelines(
     pipeline_cache: Res<PipelineCache>,
 ) {
     let shader: Handle<Shader> =
-        asset_server.load("embedded://benilla_world/shaders/modern/static_gx_shadow.wgsl");
+        asset_server.load("embedded://benilla_world/shaders/modern/static_gx_shadow.wesl");
     let view_layout = BindGroupLayoutDescriptor::new(
         "modern_shadow_caster_view",
         &BindGroupLayoutEntries::single(ShaderStages::VERTEX, uniform_buffer::<CasterView>(true)),
@@ -642,7 +642,7 @@ fn init_shadow_pipelines(
                 ),
             ),
         ),
-        shader: asset_server.load("embedded://benilla_world/shaders/modern/entity_shadow.wgsl"),
+        shader: asset_server.load("embedded://benilla_world/shaders/modern/entity_shadow.wesl"),
         by_key: StrideMap::default(),
         #[cfg(not(target_arch = "wasm32"))]
         mv_by_key: StrideMap::default(),

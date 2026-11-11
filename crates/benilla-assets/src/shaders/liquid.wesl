@@ -116,7 +116,7 @@ fn apply_scroll(uv: vec2<f32>) -> vec2<f32> {
     return vec2<f32>(uv.x, uv.y + w.anim.z * fract(anim_time() / 10.0));
 }
 
-// Planar eye-Z GL_LINEAR fog in gamma space, as terrain.wgsl; GL_FOG defaults on (`0x593bf0`) and
+// Planar eye-Z GL_LINEAR fog in gamma space, as terrain.wesl; GL_FOG defaults on (`0x593bf0`) and
 // no liquid pass turns it off. Block 1 (`+0x70/74/78`) is the scene fog (`0x66ff20`); block 2
 // (`+0x80/84/88`) is the interior haze, eased toward the MFOG or zone target over about 4 s
 // (`0x6cf054`). Only the WMO geometry pass (`0x6b51d9`/`0x6b51ea`) and the WMO liquid pass

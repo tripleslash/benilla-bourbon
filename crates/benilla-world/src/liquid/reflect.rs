@@ -39,7 +39,7 @@
 //! built as the nearest proper rotation instead: `Transform::looking_to(M·forward, M·up)`, which
 //! derives `right = (M·up) × (M·back) = −M·right`. That is `M · C · diag(−1, 1, 1)` — a true
 //! rotation, correct winding, correct back-face culling — whose picture is the mirror's, flipped
-//! left-to-right. `liquid_cata.wgsl` undoes it with one `1 − u` at the read.
+//! left-to-right. `liquid_cata.wesl` undoes it with one `1 − u` at the read.
 //!
 //! The alternative was flipping the cull mode of every material in the scene for one view, which
 //! Bevy does not expose per-view at all.
@@ -116,7 +116,7 @@
 //!    ([`closest_reflection_height`]).
 //! 3. **A height guard in the shader.** One mirrored render is about one height, and a surface at
 //!    some other height would wear a picture of the world reflected about someone else's
-//!    waterline. `liquid_cata.wgsl` fades the mirror out over `MIRROR_PLANE_FADE_START..END` yards
+//!    waterline. `liquid_cata.wesl` fades the mirror out over `MIRROR_PLANE_FADE_START..END` yards
 //!    of disagreement, back to the flat horizon colour perm 4 uses. It carries a second guard for
 //!    the same family of ghost: the bent-ray read leaves the mirror's frame at the margins, and
 //!    every screen target here is ClampToEdge, so unguarded that smears one border column across
@@ -1056,7 +1056,7 @@ mod tests {
     }
 
     /// **The mirror is a rotation, and its picture is flipped left-to-right.** Both halves are the
-    /// contract `liquid_cata.wgsl`'s `1 − u` depends on, and neither is visible at the call site.
+    /// contract `liquid_cata.wesl`'s `1 − u` depends on, and neither is visible at the call site.
     #[test]
     fn the_mirrored_pose_is_a_rotation_with_its_right_hand_flipped() {
         let world = eye_over_water();

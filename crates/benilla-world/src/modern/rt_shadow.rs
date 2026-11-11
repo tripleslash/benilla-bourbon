@@ -14,8 +14,8 @@
 //! `rt_scene::live()` false, so each `rtshadow` twin returns its map-only original). The ray
 //! tracing then switches at run time with no pipeline re-specialized:
 //!
-//! - the Bevy material lanes (`wow_model.wgsl` under `WOW_MODERN`, `terrain.wgsl` under
-//!   `WOW_MODERN`, `liquid_cata.wgsl`) declare it as the group after the material's
+//! - the Bevy material lanes (`wow_model.wesl` under `WOW_MODERN`, `terrain.wesl` under
+//!   `WOW_MODERN`, `liquid_cata.wesl`) declare it as the group after the material's
 //!   (`benilla_assets::materials::RT_SHADOW_LAYOUT`, set here at render startup), and bevy_pbr's
 //!   `DrawMaterial` binds `MaterialExtraBindGroup` there (`third_party/bevy_pbr/BENILLA.md`, the
 //!   fourth delta), which this module fills every frame;

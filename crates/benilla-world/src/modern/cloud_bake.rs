@@ -8,7 +8,7 @@
 //! the self-shadowing (Beer's law: sun-facing edges glow, cores and bellies darken), with a powder
 //! term on the thin edges. The lit side takes the key's colour, the shade the desaturated authored
 //! cloud colour. In a modern frame the image replaces the tile on the cloud material's own binding;
-//! `cloud.wgsl` adds only the view-dependent silver lining and the horizon fade. Classic frames never
+//! `cloud.wesl` adds only the view-dependent silver lining and the horizon fade. Classic frames never
 //! see it.
 //!
 //! The bake runs on the async compute pool's workers. With none running (a page without threads),

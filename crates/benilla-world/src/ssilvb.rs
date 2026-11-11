@@ -5,7 +5,7 @@
 //! tree are lit exactly like open ground — the one thing that reads as "flat" in a frame that is
 //! otherwise faithful. This pass adds the two terms a screen-space gather can honestly recover:
 //! **ambient occlusion** (how much of a fragment's hemisphere is shut) and **one bounce of indirect
-//! colour** (what shut it, and in what colour). `shaders/ssilvb.wgsl` carries the method; this file
+//! colour** (what shut it, and in what colour). `shaders/ssilvb.wesl` carries the method; this file
 //! carries the wiring, and the two facts the wiring exists for.
 //!
 //! **Fact one: it reads the MAIN depth buffer, not a prepass.** Bevy's prepass cannot serve here
@@ -82,7 +82,7 @@ pub const SSILVB_RANGE: std::ops::RangeInclusive<f32> = 0.0..=2.0;
 /// through a lossy decode/encode pair, so the shipped look is now byte-identical to no pass.
 ///
 /// The row's own geometry is unchanged: the slider is 0—100%, and the shader gain (`AO_GAIN` /
-/// `GI_GAIN` in `shaders/ssilvb.wgsl`) still puts the intended look at 0.5, so a player who drags to
+/// `GI_GAIN` in `shaders/ssilvb.wesl`) still puts the intended look at 0.5, so a player who drags to
 /// the middle gets exactly what this used to ship. Raise the look in the gain, never here.
 ///
 /// fork: **0.6 since 2026-10-03** (the director's call) — the modern look wants the contact darkening on
@@ -155,7 +155,7 @@ fn env_f32(key: &str, fallback: f32, lo: f32, hi: f32) -> f32 {
 }
 
 /// The params uniform: `strength` (AO, indirect, radius, thickness) and `frame` (x = the buffer is
-/// linear), two `vec4<f32>` — `SsilvbParams` in `shaders/ssilvb.wgsl`.
+/// linear), two `vec4<f32>` — `SsilvbParams` in `shaders/ssilvb.wesl`.
 const PARAMS_SIZE: u64 = 32;
 
 /// Marks the ONE view this pass runs on — the world camera.
@@ -237,7 +237,7 @@ struct SsilvbVariant {
 
 fn init_pipelines(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(SsilvbPipelines {
-        shader: asset_server.load("embedded://benilla_world/shaders/ssilvb.wgsl"),
+        shader: asset_server.load("embedded://benilla_world/shaders/ssilvb.wesl"),
         variants: Default::default(),
     });
 }

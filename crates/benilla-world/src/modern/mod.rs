@@ -48,7 +48,7 @@ pub fn night_floor(ambient: [f32; 3], night: f32) -> [f32; 3] {
 }
 
 /// The albedo (linear) the distant terrain is lit with: the WDL band past the view distance
-/// (`wdl.wgsl`) and the seam the detailed world dissolves into before it (`fog_composite.wgsl`).
+/// (`wdl.wesl`) and the seam the detailed world dissolves into before it (`fog_composite.wesl`).
 /// The band has no texture, so it takes one ground's: a dark soil or grass, about sRGB 90.
 pub const DISTANT_ALBEDO: f32 = 0.1;
 
@@ -371,7 +371,7 @@ pub(crate) fn world_view_only(world_camera: bool) -> bool {
 }
 
 /// Dev A/B (`$WOW_MODERN_VERTEXHINTS=0`, read once): the light buffer's vertex hints stay unwritten
-/// (`shadow::VERTEX_HINT_OFFSET`), so every `wow_model.wgsl` and `terrain.wgsl` vertex walks the
+/// (`shadow::VERTEX_HINT_OFFSET`), so every `wow_model.wesl` and `terrain.wesl` vertex walks the
 /// light table whether or not the light grid will answer its fragments.
 pub(crate) fn vertex_hints_enabled() -> bool {
     static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

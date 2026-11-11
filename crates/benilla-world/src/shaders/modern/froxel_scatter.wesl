@@ -4,7 +4,7 @@
 // Per froxel, jittered in depth: extinction from the fog media (height falloff, near-clear, drifting
 // noise) plus the constant shaft haze; in-scatter from the key light (dual-lobe HG x cascade visibility
 // x cloud shadow), the sky (ambient x sky visibility) and the nearest point lights. Written as
-// (sigma_s * L, sigma_t) for `froxel_integrate.wgsl` to accumulate front to back.
+// (sigma_s * L, sigma_t) for `froxel_integrate.wesl` to accumulate front to back.
 import benilla_world::shaders::modern::sunshadow;
 import benilla_world::shaders::modern::froxelfog;
 import benilla_world::shaders::modern::probegi;
