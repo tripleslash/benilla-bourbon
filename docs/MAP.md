@@ -142,35 +142,35 @@
 - `blpx` (in benilla-blp)
 - `mpqx` (in benilla-formats)
 
-## WGSL shaders (`crates/*/src/shaders/`, embedded)
+## Shaders (`crates/*/src/shaders/`, embedded; `.wesl` where they import)
 
+- `embedded://benilla_app/shaders/ui_add.wesl`
+- `embedded://benilla_app/shaders/ui_gamma.wesl`
+- `embedded://benilla_app/shaders/ui_node_gamma.wesl`
+- `embedded://benilla_app/shaders/ui_quad.wesl`
+- `embedded://benilla_app/shaders/ui_slice_gamma.wesl`
+- `embedded://benilla_assets/shaders/env_frame.wesl`
+- `embedded://benilla_assets/shaders/liquid.wesl`
+- `embedded://benilla_assets/shaders/liquid_cata.wesl`
+- `embedded://benilla_assets/shaders/terrain.wesl`
+- `embedded://benilla_assets/shaders/wdl.wesl`
+- `embedded://benilla_assets/shaders/wet_hook.wesl`
+- `embedded://benilla_assets/shaders/wind_hook.wesl`
+- `embedded://benilla_assets/shaders/wow_model.wesl`
+- `embedded://benilla_world/shaders/celestial.wesl`
+- `embedded://benilla_world/shaders/cloud.wesl`
+- `embedded://benilla_world/shaders/effect_points.wesl`
+- `embedded://benilla_world/shaders/ffx_glow.wesl`
+- `embedded://benilla_world/shaders/liquid_ripple.wesl`
+- `embedded://benilla_world/shaders/liquid_screen.wesl`
+- `embedded://benilla_world/shaders/sky.wesl`
+- `embedded://benilla_world/shaders/sky_vertex.wesl`
+- `embedded://benilla_world/shaders/ssilvb.wesl`
+- `embedded://benilla_world/shaders/star.wesl`
+- `embedded://benilla_world/shaders/static_gx.wesl`
+- `embedded://benilla_world/shaders/wet_ssr.wesl`
+- `embedded://benilla_world/shaders/wow_effect.wesl`
 - `embedded://benilla_app/shaders/shadow_caster.wgsl`
-- `embedded://benilla_app/shaders/ui_add.wgsl`
-- `embedded://benilla_app/shaders/ui_gamma.wgsl`
-- `embedded://benilla_app/shaders/ui_node_gamma.wgsl`
-- `embedded://benilla_app/shaders/ui_quad.wgsl`
-- `embedded://benilla_app/shaders/ui_slice_gamma.wgsl`
-- `embedded://benilla_assets/shaders/env_frame.wgsl`
-- `embedded://benilla_assets/shaders/liquid.wgsl`
-- `embedded://benilla_assets/shaders/liquid_cata.wgsl`
-- `embedded://benilla_assets/shaders/terrain.wgsl`
-- `embedded://benilla_assets/shaders/wdl.wgsl`
-- `embedded://benilla_assets/shaders/wet_hook.wgsl`
-- `embedded://benilla_assets/shaders/wind_hook.wgsl`
-- `embedded://benilla_assets/shaders/wow_model.wgsl`
-- `embedded://benilla_world/shaders/celestial.wgsl`
-- `embedded://benilla_world/shaders/cloud.wgsl`
-- `embedded://benilla_world/shaders/effect_points.wgsl`
-- `embedded://benilla_world/shaders/ffx_glow.wgsl`
-- `embedded://benilla_world/shaders/liquid_ripple.wgsl`
-- `embedded://benilla_world/shaders/liquid_screen.wgsl`
-- `embedded://benilla_world/shaders/sky.wgsl`
-- `embedded://benilla_world/shaders/sky_vertex.wgsl`
-- `embedded://benilla_world/shaders/ssilvb.wgsl`
-- `embedded://benilla_world/shaders/star.wgsl`
-- `embedded://benilla_world/shaders/static_gx.wgsl`
-- `embedded://benilla_world/shaders/wet_ssr.wgsl`
-- `embedded://benilla_world/shaders/wow_effect.wgsl`
 
 ## Instruments — `$WOW_*` switches (env-var read sites)
 
@@ -195,6 +195,7 @@
 - `WOW_ASSET_CHURN` — benilla-app/src/asset_churn.rs
 - `WOW_ASSET_DUMP` — benilla-app/src/capture/probes/live_fps.rs
 - `WOW_ASYNC_COMPUTE` — benilla-world/src/modern/async_compute.rs
+- `WOW_ASYNC_GI` — benilla-world/src/modern/gi/node.rs
 - `WOW_AUDIOWORKLET` — benilla-app/src/sound/web_output.rs
 - `WOW_AUDIO_LIVE` — benilla-app/src/sound/output/mod.rs
 - `WOW_AUDIO_NO_RT` — benilla-app/src/sound/output/mod.rs
@@ -274,6 +275,7 @@
 - `WOW_FPS_` — benilla-world/src/bgwin.rs
 - `WOW_FPS_JOURNAL` — benilla-app/src/lib.rs, benilla-app/src/perf/journal.rs
 - `WOW_FPS_PROBE` — benilla-app/src/capture/mod.rs, benilla-app/src/lib.rs
+- `WOW_FRAME_FLOOR_DUMP` — benilla-app/src/game_plugins.rs
 - `WOW_FRAME_GENERATION` — benilla-world/src/worldview/fsr_view.rs
 - `WOW_FRAME_PHASES` — benilla-app/src/perf/phases.rs
 - `WOW_FREEZE_UI_MESH` — benilla-app/src/ui_pass.rs
@@ -389,7 +391,7 @@
 - `WOW_MM_PROBE` — benilla-app/src/capture/mod.rs, benilla-app/src/minimap/mod.rs, benilla-world/src/bgwin.rs
 - `WOW_MM_STATS` — benilla-app/src/minimap/mod.rs
 - `WOW_MM_ZOOM` — benilla-app/src/minimap/mod.rs
-- `WOW_MODERN` — benilla-assets/src/materials.rs, benilla-world/src/static_gx/render.rs
+- `WOW_MODERN` — benilla-app/src/shaders.rs, benilla-assets/src/materials.rs, benilla-world/src/static_gx/render.rs
 - `WOW_MODERN_ARRAYINDEX` — benilla-world/src/shaders.rs
 - `WOW_MODERN_BANKS` — benilla-app/src/lib.rs, benilla-world/src/modern/mod.rs
 - `WOW_MODERN_CASTERREACH` — benilla-app/src/lib.rs, benilla-world/src/modern/shadow.rs
@@ -536,8 +538,13 @@
 - `WOW_PROBE_VENDOR_SWAP` — benilla-app/src/dev.rs
 - `WOW_PROBE_VSYNC` — benilla-app/src/capture/mod.rs
 - `WOW_RAIN_SURFACES` — benilla-app/src/lib.rs, benilla-world/src/weather/wetness.rs
+- `WOW_RAYTRACING` — benilla-world/src/modern/mod.rs
+- `WOW_RAYTRACING_GI` — benilla-world/src/modern/mod.rs
+- `WOW_RAYTRACING_SHADOWS` — benilla-world/src/modern/mod.rs
+- `WOW_RAYTRACING_VOLUMETRICS` — benilla-world/src/modern/mod.rs
 - `WOW_REALM` — benilla-app/src/glue_session/realm.rs, benilla-app/src/ui_script/glue_mgr.rs
 - `WOW_REALM_SMOKE` — benilla-app/src/glue_session/realm_smoke.rs
+- `WOW_REFLEX` — benilla-world/src/worldview/fsr_view.rs
 - `WOW_REFORGED_MODELS` — benilla-app/src/cvars/mod.rs
 - `WOW_REFUSE_LOGIN` — benilla-app/src/net/io.rs
 - `WOW_REGEN_LIQUID_ART` — benilla-world/src/liquid/art.rs
@@ -553,6 +560,7 @@
 - `WOW_RIG_CENSUS` — benilla-world/src/rig_palette.rs
 - `WOW_RIG_COST` — benilla-world/src/rig_palette.rs
 - `WOW_RIG_SKIN` — benilla-assets/src/materials.rs
+- `WOW_RIPPLE_RATE` — benilla-world/src/liquid/ripple.rs
 - `WOW_ROW_BLOAT` — benilla-app/src/perf/census.rs, benilla-app/src/perf/mod.rs
 - `WOW_RT` — benilla-world/src/static_gx/render/rt_scene.rs
 - `WOW_RT_BUDGET` — benilla-world/src/static_gx/render/rt_scene.rs
@@ -564,6 +572,7 @@
 - `WOW_SCHED_CENSUS` — benilla-app/src/dev.rs, benilla-world/src/bgwin.rs
 - `WOW_SERIAL_ENCODE` — benilla-world/src/par_encode.rs
 - `WOW_SHADE_CENSUS` — benilla-world/src/entity_shade.rs
+- `WOW_SHADOW_MULTIVIEW` — benilla-world/src/static_gx/render/modern_shadow/multiview.rs
 - `WOW_SHADOW_TRACE` — benilla-app/src/player_shadow.rs
 - `WOW_SHOT_REQUIRE` — benilla-app/src/capture/live_shot.rs
 - `WOW_SHOT_REQUIRE_DIST` — benilla-app/src/capture/live_shot.rs
@@ -576,19 +585,19 @@
 - `WOW_SSILVB_NO_SUCH_VAR` — benilla-world/src/ssilvb.rs
 - `WOW_SSILVB_RADIUS` — benilla-app/src/lib.rs, benilla-world/src/ssilvb.rs
 - `WOW_SSILVB_THICKNESS` — benilla-world/src/ssilvb.rs
-- `WOW_SSR` — benilla-world/src/modern/rt_reflect.rs
 - `WOW_STALL` — benilla-app/src/capture/probes/stall.rs, benilla-app/src/dev.rs
 - `WOW_STALL_INJECT` — benilla-app/src/perf/stall.rs
 - `WOW_STALL_SAMPLE` — benilla-app/src/perf/stall.rs
 - `WOW_STATIC_GX` — benilla-app/src/lib.rs, benilla-world/src/static_gx/mod.rs
 - `WOW_STATIC_GX_FADE` — benilla-world/src/static_gx/mod.rs
-- `WOW_STATIC_GX_MDI` — benilla-world/src/static_gx/render/batch.rs
+- `WOW_STATIC_GX_MDI` — benilla-world/src/static_gx/render/batch.rs, benilla-world/src/static_gx/render/meshlets.rs
 - `WOW_STATIC_GX_PREPASS` — benilla-world/src/static_gx/render.rs
 - `WOW_STATIC_GX_PROP` — benilla-world/src/static_gx/mod.rs
 - `WOW_STATIC_GX_WMO` — benilla-world/src/static_gx/mod.rs
 - `WOW_STATIC_MERGE` — benilla-world/src/terrain_stream/merge.rs
 - `WOW_STOCK_UI` — benilla-app/src/ui_script/manifest.rs
 - `WOW_STORED_CARDS` — benilla-world/src/card_store.rs
+- `WOW_STREAMLINE` — benilla-app/src/video.rs, benilla-world/src/worldview.rs
 - `WOW_STREAM_TRACE` — benilla-app/src/perf/mod.rs
 - `WOW_SUPERSCALE` — benilla-app/src/lib.rs, benilla-world/src/perf_probe.rs
 - `WOW_SYNC_DUMP` — benilla-app/src/game_plugins.rs
@@ -707,6 +716,7 @@
 - `gates.sh` — The land gate chain: every gate in order, stopping at the first failure.
 - `genmap.sh` — Generate docs/MAP.md, the map of what is built, and docs/DEVIATIONS.md, where benilla differs from 1.12.1, both from what is on disk.
 - `pass-span-lint.sh` — refuse a second open `pass_span` on the same render pass (a wgpu validation error on Vulkan).
+- `perf-baseline.sh` — one perf run of the native world viewer at a pinned scene, the same way every time, so a run before a dependency bump and a run after it differ only i…
 - `perf-matrix.sh` — the rendering perf rig's runbook, as a script rather than a wiki page.
 - `probe-identity.sh` — Who a scripted run logs in as; sourced by smoke.sh, cine.sh and summon-live.sh, never run alone.
 - `smoke.sh` — The clean-run gate: boot the real client, log out, re-enter, walk the realm list, check the log.

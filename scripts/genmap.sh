@@ -77,9 +77,9 @@ field() { grep -m1 "^$2" "$1" 2>/dev/null | sed -E "s/^$2[[:space:]]*=[[:space:]
   echo
 
   # Shaders are embedded and addressed by their owning crate, so the crate is part of the name.
-  echo "## WGSL shaders (\`crates/*/src/shaders/\`, embedded)"
+  echo "## Shaders (\`crates/*/src/shaders/\`, embedded; \`.wesl\` where they import)"
   echo
-  for s in crates/*/src/shaders/*.wgsl; do
+  for s in crates/*/src/shaders/*.wesl crates/*/src/shaders/*.wgsl; do
     [ -f "$s" ] || continue
     crate=$(echo "$s" | sed -E 's@crates/([^/]+)/.*@\1@' | tr - _)
     echo "- \`embedded://$crate/shaders/$(basename "$s")\`"
@@ -187,7 +187,7 @@ LC_ALL=C grep -rIlE 'Deviation:' crates 2>/dev/null | LC_ALL=C sort | grep -vE '
     while ((getline s < f) > 0) L[++n] = s
     close(f)
     ext = f; sub(/.*\./, "", ext)
-    if (ext != "rs" && ext != "wgsl" && ext != "xml" && ext != "lua") return
+    if (ext != "rs" && ext != "wgsl" && ext != "wesl" && ext != "xml" && ext != "lua") return
     cr = f; sub(/^crates\//, "", cr); sub(/\/.*/, "", cr)
     rel = f; sub(/^crates\/[^\/]*\//, "", rel)
     xin = 0; skipping = 0; pend = 0
