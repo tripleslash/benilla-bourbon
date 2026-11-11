@@ -3,9 +3,11 @@
 //!
 //! # When it runs
 //!
-//! Where [`capable`] holds (`HwCaps.mesh_shader`, which only Vulkan reports, since naga emits
-//! task and mesh stages to SPIR-V alone; the GPU cull's lane on native multi-draw; not
-//! `WOW_GX_MESHLETS=0`), decided once at render startup ([`lane_active`]): every bake from then
+//! Where [`capable`] holds (`HwCaps.mesh_shader`, which Vulkan and DX12 report: on DX12 the task
+//! stage's `draw_index` is the vendored naga's, read from the special constants the vendored
+//! wgpu-core's indirect rewrite writes per draw, `third_party/naga/BENILLA.md`; the GPU cull's
+//! lane on native multi-draw; not `WOW_GX_MESHLETS=0`), decided once at render startup
+//! ([`lane_active`]): every bake from then
 //! on cuts its items into meshlets (`crate::static_gx::meshlet`), every region's meshlets live in
 //! the meshlet arena (`bindless.rs`), and the colour pass and its prepasses draw a view's culled
 //! batch as meshlets wherever the whole batch can be: every draw a run of whole items of regions

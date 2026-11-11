@@ -228,9 +228,10 @@ windows-sys = { version = "0.59", features = [
 
 # The shader translation test parses what bevy's shader cache composes (WGSL text since 0.20) and
 # writes the backend this platform renders with, through the naga bevy already builds
-# (`shaders.rs`): Bevy 0.20.1's wgpu 30 builds naga 30.
+# (`shaders.rs`), and the meshlet lane's task and mesh stages as HLSL for DX12 (`hlsl-out`): Bevy
+# 0.20.1's wgpu 30 builds naga 30, here the vendored copy (`third_party/naga`).
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 naga = { version = "30", features = ["wgsl-in", "msl-out"] }
 
 [target.'cfg(not(target_os = "macos"))'.dev-dependencies]
-naga = { version = "30", features = ["wgsl-in", "spv-out"] }
+naga = { version = "30", features = ["wgsl-in", "spv-out", "hlsl-out"] }

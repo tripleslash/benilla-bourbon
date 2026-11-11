@@ -3312,9 +3312,8 @@ fn multi_draw_indirect(
         }
     }
 
-    if state.pass.base.device.indirect_validation.is_some()
-        && family != DrawCommandFamily::DrawMeshTasks
-    {
+    // BENILLA: the draw index — on DX12 mesh-task draws too (`rewrites_indirect`).
+    if rewrites_indirect(state.pass.base.device, family) {
         state
             .pass
             .scope
@@ -3473,15 +3472,15 @@ fn multi_draw_indirect_count(
 
     // BENILLA: on DX12 the draws' arguments go through the indirect-draw rewrite, as
     // `multi_draw_indirect`'s do: it puts each draw's `first_vertex` / `base_vertex` and
-    // `first_instance` in front of its arguments, where the pipeline layout's command signature
-    // sets them as the special-constants root constant for that draw. Upstream hands the raw
-    // buffer to `ExecuteIndirect` with the device's plain signatures, so every draw read
-    // `@builtin(instance_index)` from 0 and `@builtin(vertex_index)` without its base
-    // (gfx-rs/wgpu#7974). The compute shader reads the arguments, so the buffer is a storage
-    // read in this pass; the count buffer is still read by `ExecuteIndirect` itself.
-    let rewrite = family != DrawCommandFamily::DrawMeshTasks
-        && device.backend() == wgt::Backend::Dx12
-        && state.pass.base.device.indirect_validation.is_some();
+    // `first_instance`, and its index in the call, in front of its arguments, where the pipeline
+    // layout's command signature sets them as the special-constants root constant for that
+    // draw. Upstream hands the raw buffer to `ExecuteIndirect` with the device's plain
+    // signatures, so every draw read `@builtin(instance_index)` from 0 and
+    // `@builtin(vertex_index)` without its base (gfx-rs/wgpu#7974). The compute shader reads the
+    // arguments, so the buffer is a storage read in this pass. Mesh-task draws are rewritten
+    // too, for their `@builtin(draw_index)` (`rewrites_indirect`).
+    let rewrite =
+        device.backend() == wgt::Backend::Dx12 && rewrites_indirect(state.pass.base.device, family);
 
     state.pass.scope.buffers.merge_single(
         &indirect_buffer,
@@ -4690,6 +4689,16 @@ pub(crate) const fn get_src_stride_of_indirect_args(family: DrawCommandFamily) -
         DrawCommandFamily::DrawIndexed => size_of::<wgt::DrawIndexedIndirectArgs>() as u64,
         DrawCommandFamily::DrawMeshTasks => size_of::<wgt::DispatchIndirectArgs>() as u64,
     }
+}
+
+/// BENILLA: the draw index. Whether an indirect draw of `family` goes through the indirect-draw
+/// rewrite: upstream's draws and indexed draws wherever the rewrite exists, and on DX12 the
+/// mesh-task draws too, whose rewritten `[0, 0, draw_index]` the pipeline layout's mesh command
+/// signature sets as the special constants (wgpu-hal executes every mesh-task indirect draw of
+/// such a layout with that signature, so none may skip the rewrite there).
+pub(crate) fn rewrites_indirect(device: &Device, family: DrawCommandFamily) -> bool {
+    device.indirect_validation.is_some()
+        && (family != DrawCommandFamily::DrawMeshTasks || device.backend() == wgt::Backend::Dx12)
 }
 
 pub(crate) const fn get_dst_stride_of_indirect_args(

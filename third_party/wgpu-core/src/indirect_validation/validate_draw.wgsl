@@ -4,6 +4,7 @@ override write_d3d12_special_constants: bool;
 struct MetadataEntry {
     // bits 0..30 are an offset into `src`
     // bit 31 signifies that we are validating an indexed draw
+    // BENILLA: bit 30 signifies a mesh-task draw (DX12 only)
     src_offset: u32,
     // bits 0..30 are an offset into `dst`
     // bit 30 is the most significant bit of `vertex_or_index_limit`
@@ -60,6 +61,19 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3u) {
     let src_base_offset = metadata.src_offset & OFFSET_MASK;
     let dst_base_offset = metadata.dst_offset & OFFSET_MASK;
 
+    // BENILLA: a mesh-task draw (DX12 only) is copied whole, with nothing to validate (upstream
+    // does not validate a mesh-task dispatch either), behind `[0, 0, draw_index]`: the task and
+    // mesh stages' `draw_index` is the third word of the special constants.
+    if is_bit_set(metadata.src_offset, 30) {
+        dst[dst_base_offset + 0] = 0u;
+        dst[dst_base_offset + 1] = 0u;
+        dst[dst_base_offset + 2] = metadata.draw_index;
+        dst[dst_base_offset + 3] = src[src_base_offset + 0];
+        dst[dst_base_offset + 4] = src[src_base_offset + 1];
+        dst[dst_base_offset + 5] = src[src_base_offset + 2];
+        return;
+    }
+
     let first_vertex_or_index = src[src_base_offset + 2];
     let vertex_or_index_count = src[src_base_offset + 0];
 
@@ -104,7 +118,8 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3u) {
         if write_d3d12_special_constants {
             dst[dst_base_offset + 0] = src[src_base_offset + 2 + u32(is_indexed)];
             dst[dst_base_offset + 1] = src[src_base_offset + 3 + u32(is_indexed)];
-            dst[dst_base_offset + 2] = 0u;
+            // BENILLA: the draw's index in its call, `@builtin(draw_index)` (upstream: 0).
+            dst[dst_base_offset + 2] = metadata.draw_index;
         }
         dst[dst_base_offset + dst_offset + 0] = src[src_base_offset + 0];
         dst[dst_base_offset + dst_offset + 1] = src[src_base_offset + 1];

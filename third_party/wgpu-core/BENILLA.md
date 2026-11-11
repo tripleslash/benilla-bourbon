@@ -44,7 +44,7 @@ comment says so).
 | file | hunk |
 |---|---|
 | `src/device/resource.rs`, `Device::new` | indirect validation is created when the flag is set **or the backend is DX12**, so the rewrite (and the `INDIRECT_BUILTIN_UPDATE` layouts that expect it) always exist there. The flag stays what decides it on every other backend. |
-| `src/command/render.rs`, `multi_draw_indirect_count` (and its call site) | takes the pass's `DrawBatcher`. On DX12, for `Draw` and `DrawIndexed` (not mesh tasks, which upstream does not rewrite either), it records the indirect buffer as a storage read and the count buffer as an indirect and a storage read, hands all `max_count` draws and the count's location to `DrawBatcher::add_contiguous`, and calls `draw_*_indirect_count` on the destination buffer and offset with the caller's own count buffer. Off DX12 the function is upstream's. |
+| `src/command/render.rs`, `multi_draw_indirect_count` (and its call site) | takes the pass's `DrawBatcher`. On DX12 (and for mesh-task draws, "The draw index" below), it records the indirect buffer as a storage read and the count buffer as an indirect and a storage read, hands all `max_count` draws and the count's location to `DrawBatcher::add_contiguous`, and calls `draw_*_indirect_count` on the destination buffer and offset with the caller's own count buffer. Off DX12 the function is upstream's. |
 | `src/command/render.rs`, `multi_draw_indirect` | `DrawContext::add` passes each draw's index in the call to `DrawBatcher::add`. |
 | `src/command/bundle.rs`, `DrawIndirect` | passes `DrawBatcher::add` the draw index 0 (a bundle's indirect draw is a single draw). |
 | `src/command/render.rs`, `RenderPassErrorInner` | `IndirectCountTooLargeForRewrite { size, max_binding_size }` (and its `webgpu_error_type` arm, a validation error): the rewritten arguments of one count draw must fit one storage binding, the device's `max_storage_buffer_binding_size` (wgpu-hal's DX12 adapter offers 2 GiB − 1; at the WebGPU default of 128 MiB it is still ~4.2 million indexed draws). |
@@ -68,6 +68,24 @@ behaviour. On DX12 that now holds for count draws as well, and holds with the fl
 **What `@builtin(vertex_index)` gets.** The shader writes `src[2]` (`first_vertex`) for a
 non-indexed draw and `src[3]` (`base_vertex`) for an indexed one, the same values wgpu-hal passes
 to `prepare_draw` for direct draws, so indirect and direct draws agree.
+
+## The draw index — the meshlet lane on DX12
+
+static_gx's meshlet lane reads `@builtin(draw_index)` in its task stage. On DX12 the vendored
+naga reads it from the special constants' third word, `other` (`third_party/naga/BENILLA.md`),
+which the rewrite above writes in front of each indirect draw, and wgpu-hal's seventh patch sets
+per draw for mesh-task draws too. Upstream wrote 0 there and never rewrote mesh-task draws.
+
+| file | hunk |
+|---|---|
+| `src/indirect_validation/validate_draw.wgsl` | the third word is the entry's `draw_index` (upstream: 0). A mesh-task entry (`src_offset` bit 30) copies its three dispatch words behind `[0, 0, draw_index]` (stride 24) and returns: upstream validates no mesh-task dispatch either. |
+| `src/indirect_validation/draw.rs`, `MetadataEntry::new` | takes the family instead of `indexed`, and packs a mesh-task draw in bit 30 of `src_offset` (an offset needs 30 bits). `calculate_src_offsets` takes a 12-byte datum, a dispatch. |
+| `src/command/render.rs`, `rewrites_indirect` | new: whether an indirect draw of a family is rewritten: draws and indexed draws wherever the rewrite exists (upstream), and mesh-task draws on DX12. wgpu-hal executes every mesh-task indirect draw of an `INDIRECT_BUILTIN_UPDATE` layout with the per-draw signature, so on DX12 none may skip the rewrite. |
+| `src/command/render.rs`, `multi_draw_indirect`, `multi_draw_indirect_count`; `src/command/bundle.rs`, `multi_draw_indirect` and `DrawIndirect` | ask `rewrites_indirect` where upstream excluded `DrawMeshTasks`. |
+
+**What `draw_index` reads on DX12.** A plain multi-draw's draw `i` reads `i`, also when the
+rewrite splits the call across two destination buffers; a count draw's draw `i` reads `i`; a single
+indirect draw and a bundle's read 0.
 
 ## Async compute — `src/device/async_queue.rs` and its callers
 

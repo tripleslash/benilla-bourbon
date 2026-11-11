@@ -12,8 +12,8 @@
 //! bindless layout needs `binding_arrays && mdi_count` and honours `WOW_GX_BINDLESS=0`).
 //!
 //! [`HwCaps::mesh_shader`] is read from the features and limits, then held to the backends whose
-//! shader translation emits task and mesh stages: naga 29 writes them to SPIR-V only (its HLSL
-//! backend lists no `MESH_SHADER` capability), so DX12 and Metal never claim it.
+//! shader translation emits task and mesh stages: SPIR-V (Vulkan) and HLSL (DX12), the latter's
+//! `draw_index` from the vendored naga (`third_party/naga/BENILLA.md`). Metal never claims it.
 //!
 //! [`HwCaps::multiview_views`] and [`HwCaps::multiview_selective`] are what the multiview shadow
 //! cascades need (`static_gx/render/modern_shadow/multiview.rs`): wgpu's `MULTIVIEW` with its view
@@ -64,7 +64,7 @@ pub struct HwCaps {
     /// `draw_index` (`SHADER_DRAW_INDEX`), the counted multi-draw and immediates, the output,
     /// workgroup and payload limits of the meshlet format (`static_gx::meshlet`), five bind
     /// groups, [`MESH_STORAGE_BUFFERS`] storage buffers a stage, and a backend naga writes mesh
-    /// stages for (Vulkan; `init` clears it elsewhere).
+    /// stages for (Vulkan and DX12; `init` clears it elsewhere).
     pub mesh_shader: bool,
     /// The most views a multiview render pass may span (`Limits::max_multiview_view_count`),
     /// 0 without `MULTIVIEW`. A pass over array layers `0..n` with the mask `2^n - 1` needs `n`.
@@ -150,9 +150,11 @@ fn mesh_shader_capable(_: WgpuFeatures, _: &WgpuLimits) -> bool {
     false
 }
 
-/// Whether naga 29 writes task and mesh stages for `backend`'s shader language: SPIR-V alone.
+/// Whether naga writes task and mesh stages, the task stage's `draw_index` among them, for
+/// `backend`'s shader language: SPIR-V, and HLSL through the vendored naga, whose `draw_index` the
+/// vendored wgpu-core and wgpu-hal set per draw on DX12.
 fn emits_mesh_stages(backend: wgpu::Backend) -> bool {
-    backend == wgpu::Backend::Vulkan
+    matches!(backend, wgpu::Backend::Vulkan | wgpu::Backend::Dx12)
 }
 
 /// The floor, in units of `unit` bytes, a native lane's self-growing buffer opens at: `native`
@@ -271,7 +273,7 @@ mod tests {
     }
 
     /// The mesh-shader capability needs the feature set and every limit of the meshlet format;
-    /// only Vulkan's translation emits the stages.
+    /// Vulkan's and DX12's translations emit the stages, Metal's does not.
     #[test]
     fn mesh_shaders_need_the_features_the_limits_and_spirv() {
         let features = WgpuFeatures::EXPERIMENTAL_MESH_SHADER
@@ -304,7 +306,7 @@ mod tests {
         limits.max_mesh_output_primitives = 64;
         assert!(!HwCaps::from_parts(features, &limits).mesh_shader);
         assert!(emits_mesh_stages(wgpu::Backend::Vulkan));
-        assert!(!emits_mesh_stages(wgpu::Backend::Dx12));
+        assert!(emits_mesh_stages(wgpu::Backend::Dx12));
         assert!(!emits_mesh_stages(wgpu::Backend::Metal));
     }
 

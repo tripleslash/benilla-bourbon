@@ -13,7 +13,7 @@ use crate::{
     track::TrackerIndex,
     FastHashMap,
 };
-use alloc::{boxed::Box, string::ToString, sync::Arc, vec, vec::Vec};
+use alloc::{boxed::Box, string::ToString, sync::Arc, vec::Vec};
 use core::{mem::size_of, num::NonZeroU64};
 use wgt::Limits;
 
@@ -719,8 +719,8 @@ fn calculate_src_offsets(
     let binding_size = calculate_src_buffer_binding_size(buffer_size, limits);
     let min_storage_buffer_offset_alignment = limits.min_storage_buffer_offset_alignment as u64;
 
-    // BENILLA: and 4, a multi-draw-indirect-count's count.
-    assert!([4, 16, MAX_DATA_SIZE].contains(&data_size));
+    // BENILLA: and 4, a multi-draw-indirect-count's count, and 12, a mesh-task draw's dispatch.
+    assert!([4, 12, 16, MAX_DATA_SIZE].contains(&data_size));
     assert!([32, 64, 128, 256].contains(&min_storage_buffer_offset_alignment));
     assert!(buffer_size >= data_size);
     assert!(offset <= buffer_size - data_size);
@@ -1031,7 +1031,7 @@ const DST_WINDOW: u64 = BUFFER_SIZE.get() / size_of::<MetadataEntry>() as u64
 impl MetadataEntry {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        indexed: bool,
+        family: crate::command::DrawCommandFamily,
         src_offset: u64,
         dst_offset: u64,
         vertex_or_index_limit: u64,
@@ -1041,12 +1041,16 @@ impl MetadataEntry {
     ) -> Self {
         const U32_MAX_AS_U64: u64 = u32::MAX as u64;
 
+        // BENILLA: the family, where upstream took `indexed`; a mesh-task draw is bit 30.
+        let indexed = family == crate::command::DrawCommandFamily::DrawIndexed;
+        let mesh = family == crate::command::DrawCommandFamily::DrawMeshTasks;
+
         let src_offset = u64_offset_to_u32_offset(src_offset);
         let src_offset = src_offset / 4; // translate byte offset to offset in u32's
 
         // `src_offset` needs at most 30 bits,
         // pack `indexed` in bit 31 of `src_offset`
-        let src_offset = src_offset | ((indexed as u32) << 31);
+        let src_offset = src_offset | ((indexed as u32) << 31) | ((mesh as u32) << 30);
 
         // max value for limits since first_X and X_count indirect draw arguments are u32
         let max_limit = U32_MAX_AS_U64 + U32_MAX_AS_U64; // 1 11111111 11111111 11111111 11111110
@@ -1298,7 +1302,7 @@ fn entry(
         u64_offset_to_u32_offset(offset) / 4
     });
     let entry = MetadataEntry::new(
-        family == crate::command::DrawCommandFamily::DrawIndexed,
+        family,
         src_offset,
         dst_offset,
         vertex_or_index_limit,

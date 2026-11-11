@@ -453,7 +453,8 @@ mod tests {
     /// defs (the colour pass's with the ray-traced shadows at `RT_GROUP` 3 and the mesh group at
     /// 4), over every library the client registers plus `static_gx.wesl`, which the module
     /// imports. Composed, validated with the mesh-shader and draw-index capabilities the lane
-    /// requires, and written as SPIR-V: the lane runs on Vulkan, so not on wasm32 or macOS.
+    /// requires, written as SPIR-V and its task and mesh entries as HLSL: the lane runs on Vulkan
+    /// and DX12, so not on wasm32 or macOS.
     #[cfg(not(any(target_arch = "wasm32", target_os = "macos")))]
     #[test]
     fn the_meshlet_lane_composes_over_static_gx() {
@@ -606,8 +607,95 @@ mod tests {
                         "{what} {defs:?}: static_gx_mesh.wesl does not translate to SPIR-V: {e:?}"
                     )
                 });
+                // The lane runs on DX12 too: the task and mesh entries as HLSL, the task stage's
+                // `draw_index` read from the special constants (the vendored naga).
+                for entry in entries.iter().filter(|e| e.starts_with("meshlet_")) {
+                    let hlsl = hlsl_entry(&module, &info, entry).unwrap_or_else(|e| {
+                        panic!("{what} {defs:?}: `{entry}` does not translate to HLSL: {e:?}")
+                    });
+                    if *entry == "meshlet_task" {
+                        assert!(
+                            hlsl.contains("_NagaConstants.other"),
+                            "{what} {defs:?}: the task stage's draw index is not the special \
+                             constants' third word"
+                        );
+                    }
+                }
             }
         }
+    }
+
+    /// One entry point of `module` as wgpu-hal's DX12 backend asks naga for it: Shader Model 6.7
+    /// (the static DXC), the special constants bound (every DX12 pipeline layout has them), the
+    /// immediates at a register of their own, every other binding where its group and index say.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "macos")))]
+    fn hlsl_entry(
+        module: &naga::Module,
+        info: &naga::valid::ModuleInfo,
+        entry: &str,
+    ) -> Result<String, naga::back::hlsl::Error> {
+        use naga::back::hlsl::{BindTarget, Options, PipelineOptions, ShaderModel, Writer};
+        let stage = module
+            .entry_points
+            .iter()
+            .find(|e| e.name == entry)
+            .map(|e| e.stage)
+            .expect("the entry point is in the module");
+        let options = Options {
+            shader_model: ShaderModel::V6_7,
+            special_constants_binding: Some(BindTarget {
+                space: 10,
+                register: 0,
+                ..Default::default()
+            }),
+            immediates_target: Some(BindTarget {
+                space: 11,
+                register: 0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let pipeline = PipelineOptions {
+            entry_point: Some((stage, entry.to_string())),
+        };
+        let mut hlsl = String::new();
+        Writer::new(&mut hlsl, &options, &pipeline).write(module, info, None)?;
+        Ok(hlsl)
+    }
+
+    /// fork: the vendored naga's `@builtin(draw_index)` in HLSL (`third_party/naga/BENILLA.md`): a
+    /// vertex stage reads it as the special constants' third word and keeps its other built-ins'
+    /// semantics, and a compute stage's `num_workgroups` still reads all three words.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "macos")))]
+    #[test]
+    fn draw_index_reads_the_special_constants_in_hlsl() {
+        use naga::valid::Capabilities;
+        let src = "enable draw_index;\n\
+            @vertex fn vs(@builtin(draw_index) d: u32, @builtin(vertex_index) v: u32) \
+            -> @builtin(position) vec4<f32> {\n\
+                return vec4<f32>(f32(d), f32(v), 0.0, 1.0);\n\
+            }\n\
+            @compute @workgroup_size(1) fn cs(@builtin(num_workgroups) n: vec3<u32>) {\n\
+                _ = n;\n\
+            }\n";
+        let module = naga::front::wgsl::parse_str(src).expect("the module parses");
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            Capabilities::DRAW_INDEX,
+        )
+        .validate(&module)
+        .expect("the module validates");
+        let vs = hlsl_entry(&module, &info, "vs").expect("the vertex stage translates");
+        assert!(vs.contains("_NagaConstants.other"), "{vs}");
+        assert!(vs.contains("SV_VertexID"), "{vs}");
+        let cs = hlsl_entry(&module, &info, "cs").expect("the compute stage translates");
+        assert!(
+            cs.contains(
+                "uint3(_NagaConstants.first_vertex, _NagaConstants.first_instance, \
+                 _NagaConstants.other)"
+            ),
+            "{cs}"
+        );
     }
 
     /// The world's material and pass shaders no other gate composes, composed as the pipeline

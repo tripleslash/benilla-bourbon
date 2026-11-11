@@ -132,6 +132,11 @@ wgpu-hal = { path = "third_party/wgpu-hal" }
 # runs on DX12 whatever `VALIDATION_INDIRECT_CALL` says (gfx-rs/wgpu#7974,
 # `third_party/wgpu-core/BENILLA.md`).
 wgpu-core = { path = "third_party/wgpu-core" }
+# naga 30.0.1, patched so its HLSL backend writes `@builtin(draw_index)`, which it lacks: it reads
+# the special constants' third word, which wgpu-hal sets to 0 for a direct draw and wgpu-core's
+# indirect rewrite to each draw's index on DX12. What lets static_gx's meshlet lane run on DX12
+# (`third_party/naga/BENILLA.md`).
+naga = { path = "third_party/naga" }
 
 # Dependencies at opt-level 3 in dev: at opt-level 0, avian/parry collision drops a run to <1 fps.
 [profile.dev.package."*"]

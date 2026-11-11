@@ -183,6 +183,34 @@ impl super::CommandEncoder {
         self.update_root_elements();
     }
 
+    /// BENILLA: the draw index. The signature a mesh-task indirect draw executes with, its root
+    /// state made ready: the layout's own, which sets the special constants per draw from the
+    /// arguments wgpu-core rewrote, where it has one; else the device's plain one, with the
+    /// constants set to 0 (upstream's only path).
+    fn mesh_cmd_signature(&mut self) -> Direct3D12::ID3D12CommandSignature {
+        let per_draw = self
+            .pass
+            .layout
+            .special_constants
+            .as_ref()
+            .and_then(|sc| sc.indirect_cmd_signatures.as_ref())
+            .and_then(|signatures| signatures.draw_mesh.clone());
+        match per_draw {
+            Some(signature) => {
+                self.update_root_elements();
+                signature
+            }
+            None => {
+                self.prepare_dispatch([0; 3]);
+                self.shared
+                    .cmd_signatures
+                    .draw_mesh
+                    .clone()
+                    .expect("Feature `MESH_SHADING` not enabled")
+            }
+        }
+    }
+
     fn prepare_dispatch(&mut self, workgroup_count: [u32; 3]) {
         if let Some(root_index) = self
             .pass
@@ -1625,14 +1653,21 @@ impl crate::CommandEncoder for super::CommandEncoder {
         offset: wgt::BufferAddress,
         draw_count: u32,
     ) {
-        self.prepare_dispatch([0; 3]);
+        // BENILLA: the draw index. Where the layout has a mesh signature that sets the special
+        // constants per draw, wgpu-core has rewritten the arguments into its layout
+        // (`[0, 0, draw_index]` before each draw's dispatch), as for the other families.
+        let cmd_signature = self.mesh_cmd_signature();
         let cmd_list6: Direct3D12::ID3D12GraphicsCommandList6 =
             self.list.as_ref().unwrap().cast().unwrap();
-        let Some(cmd_signature) = &self.shared.cmd_signatures.draw_mesh else {
-            panic!("Feature `MESH_SHADING` not enabled");
-        };
         unsafe {
-            cmd_list6.ExecuteIndirect(cmd_signature, draw_count, &buffer.resource, offset, None, 0);
+            cmd_list6.ExecuteIndirect(
+                &cmd_signature,
+                draw_count,
+                &buffer.resource,
+                offset,
+                None,
+                0,
+            );
         }
     }
     unsafe fn draw_indirect_count(
@@ -1737,15 +1772,13 @@ impl crate::CommandEncoder for super::CommandEncoder {
         count_offset: wgt::BufferAddress,
         max_count: u32,
     ) {
-        self.prepare_dispatch([0; 3]);
+        // BENILLA: the draw index, as `draw_mesh_tasks_indirect`.
+        let command_signature = self.mesh_cmd_signature();
         let cmd_list6: Direct3D12::ID3D12GraphicsCommandList6 =
             self.list.as_ref().unwrap().cast().unwrap();
-        let Some(ref command_signature) = self.shared.cmd_signatures.draw_mesh else {
-            panic!("Feature `MESH_SHADING` not enabled");
-        };
         unsafe {
             cmd_list6.ExecuteIndirect(
-                command_signature,
+                &command_signature,
                 max_count,
                 &buffer.resource,
                 offset,

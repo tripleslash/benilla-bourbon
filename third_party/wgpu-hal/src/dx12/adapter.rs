@@ -700,6 +700,11 @@ impl super::Adapter {
             wgt::Features::EXPERIMENTAL_MESH_SHADER,
             mesh_shader_supported,
         );
+        // BENILLA: the draw index. The vendored naga reads `@builtin(draw_index)` from the
+        // special constants' third word, which a direct draw sets to 0 and wgpu-core's indirect
+        // rewrite (always present on DX12 in the vendored wgpu-core) to each draw's index in its
+        // call, mesh-task draws included (`draw_mesh_tasks_indirect*` below).
+        features.set(wgt::Features::SHADER_DRAW_INDEX, true);
         let shader_barycentrics_supported = {
             let mut features3 = Direct3D12::D3D12_FEATURE_DATA_D3D12_OPTIONS3::default();
             unsafe {

@@ -9,10 +9,11 @@ marked `BENILLA:`.
 
 ## Why a fork exists at all
 
-Six patches: the Vulkan presentation stall below, DX12 multi-draw-indirect-count ("The second
+Seven patches: the Vulkan presentation stall below, DX12 multi-draw-indirect-count ("The second
 patch", with `third_party/wgpu-core`), an async compute queue ("The third patch") and DX12
 pipeline-statistics queries ("The fourth patch"), the DX12 command list for NGX ("The fifth
-patch") and a present interposer for Streamline ("The sixth patch").
+patch"), a present interposer for Streamline ("The sixth patch") and the DX12 draw index for
+mesh-task draws ("The seventh patch", with `third_party/wgpu-core` and `third_party/naga`).
 
 On Vulkan, the default on Windows and Linux, the swapchain's acquire (`NativeSwapchain::acquire`)
 waits up to wgpu-core's 1 s frame timeout, and a presentation engine that stalls longer (a machine
@@ -76,7 +77,7 @@ values back from that root constant
 together with `third_party/wgpu-core`, which rewrites a count draw's arguments into the
 signature's layout on DX12 (`[first_vertex, first_instance, 0]` then the arguments, stride 28 or
 32) before handing the buffer here; `third_party/wgpu-core/BENILLA.md` has the mechanism. Mesh-task
-count draws are untouched on both sides.
+draws are the seventh patch's.
 
 ## The third patch — an async compute queue (DX12, Vulkan)
 
@@ -164,12 +165,30 @@ calls through Streamline's proxies:
 Unset (every run that does not select DLSS frame generation at boot), both are one `OnceLock` read
 at instance or swap-chain creation and nothing else.
 
+## The seventh patch — the draw index on DX12 (`src/dx12/adapter.rs`, `device.rs`, `command.rs`)
+
+static_gx's meshlet lane reads `@builtin(draw_index)` in its task stage, which naga 30's HLSL
+backend lacks. The vendored naga reads it from the special constants' third word, `other`
+(`third_party/naga/BENILLA.md`); this patch makes that word right in every draw:
+
+| file | hunk |
+|---|---|
+| `src/dx12/adapter.rs` | the adapter reports `SHADER_DRAW_INDEX`. A direct draw's `other` is 0 (`prepare_draw`); every indirect draw goes through wgpu-core's rewrite on DX12, which writes the draw's index in its call there. |
+| `src/dx12/device.rs`, `create_pipeline_layout` | an `INDIRECT_BUILTIN_UPDATE` layout on a device with mesh shaders gets a `draw_mesh` signature, `[CONSTANT(3), DISPATCH_MESH]` at stride 24, where upstream left it `None` ("Mesh pipelines don't support updating special constants"). |
+| `src/dx12/command.rs`, `draw_mesh_tasks_indirect(_count)`, `mesh_cmd_signature` | a mesh-task indirect draw executes with the layout's `draw_mesh` signature where it has one (wgpu-core rewrote its arguments to `[0, 0, draw_index, x, y, z]`), else upstream's: `prepare_dispatch([0; 3])` and the device's plain signature. |
+
+A direct `draw_mesh_tasks` keeps upstream's constants (the dispatch size, for a task stage's
+`num_workgroups`), so a task stage there reads the dispatch's `z` as its draw index; the meshlet
+lane draws only through counted multi-draws. The patch is only correct together with
+`third_party/wgpu-core` ("The draw index" there), which rewrites every mesh-task indirect draw on
+DX12 into the signature's layout.
+
 ## How to check
 
 `diff -u <registry>/wgpu-hal-30.0.1/src/vulkan/swapchain/native.rs third_party/wgpu-hal/src/vulkan/swapchain/native.rs`
 shows the first patch and nothing else, and the same for `src/dx12/command.rs` shows the second,
-third and fourth patches' hunks there, each marked `BENILLA:`; `diff -r` of the two trees shows only
-the files the four patches name, the dropped
+third, fourth, fifth and seventh patches' hunks there, each marked `BENILLA:`; `diff -r` of the two trees shows only
+the files the patches name, the dropped
 `[[example]]` blocks in `Cargo.toml`, and the files not copied (`examples/`, `Cargo.lock`,
 `Cargo.toml.orig`, `.cargo_vcs_info.json`, `.cargo-ok`).
 `video::tests::wgpu_hal_resolves_to_the_vendored_stall_patch` checks the lock resolves wgpu-hal to
@@ -180,7 +199,8 @@ this path, at the lock's version, with the hunks present.
 When wgpu-hal handles the timeout itself ([gfx-rs/wgpu#9029](https://github.com/gfx-rs/wgpu/issues/9029))
 and wgpu fixes [gfx-rs/wgpu#7974](https://github.com/gfx-rs/wgpu/issues/7974), or when wgpu
 leaves 30: delete this directory and the `wgpu-hal` line under `[patch.crates-io]`. Drop the
-second patch only together with `third_party/wgpu-core`'s.
+second and the seventh patches only together with `third_party/wgpu-core`'s (and the seventh with
+`third_party/naga`).
 The fourth patch goes when an upstream DX12 adapter exposes `PIPELINE_STATISTICS_QUERY` itself;
 without it, `WOW_GPU_STATS` reads nothing on DX12 (the device lacks the feature, and the instrument
 says so at startup).

@@ -1436,8 +1436,29 @@ impl crate::Device for super::Device {
                         ],
                         0,
                     )?,
-                    // Mesh pipelines don't support updating special constants.
-                    draw_mesh: None,
+                    // BENILLA: the draw index. Upstream: "Mesh pipelines don't support updating
+                    // special constants", and its mesh-task indirect draws used the device's plain
+                    // signature. Where the device has mesh shaders, a mesh-task draw sets the
+                    // constants per draw as the other families do: wgpu-core's rewrite writes
+                    // `[0, 0, draw_index]` in front of each draw's dispatch arguments (stride 24).
+                    draw_mesh: if self.shared.cmd_signatures.draw_mesh.is_some() {
+                        Some(Self::create_command_signature(
+                            &self.raw,
+                            Some(&raw),
+                            special_constant_buffer_args_len
+                                + size_of::<wgt::DispatchIndirectArgs>(),
+                            &[
+                                constant_indirect_argument_desc,
+                                Direct3D12::D3D12_INDIRECT_ARGUMENT_DESC {
+                                    Type: Direct3D12::D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH,
+                                    ..Default::default()
+                                },
+                            ],
+                            0,
+                        )?)
+                    } else {
+                        None
+                    },
                     dispatch: Self::create_command_signature(
                         &self.raw,
                         Some(&raw),

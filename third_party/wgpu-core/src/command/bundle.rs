@@ -1175,9 +1175,8 @@ fn multi_draw_indirect(
     };
     let instance_limit = state.vertex.limits.instance_limit;
 
-    let buffer_uses = if state.device.indirect_validation.is_some()
-        && family != DrawCommandFamily::DrawMeshTasks
-    {
+    // BENILLA: the draw index — on DX12 mesh-task draws too (`render::rewrites_indirect`).
+    let buffer_uses = if super::render::rewrites_indirect(&state.device, family) {
         wgt::BufferUses::STORAGE_READ_ONLY
     } else {
         wgt::BufferUses::INDIRECT
@@ -1461,28 +1460,31 @@ impl RenderBundle {
                     vertex_or_index_limit,
                     instance_limit,
                 } => {
-                    let (buffer, offset) = if self.device.indirect_validation.is_some()
-                        && *family != DrawCommandFamily::DrawMeshTasks
-                    {
-                        let (dst_resource_index, offset) = indirect_draw_validation_batcher.add(
-                            indirect_draw_validation_resources,
-                            &self.device,
-                            buffer,
-                            *offset,
-                            *family,
-                            vertex_or_index_limit
-                                .expect("finalized render bundle missing vertex_or_index_limit"),
-                            instance_limit.expect("finalized render bundle missing instance_limit"),
-                            // BENILLA: a bundle's indirect draw is a single draw.
-                            0,
-                        )?;
+                    // BENILLA: the draw index (`render::rewrites_indirect`).
+                    let (buffer, offset) =
+                        if super::render::rewrites_indirect(&self.device, *family) {
+                            let (dst_resource_index, offset) = indirect_draw_validation_batcher
+                                .add(
+                                    indirect_draw_validation_resources,
+                                    &self.device,
+                                    buffer,
+                                    *offset,
+                                    *family,
+                                    vertex_or_index_limit.expect(
+                                        "finalized render bundle missing vertex_or_index_limit",
+                                    ),
+                                    instance_limit
+                                        .expect("finalized render bundle missing instance_limit"),
+                                    // BENILLA: a bundle's indirect draw is a single draw.
+                                    0,
+                                )?;
 
-                        let dst_buffer =
-                            indirect_draw_validation_resources.get_dst_buffer(dst_resource_index);
-                        (dst_buffer, offset)
-                    } else {
-                        (buffer.try_raw(snatch_guard)?, *offset)
-                    };
+                            let dst_buffer = indirect_draw_validation_resources
+                                .get_dst_buffer(dst_resource_index);
+                            (dst_buffer, offset)
+                        } else {
+                            (buffer.try_raw(snatch_guard)?, *offset)
+                        };
                     match family {
                         DrawCommandFamily::Draw => unsafe { raw.draw_indirect(buffer, offset, 1) },
                         DrawCommandFamily::DrawIndexed => unsafe {
