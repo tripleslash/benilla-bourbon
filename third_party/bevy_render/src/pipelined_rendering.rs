@@ -6,10 +6,12 @@ use async_channel::{Receiver, Sender};
 use bevy_app::{App, AppExit, Plugin, SubApp};
 use bevy_derive::AppLabel;
 use bevy_ecs::{
+    message::Messages,
     resource::Resource,
     schedule::MainThreadExecutor,
     world::{Mut, World},
 };
+use bevy_platform::cell::SyncCell;
 use bevy_tasks::ComputeTaskPool;
 
 use crate::RenderApp;
@@ -29,6 +31,8 @@ pub struct RenderAppChannels {
     render_app_in_render_thread: bool,
     /// Pumped during shutdown so the render app's main-thread tasks can finish.
     main_thread_executor: MainThreadExecutor,
+    /// BENILLA: the render app held back on the exit frame, dropped here on the main thread.
+    held_at_exit: Option<SyncCell<SubApp>>,
 }
 
 impl RenderAppChannels {
@@ -46,6 +50,7 @@ impl RenderAppChannels {
             render_to_app_receiver,
             render_app_in_render_thread: false,
             main_thread_executor,
+            held_at_exit: None,
         }
     }
 
@@ -216,9 +221,13 @@ impl Plugin for PipelinedRenderingPlugin {
 
 // This function waits for the rendering world to be received,
 // runs extract, and then sends the rendering world back to the render thread.
+// BENILLA: on the exit frame the render app stays here: teardown never runs beside a render frame.
 fn renderer_extract(app_world: &mut World, _world: &mut World) {
     app_world.resource_scope(|world, main_thread_executor: Mut<MainThreadExecutor>| {
         world.resource_scope(|world, mut render_channels: Mut<RenderAppChannels>| {
+            if render_channels.held_at_exit.is_some() {
+                return;
+            }
             // we use a scope here to run any main thread tasks that the render world still needs to run
             // while we wait for the render world to be received.
             if let Some(mut render_app) = ComputeTaskPool::get()
@@ -228,6 +237,14 @@ fn renderer_extract(app_world: &mut World, _world: &mut World) {
                 .pop()
                 .unwrap()
             {
+                let exiting = world
+                    .get_resource::<Messages<AppExit>>()
+                    .is_some_and(|exits| !exits.is_empty());
+                if exiting {
+                    render_channels.held_at_exit = Some(SyncCell::new(render_app));
+                    return;
+                }
+
                 render_app.extract(world);
 
                 render_channels.send_blocking(render_app);

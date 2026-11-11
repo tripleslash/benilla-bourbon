@@ -54,10 +54,12 @@ Re-ported from 0.19.1 by a three-way merge (0.19.1 → the fork, onto 0.20.1), e
 - **Dropped, upstream solves it:** the sixteenth delta (mesh-shader pipelines): 0.20's
   `PipelineCache::queue_mesh_pipeline` takes a `MeshPipelineDescriptor` (`bevy_material`) and builds
   it with `create_mesh_pipeline`; the twelfth delta's disk cache now rides on its
-  `start_create_mesh_pipeline`. The eleventh delta (the exit frame) is out pending
-  `benilla-app`'s `shutdown` tests: 0.20's `RenderAppChannels` pumps a `MainThreadExecutor` while it
-  waits (upstream's shutdown-deadlock fix), which may end the same hang; the hunk comes back if
-  those tests hang without it.
+  `start_create_mesh_pipeline`.
+- **Kept beside upstream's:** the eleventh delta (the exit frame). 0.20's `RenderAppChannels` pumps
+  a `MainThreadExecutor` while its drop waits (upstream's shutdown-deadlock fix), but it still
+  renders the exit frame beside the teardown: without the hunk `benilla-app`'s
+  `the_exit_frame_leaves_no_render_frame_in_flight` counts 4 rendered frames where 2 are owed. The
+  hunk holds the render app back on that frame; upstream's pumping drop stays.
 - **Reworked:** the eighth delta (the render worker): 0.20 has no generic `WgpuWrapper<T>`; each
   wrapped type is a `wgpu_wrapper!` newtype. The `Held` scheme (`Local`/`Shared`, burial on drop off
   thread) lives in the macro's `wasm32 + atomics` arm, `@shared` marks plain data
@@ -232,7 +234,7 @@ exclusion rests on an unmeasured recollection (bevyengine/bevy#10812); bevyengin
 proposes the same deletion. It shows on a login as `pipeline warm: N rigs drained` where it used to
 print `TIMED OUT`.
 
-## The eleventh delta: the exit frame is not rendered — out in 0.20, pending the `shutdown` tests
+## The eleventh delta: the exit frame is not rendered
 
 `src/pipelined_rendering.rs`: `renderer_extract` takes the finished render app back as ever, and on
 a frame with an `AppExit` keeps it in `RenderAppChannels` instead of handing it over, so the exit
@@ -322,6 +324,7 @@ wait. On wasm32 no queue is ever made, so nothing of it runs.
 | `src/render_asset.rs` | `RenderAsset::DEFERRABLE`, asked by `prepare_assets` before each of its two deferrals (above) |
 | `src/mesh/mod.rs` | `RenderMesh` sets `DEFERRABLE = false` (above) |
 | `src/render_resource/pipeline_cache.rs` | the web's async pipeline creation (fifth delta); `create_pipeline_task` drops its two macOS lines (tenth delta); the `disk_cache` field, passed as each render, compute and mesh pipeline's `cache` (twelfth delta); `multiview_masks`, `queue_multiview_render_pipeline` and the mask passed in `start_create_render_pipeline` (seventeenth delta) |
+| `src/pipelined_rendering.rs` | `renderer_extract` holds the render app back on the exit frame (eleventh delta) |
 | `src/render_phase/mod.rs` | `render_batchable_meshes` no longer excludes DX12 from multi-draw-indirect-count (thirteenth delta) |
 | `src/lib.rs` | `mod wasm_serial;`; the render worker's lines (eighth delta); `destroy_released_gpu_resources` and its counter (ninth delta) |
 | `src/wasm_serial.rs` | new — the scope itself. Has its own header |
