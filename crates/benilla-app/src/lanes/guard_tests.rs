@@ -509,6 +509,12 @@ pub(super) const FILLED_THROUGH_A_READ: &[(&str, Fill)] = &[
     ("::ui_logout::SessionPosts", Fill::Sink),
     // The gestures a chat line or a world click's greeting plays, which `drive_gestures` takes.
     ("::creature_anim::gesture::GestureQueue", Fill::Sink),
+    // avian 0.8's debug record of the spatial queries a frame casts: `SpatialQuery` pushes each
+    // through `&self` while the physics gizmos are on, and avian's debug render takes them.
+    (
+        "avian3d::debug_render::tracked_spatial_query::TrackedSpatialQueries",
+        Fill::Sink,
+    ),
 ];
 
 /// What a resource [`FILLED_THROUGH_A_READ`] holds is to the systems that reach it.

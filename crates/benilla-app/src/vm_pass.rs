@@ -920,6 +920,11 @@ mod tests {
                     continue;
                 }
                 let declared = accesses.get(&key).expect("initialized");
+                // An exclusive link (the input records' dispatch) declares the whole world, which
+                // no comparison reads, and applies what it makes as it goes.
+                if declared.exclusive {
+                    continue;
+                }
                 let combined = declared.combined_access();
                 for (edit, id) in &writes {
                     if combined.has_read(*id)

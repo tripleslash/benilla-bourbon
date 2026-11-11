@@ -519,7 +519,12 @@ pub(crate) mod schedule_tests {
             let mut holds_vm = HashSet::new();
             let mut hosted = HashSet::new();
             for (key, system, conds) in graph.systems.iter() {
-                if let (Some(vm), Some(set)) = (vm, accesses.get(&key)) {
+                // An exclusive system declares the whole world (bevy 0.20), which would make it a
+                // holder and a host of everything; as under 0.19, its access names nothing here.
+                if let (Some(vm), Some(set)) = (
+                    vm,
+                    accesses.get(&key).filter(|declared| !declared.exclusive),
+                ) {
                     let access = set.combined_access();
                     if access.has_read(vm) || access.has_write(vm) {
                         holds_vm.insert(key);
@@ -1326,14 +1331,19 @@ pub(crate) mod schedule_tests {
     /// Each system costs its dispatch and parameter fetch even with nothing to do, about a
     /// microsecond apiece, so the count is a frame-time cost in its own right. `every_frame` is the
     /// number that matters: a system with a real trigger in its run condition skips on quiet frames.
-    /// Measured 2026-11-10 at `1beea9cf5`, Windows, from the counts this test printed.
+    /// Measured 2026-11-10 at `1beea9cf5`, Windows, from the counts this test printed. Raised at
+    /// the Bevy 0.20.1 port by bevy's own new systems: `PostUpdate` by 7 net
+    /// (`check_tonemapping_none`, the 2D mesh and material change markers, `bevy_ui`'s
+    /// `sync_font_size_to_em_size`, inline-image and editable-text layout, `bevy_ui_render`'s image
+    /// and atlas markers), `First` by `gpu_readback::cleanup_readback_once`, `Last` by `bevy_time`'s
+    /// `silence_delayed_command_queues_on_exit` (behind a condition).
     const FRAME_FLOOR: &[(&str, usize, usize)] = &[
         ("Update", 543, 529),
-        ("PostUpdate", 224, 178),
+        ("PostUpdate", 231, 185),
         ("PreUpdate", 100, 85),
-        ("First", 12, 9),
+        ("First", 13, 10),
         ("RunFixedMainLoop", 13, 13),
-        ("Last", 59, 44),
+        ("Last", 60, 44),
     ];
     /// How far a count may sit under its ceiling before the ceiling must come down with it.
     const FRAME_FLOOR_SLACK: usize = 8;

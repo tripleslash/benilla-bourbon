@@ -62,6 +62,10 @@ const VERDICTS: &[(&str, Verdict)] = &[
         Open("an OUTPUT (grab/visible), not a channel — the cover has nothing to take from it"),
     ),
     (
+        "MouseScrollPixelsPerLine",
+        Open("a constant read for its default (the wheel's pixels per notch), not a channel"),
+    ),
+    (
         "RawWinitWindowEvent",
         Open(
             "read only to learn what the layout names each key (`bindings/layout.rs`), which acts \
