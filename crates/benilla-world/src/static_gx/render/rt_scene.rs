@@ -1772,8 +1772,21 @@ pub(super) fn build(render_app: &mut SubApp) {
             bevy::render::RenderStartup,
             init_rt_scene.after(crate::modern::caps::init),
         )
-        // The levels are decided before anything in the frame reads them.
-        .add_systems(Render, update_rt_tier.in_set(RenderSystems::PrepareAssets))
+        // The levels are decided before anything in the frame reads them. Strictly: the readers
+        // take them through statics (`live`, `enabled`, the lanes'), which no system access
+        // declares, so Bevy 0.20's weak set chain alone would not order them.
+        .add_systems(
+            Render,
+            update_rt_tier
+                .in_set(RenderSystems::PrepareAssets)
+                .before(RenderSystems::PrepareMeshes)
+                .before(RenderSystems::CreateViews)
+                .before(RenderSystems::Specialize)
+                .before(RenderSystems::PrepareViews)
+                .before(RenderSystems::Queue)
+                .before(RenderSystems::PhaseSort)
+                .before(RenderSystems::Prepare),
+        )
         .add_systems(
             Render,
             prepare_rt_scene
