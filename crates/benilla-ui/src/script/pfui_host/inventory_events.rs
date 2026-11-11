@@ -1,6 +1,5 @@
 //! Aggregate stock bag events and compare actual equipment instance GUIDs after the stock feeds.
 
-use super::Model;
 use crate::script::ScriptValue;
 use mlua::Lua;
 

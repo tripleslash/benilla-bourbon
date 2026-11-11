@@ -1348,11 +1348,24 @@ pub(crate) mod schedule_tests {
     /// `sync_font_size_to_em_size`, inline-image and editable-text layout, `bevy_ui_render`'s image
     /// and atlas markers), `First` by `gpu_readback::cleanup_readback_once`, `Last` by `bevy_time`'s
     /// `silence_delayed_command_queues_on_exit` (behind a condition).
+    #[cfg(not(feature = "pfui"))]
     const FRAME_FLOOR: &[(&str, usize, usize)] = &[
         ("Update", 543, 529),
         ("PostUpdate", 231, 185),
         ("PreUpdate", 100, 85),
         ("First", 13, 10),
+        ("RunFixedMainLoop", 13, 13),
+        ("Last", 60, 44),
+    ];
+    /// The pfUI build's: its feeds (`crate::pfui`) run behind `ingame_ui_up` alone, measured
+    /// 2026-11-11 at the merge of tortoise_pfui_split (344451676) with `pfui-turtle` and `nampower`:
+    /// `Update` +30, `PreUpdate` +3 (+4 every frame), `PostUpdate` +4, `First` +1.
+    #[cfg(feature = "pfui")]
+    const FRAME_FLOOR: &[(&str, usize, usize)] = &[
+        ("Update", 573, 559),
+        ("PostUpdate", 235, 185),
+        ("PreUpdate", 103, 89),
+        ("First", 14, 11),
         ("RunFixedMainLoop", 13, 13),
         ("Last", 60, 44),
     ];

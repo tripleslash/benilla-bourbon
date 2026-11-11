@@ -168,7 +168,9 @@ pub(crate) fn pet_book(lua: &Lua) -> super::PetBookState {
 pub(crate) fn spell_named(lua: &Lua, text: &str) -> Option<super::NamedSpell> {
     let book = super::live::ask(lua, &super::BookNow);
     let pet = super::live::ask(lua, &super::PetBookNow);
-    let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     super::resolve_spell_in_books(
         book.as_ref().unwrap_or(&model.spellbook),
         pet.as_ref().unwrap_or(&model.pet_book),
@@ -281,7 +283,9 @@ pub fn install(lua: &Lua) -> mlua::Result<()> {
             let guid = match units::custom_guid(lua, &token) {
                 Some(guid) => guid,
                 None => {
-                    let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+                    let model = lua
+                        .app_data_ref::<crate::script::ModelCell>()
+                        .expect("model");
                     super::unit::guid_of(lua, &model, &token)?
                 }
             };

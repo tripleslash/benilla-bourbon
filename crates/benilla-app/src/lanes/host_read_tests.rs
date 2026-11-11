@@ -203,10 +203,12 @@ fn writers_between(app: &mut App) -> Option<BTreeMap<String, BTreeSet<String>>> 
     let is_state = |world: &World, id: ComponentId| {
         !queues.contains(&id) && !super::guard_tests::is_messages(world, id)
     };
-    // What the handlers and the host fill through a shared reference: a system's read of one is
-    // a write, which its access shows as a read.
+    // What the handlers and the host fill through a shared reference: a system's read of state
+    // is a write, which its access shows as a read. A sink's is the system's own push, which no
+    // handler reads back (`Fill::Sink`).
     let through_a_read = |world: &World, id: ComponentId| {
-        super::guard_tests::filled_through_a_read(&super::guard_tests::name(world, id)).is_some()
+        super::guard_tests::filled_through_a_read(&super::guard_tests::name(world, id))
+            == Some(super::guard_tests::Fill::State)
     };
     let handlers = world.resource::<crate::net::handlers::NetHandlers>();
     let mut handler_reads = HashSet::new();

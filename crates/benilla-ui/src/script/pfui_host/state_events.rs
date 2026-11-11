@@ -2,7 +2,6 @@
 //! shapeshift form, worn durability and reputation standing. Each compares the stock snapshots
 //! after their feeds; a new VM or another character sets a baseline and announces nothing.
 
-use super::Model;
 use crate::script::ScriptValue;
 use mlua::Lua;
 use std::collections::HashMap;
@@ -29,7 +28,9 @@ pub(super) fn dispatch(lua: &Lua) {
     let form = super::super::units::player_raw(lua).map(|unit| unit.form);
     let mut events = Vec::new();
     {
-        let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model");
         let mut state = lua.app_data_mut::<State>().expect("state events");
         let owner = model.unit_guids.player;
         let same = owner != 0 && state.owner == owner;

@@ -1,6 +1,6 @@
 //! Small extension queries over action and equipment snapshots.
 
-use crate::script::{action, Model};
+use crate::script::action;
 use mlua::{Lua, MultiValue, Value};
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -8,7 +8,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     globals.set(
         "GetActionInfo",
         lua.create_function(|lua, slot: i64| {
-            let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let action = u32::try_from(slot)
                 .ok()
                 .filter(|slot| (1..=120).contains(slot))
@@ -40,7 +42,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     globals.set(
         "GetInventoryItemID",
         lua.create_function(|lua, (token, slot): (String, i64)| {
-            let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let player = crate::script::unit::guid_of(lua, &model, "player")?;
             let resolved = crate::script::unit::guid_of(lua, &model, &token)
                 .ok()
@@ -60,7 +64,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     globals.set(
         "GetInventoryItemDurability",
         lua.create_function(|lua, slot: i64| {
-            let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let durability = (1..=19)
                 .contains(&slot)
                 .then(|| model.inventory_slots[slot as usize].as_ref())
@@ -81,7 +87,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     globals.set(
         "GetInventoryItemRepairCost",
         lua.create_function(|lua, slot: i64| {
-            let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(if (1..=19).contains(&slot) {
                 model.inv_repair_cost(lua, slot as usize)
             } else {
@@ -93,7 +101,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     globals.set(
         "GetInboxItemLink",
         lua.create_function(|lua, (index, attachment): (i64, Option<i64>)| {
-            let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let row = usize::try_from(index)
                 .ok()
                 .and_then(|index| index.checked_sub(1))
@@ -117,7 +127,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     globals.set(
         "GetInboxItemID",
         lua.create_function(|lua, index: i64| {
-            let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(usize::try_from(index)
                 .ok()
                 .and_then(|index| index.checked_sub(1))
@@ -130,7 +142,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     globals.set(
         "GetSendMailItemLink",
         lua.create_function(|lua, attachment: Option<i64>| {
-            let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let item = model
                 .mail_send_item
                 .as_ref()

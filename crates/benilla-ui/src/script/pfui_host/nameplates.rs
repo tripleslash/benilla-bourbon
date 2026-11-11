@@ -1,6 +1,6 @@
 //! Expose the engine's actual plate pool with stable slots and canonical frame wrappers.
 
-use super::{Model, PlateState};
+use super::PlateState;
 use crate::{script::ScriptValue, widget::FrameHandle};
 use mlua::{Lua, Table};
 use std::collections::HashSet;
@@ -33,7 +33,10 @@ pub(crate) fn all_tokens(lua: &Lua) -> Vec<String> {
 }
 
 fn wrapper(lua: &Lua, handle: FrameHandle) -> mlua::Result<Table> {
-    let id = lua.app_data_mut::<crate::script::ModelCell>().expect("model").frame_id(handle);
+    let id = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model")
+        .frame_id(handle);
     crate::script::object::frame_wrapper(lua, id)
 }
 

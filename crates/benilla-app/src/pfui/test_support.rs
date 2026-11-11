@@ -195,14 +195,12 @@ pub(crate) fn with_unit_targets(app: &mut App) {
             )]
             .into(),
         );
-    world
-        .non_send_mut::<UiScript>()
-        .set_unit_guids(&UnitGuids {
-            player: ME,
-            target: 4,
-            held: [(ME, 4), (4, 0)].into(),
-            ..Default::default()
-        });
+    world.non_send_mut::<UiScript>().set_unit_guids(&UnitGuids {
+        player: ME,
+        target: 4,
+        held: [(ME, 4), (4, 0)].into(),
+        ..Default::default()
+    });
 }
 
 #[cfg(feature = "nampower")]

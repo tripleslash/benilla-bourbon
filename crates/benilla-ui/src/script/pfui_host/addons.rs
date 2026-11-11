@@ -1,4 +1,3 @@
-use crate::script::Model;
 use mlua::{Lua, MultiValue, Value};
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -18,7 +17,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "GetAddOnOptionalDependencies",
         lua.create_function(|lua, key: Value| {
             let dependencies = {
-                let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model");
                 let row = match key {
                     Value::String(name) => model
                         .addons

@@ -407,7 +407,9 @@ fn size_read(lua: &Lua, h: FrameHandle, width: bool) -> f64 {
 #[cfg(feature = "pfui")]
 fn classicapi_size_read(lua: &Lua, h: FrameHandle, width: bool, ignore_rect: bool) -> f64 {
     let (units, stored) = {
-        let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model");
         let units = model.layout_units();
         let set = model
             .layout_inputs
@@ -428,7 +430,9 @@ fn classicapi_size_read(lua: &Lua, h: FrameHandle, width: bool, ignore_rect: boo
         return 0.0;
     }
     settle_frame(lua, h);
-    let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     let scale = layout_scale(&model, h);
     model.frame_rects.get(&h).map_or(0.0, |r| {
         let span = if width {

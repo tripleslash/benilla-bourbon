@@ -13,7 +13,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(false);
             };
             let name = name.to_string_lossy();
-            let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(model.vm.event_key(&name).is_some()
                 || super::extension_event(&model, &name).is_some())
         })?,

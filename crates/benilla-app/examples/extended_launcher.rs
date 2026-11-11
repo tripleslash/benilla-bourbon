@@ -49,10 +49,11 @@
 //! wgpu = { git = "https://github.com/tripleslash/benilla-bourbon" }
 //! wgpu-hal = { git = "https://github.com/samwhosung/benilla" }
 //! # fork: the native-GPU lanes' patches: GPU occlusion culling spares `NoFrustumCulling` meshes,
-//! # DXC from a local copy, DX12 multi-draw-indirect-count.
+//! # DXC from a local copy, DX12 multi-draw-indirect-count, `draw_index` in naga's HLSL.
 //! bevy_pbr = { git = "https://github.com/tripleslash/benilla-bourbon" }
 //! mach-dxcompiler-rs = { git = "https://github.com/tripleslash/benilla-bourbon" }
 //! wgpu-core = { git = "https://github.com/tripleslash/benilla-bourbon" }
+//! naga = { git = "https://github.com/tripleslash/benilla-bourbon" }
 //!
 //! [profile.dev]
 //! opt-level = 1

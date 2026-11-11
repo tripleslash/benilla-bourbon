@@ -65,7 +65,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
 /// written and its `inherits`, or `nil` for a name the registry lacks.
 fn template_info(lua: &Lua, name: &str) -> mlua::Result<Value> {
     let el = {
-        let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model");
         let templates = model.framexml_templates.borrow();
         match templates.get(name) {
             Some(el) => el.clone(),
@@ -132,7 +134,9 @@ pub(crate) fn intrinsic(lua: &Lua, kind: &str) -> Option<(String, String)> {
     if !active(lua) {
         return None;
     }
-    let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     let templates = model.framexml_templates.borrow();
     let el = templates.get(kind)?;
     el.attr_is_true("intrinsic")
@@ -141,7 +145,9 @@ pub(crate) fn intrinsic(lua: &Lua, kind: &str) -> Option<(String, String)> {
 
 /// Whether every name of a template list is registered, for `CreateFrame`'s check.
 pub(crate) fn all_templates_known(lua: &Lua, list: &str) -> bool {
-    let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     let templates = model.framexml_templates.borrow();
     names(list).all(|name| templates.contains(name))
 }

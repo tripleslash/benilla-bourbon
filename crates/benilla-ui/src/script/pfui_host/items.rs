@@ -43,7 +43,9 @@ pub fn set_bag_busy(lua: &Lua, busy: bool) {
 }
 
 pub fn bag_position_available(lua: &Lua, bag: i64, slot: u32) -> bool {
-    let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     if (bag == -1 || (5..=10).contains(&bag)) && model.bank.is_none() {
         return false;
     }
@@ -159,7 +161,9 @@ fn location_id(lua: &Lua, value: Value) -> mlua::Result<Option<u32>> {
     if let Value::Table(location) = value {
         let bag: Option<i64> = location.get("bagID")?;
         let slot: Option<u32> = location.get("slotIndex")?;
-        let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model");
         if let (Some(bag), Some(slot)) = (bag, slot) {
             return Ok(model
                 .containers
@@ -339,7 +343,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, input: Value| {
             let id = id(lua, input)?;
             Ok(id.is_some_and(|id| {
-                lua.app_data_ref::<crate::script::ModelCell>().expect("model").inventory_slots[1..20]
+                lua.app_data_ref::<crate::script::ModelCell>()
+                    .expect("model")
+                    .inventory_slots[1..20]
                     .iter()
                     .flatten()
                     .any(|slot| slot.item_id == id)
@@ -436,7 +442,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(false);
             };
             let book = super::player_book(lua);
-            let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(crate::script::item_stats::item_usable(
                 &item,
                 &model.player_req,
@@ -513,7 +521,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     if name == "MoveItem" && !count.is_some_and(|c| c > 0 && c <= 255) {
                         return Ok(false);
                     }
-                    let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+                    let model = lua
+                        .app_data_ref::<crate::script::ModelCell>()
+                        .expect("model");
                     if (src_bag == -1
                         || dst_bag == -1
                         || (5..=10).contains(&src_bag)

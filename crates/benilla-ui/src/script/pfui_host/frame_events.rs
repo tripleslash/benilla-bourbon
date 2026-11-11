@@ -2,7 +2,6 @@
 //! ([`crate::script::tick::fire_event_into`]) with a frame table as `arg1`, which a
 //! [`crate::script::ScriptValue`] cannot carry.
 
-use super::Model;
 use mlua::{Lua, Table, Value};
 
 /// Fire `event` to its listeners with `frame` as `arg1`: `event` is set once around the walk, and
@@ -16,7 +15,10 @@ pub(crate) fn fire(lua: &Lua, event: &str, frame: Table) {
 
 fn walk(lua: &Lua, event: &str, frame: Table) {
     crate::script::origin::check(event, Some(lua));
-    let model_mut = || lua.app_data_mut::<crate::script::ModelCell>().expect("model");
+    let model_mut = || {
+        lua.app_data_mut::<crate::script::ModelCell>()
+            .expect("model")
+    };
     let mut at = model_mut()
         .event_to_frames
         .get(event)

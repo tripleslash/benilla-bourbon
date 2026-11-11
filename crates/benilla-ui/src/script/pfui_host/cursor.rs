@@ -7,7 +7,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.globals().set(
         "GetCursorInfo",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let Some(payload) = &model.cursor else {
                 return Ok(MultiValue::new());
             };

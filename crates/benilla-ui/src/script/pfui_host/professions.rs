@@ -1,6 +1,5 @@
 //! The open profession windows, as the extension's profession links (`|Htrade:…|h`) read them.
 
-use crate::script::Model;
 use mlua::Lua;
 
 /// The open TradeSkill window: its `SkillLine.dbc` line and `GetTradeSkillLine`'s rank and

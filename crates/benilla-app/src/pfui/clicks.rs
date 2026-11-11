@@ -110,7 +110,7 @@ pub(crate) fn apply(script: &mut UiScript, action: ClickAction, cast: &mut Scrip
         ClickAction::Spell {
             spell_id,
             target: None,
-        } => crate::ui_spellbook::cast_spell(cast, spell_id, false),
+        } => crate::ui_spellbook::cast_spell(cast, spell_id, false, None),
         ClickAction::Spell {
             spell_id,
             target: Some(guid),
@@ -134,14 +134,14 @@ pub(crate) fn apply(script: &mut UiScript, action: ClickAction, cast: &mut Scrip
                         commit_or_follow(script, cast, spell_id, point);
                     }
                 }
-                None => crate::ui_spellbook::cast_spell(cast, spell_id, false),
+                None => crate::ui_spellbook::cast_spell(cast, spell_id, false, None),
             }
         }
         ClickAction::GroundSpell { spell_id, point } => {
             // A second press of the spell whose cursor is up only commits: the stock ladder would
             // take the cursor down, and the point would find nothing to bind.
             if cast.ladder.ground.spell() != Some(spell_id) {
-                crate::ui_spellbook::cast_spell(cast, spell_id, false);
+                crate::ui_spellbook::cast_spell(cast, spell_id, false, None);
             }
             commit_or_follow(script, cast, spell_id, point);
         }

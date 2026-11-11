@@ -123,10 +123,7 @@ fn store(spell: u32) -> crate::net::ObjectStore {
 }
 
 fn run(app: &App, lua: &str) {
-    app.world()
-        .non_send::<UiScript>()
-        .run(lua)
-        .unwrap();
+    app.world().non_send::<UiScript>().run(lua).unwrap();
 }
 
 fn feed(app: &mut App) {

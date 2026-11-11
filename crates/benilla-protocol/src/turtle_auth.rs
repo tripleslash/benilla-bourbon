@@ -40,10 +40,9 @@ pub async fn logon_with_pin_async(
     };
     let mut first_refusal = None;
     for &build in builds {
-        let result = crate::logon_with_pin_build_async(
-            host, username, password, build, locale, pin, stage,
-        )
-        .await;
+        let result =
+            crate::logon_with_pin_build_async(host, username, password, build, locale, pin, stage)
+                .await;
         if !version_rejected(&result) {
             // A later build that fails for no realmd reason at all (a closed link, say) says less
             // than the version refusal that sent us there.

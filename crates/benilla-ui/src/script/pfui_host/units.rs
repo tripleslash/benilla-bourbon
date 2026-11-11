@@ -1,6 +1,6 @@
 //! Additional unit metadata belongs to the extension, separate from the stock token resolver.
 
-use crate::script::{Model, UnitState};
+use crate::script::UnitState;
 use mlua::{Lua, Value};
 use std::collections::{BTreeSet, HashMap};
 
@@ -66,7 +66,10 @@ pub fn player_guid(lua: &Lua) -> u64 {
 }
 
 pub fn player_raw(lua: &Lua) -> Option<RawUnit> {
-    let player = lua.app_data_ref::<crate::script::ModelCell>()?.unit_guids.player;
+    let player = lua
+        .app_data_ref::<crate::script::ModelCell>()?
+        .unit_guids
+        .player;
     lua.app_data_ref::<Metadata>()?.raw.get(&player).cloned()
 }
 
@@ -133,7 +136,9 @@ pub fn guid(lua: &Lua, token: &str) -> mlua::Result<Option<u64>> {
     if let Some(guid) = custom_guid(lua, token) {
         return Ok(guid);
     }
-    let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     crate::script::unit::guid_of(lua, &model, token)
 }
 
@@ -152,7 +157,10 @@ pub(super) fn with_macro_target<R>(
     }
     impl Drop for Scope<'_> {
         fn drop(&mut self) {
-            let mut model = self.lua.app_data_mut::<crate::script::ModelCell>().expect("model");
+            let mut model = self
+                .lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model");
             model.unit_guids = std::mem::take(&mut self.guids);
             if let Some(target) = self.target.take() {
                 model.units_by_lower.insert("target".into(), target);
@@ -170,7 +178,9 @@ pub(super) fn with_macro_target<R>(
     }
     let state = guid.and_then(|guid| focus::state(lua, guid));
     let mut scope = {
-        let mut model = lua.app_data_mut::<crate::script::ModelCell>().expect("model");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model");
         let scope = Scope {
             lua,
             guids: model.unit_guids.clone(),
@@ -195,7 +205,9 @@ pub(super) fn with_macro_target<R>(
             .and_then(|metadata| metadata.targets.get(&guid).copied())
             .or_else(|| scope.guids.held.get(&guid).copied())
             .unwrap_or(0);
-        let mut model = lua.app_data_mut::<crate::script::ModelCell>().expect("model");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model");
         model.unit_guids.held.insert(guid, next);
         if let Some(state) = state {
             scope
@@ -333,7 +345,9 @@ pub(super) fn custom_tokens(lua: &Lua, guid: u64) -> Vec<String> {
 /// Current readable aliases for GUID-backed extension events; raw GUIDs are query-only.
 pub(super) fn event_tokens(lua: &Lua, guid: u64) -> Vec<String> {
     let mut tokens = {
-        let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model");
         let mut tokens: Vec<String> = ["player", "pet", "target", "mouseover", "npc"]
             .into_iter()
             .map(str::to_owned)
@@ -629,7 +643,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.globals().set(
             name,
             lua.create_function(move |lua, _: mlua::MultiValue| {
-                let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model");
                 Ok(!model.party.raid.is_empty() || (!raid_only && !model.party.members.is_empty()))
             })?,
         )?;

@@ -27,9 +27,7 @@ fn verdict(app: &mut App, success: bool, reason: u8) {
 }
 
 fn tick(app: &mut App, seconds: f32) {
-    app.world_mut()
-        .non_send_mut::<UiScript>()
-        .tick(seconds);
+    app.world_mut().non_send_mut::<UiScript>().tick(seconds);
 }
 
 #[test]
@@ -190,10 +188,7 @@ fn logout_disconnect_and_replacement_vm_discard_retries() {
     assert_eq!(cast_packets(&rx), vec![HEAL]);
     verdict(&mut app, false, 0x3c);
     let (mut fresh, _) = fixture();
-    let script = fresh
-        .world_mut()
-        .remove_non_send::<UiScript>()
-        .unwrap();
+    let script = fresh.world_mut().remove_non_send::<UiScript>().unwrap();
     app.world_mut().insert_non_send(script);
     run(&mut app, "");
     assert!(cast_packets(&rx).is_empty());

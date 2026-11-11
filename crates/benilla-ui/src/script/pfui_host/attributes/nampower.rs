@@ -52,6 +52,7 @@ fn queue(lua: &Lua, id: u32, pet: bool, unit: Value, policy: &str) -> mlua::Resu
             ScriptCall::CastSpell {
                 spell_id: id,
                 on_self,
+                unit: None,
                 may_cast: crate::script::protected::gate(lua, crate::script::protected::Tag::CAST),
             }
         }

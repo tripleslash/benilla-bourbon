@@ -1048,6 +1048,13 @@ impl<'a, W: fmt::Write> super::Writer<'a, W> {
             }
         }
         assert!(fake_iter.next().is_none());
+        // BENILLA: the struct goes back, because a task or mesh entry point's outer wrapper
+        // (`write_nested_function_outer`), written after this body, takes it as its input too;
+        // left taken, the wrapper lists the arguments one by one and `draw_index` has no semantic.
+        self.entry_point_io
+            .get_mut(&(ep_index as usize))
+            .unwrap()
+            .input = Some(ep_input);
         Ok(())
     }
 

@@ -350,7 +350,9 @@ fn classicapi_region_size_read(
     let rh = region_handle_of(lua, this)?;
     crate::script::measure::ensure_measured(lua, rh);
     let (units, text, slot) = {
-        let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model");
         let text = model
             .arena
             .region(rh)
@@ -366,7 +368,9 @@ fn classicapi_region_size_read(
         return Ok(0.0);
     }
     crate::script::object::settle_region(lua, rh);
-    let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     let scale = owner_scale(&model, rh);
     Ok(model.region_rects.get(&rh).map_or(0.0, |r| {
         let span = if width {

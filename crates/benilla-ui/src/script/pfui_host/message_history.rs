@@ -2,13 +2,15 @@
 //! `BackFillMessage`, which adds a message as the oldest (pfUI restores its chat history with it).
 
 use crate::script::object::frame_handle_of;
-use crate::script::{Model, UiScript};
+use crate::script::UiScript;
 use crate::widget::{KindState, MessageLine};
 use mlua::{Lua, MultiValue, Table, Value};
 
 fn lines(lua: &Lua, this: &Table) -> mlua::Result<Vec<MessageLine>> {
     let h = frame_handle_of(lua, this)?;
-    let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     match model.arena.frame(h).map(|f| &f.kind_state) {
         Some(KindState::ScrollingMessage(smf)) => Ok(smf.lines.iter().cloned().collect()),
         _ => Err(mlua::Error::runtime(crate::script::object::ERR_WRONG_TYPE)),
@@ -55,13 +57,17 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         255,
                     )
                 } else {
-                    let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+                    let model = lua
+                        .app_data_ref::<crate::script::ModelCell>()
+                        .expect("model");
                     UiScript::message_frame_color(&model, h)
                 };
                 let id = crate::script::messageframe::is_number(lua, &id)
                     .map_or(0, |n| crate::script::binding_abi::ftol(n) as u32);
                 {
-                    let mut model = lua.app_data_mut::<crate::script::ModelCell>().expect("model");
+                    let mut model = lua
+                        .app_data_mut::<crate::script::ModelCell>()
+                        .expect("model");
                     let viewport = UiScript::message_viewport(&model, h);
                     let Some(KindState::ScrollingMessage(smf)) =
                         model.arena.frame_mut(h).map(|f| &mut f.kind_state)

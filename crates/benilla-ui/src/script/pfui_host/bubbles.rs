@@ -1,6 +1,6 @@
 //! `C_ChatBubbles`, ClassicAPI's list of the chat bubbles, over the frames the engine builds.
 
-use crate::script::{object::frame_wrapper, Model};
+use crate::script::object::frame_wrapper;
 use mlua::Lua;
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
@@ -12,7 +12,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // blanks its textures, and the bubble is a bubble still. Hidden ones are listed too,
             // as a bubble out of sight is hidden and shown again.
             let ids: Vec<u32> = {
-                let mut model = lua.app_data_mut::<crate::script::ModelCell>().expect("model");
+                let mut model = lua
+                    .app_data_mut::<crate::script::ModelCell>()
+                    .expect("model");
                 crate::script::chat_bubble::frames(&model)
                     .into_iter()
                     .map(|frame| model.frame_id(frame))

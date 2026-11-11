@@ -4,7 +4,6 @@
 
 use super::{
     binding_abi, faction_at, is_header_key, read_entry, read_faction, FactionEntry, FactionQuery,
-    Model,
 };
 use mlua::{Lua, MultiValue, Table, Value};
 
@@ -45,7 +44,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     namespace.set(
         "GetFactionDataByIndex",
         lua.create_function(|lua, index: i64| {
-            let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let faction = usize::try_from(index).map_or(0, |i| faction_at(&model, i));
             let is_header = is_header_key(&model, faction);
             let collapsed = is_header && model.reputation_collapsed.contains(&faction);
@@ -58,7 +59,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     namespace.set(
         "GetWatchedFactionData",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let read = read_faction(lua, &model, FactionQuery::Watched);
             read.entry
                 .map(|e| data(lua, &e, e.is_header, false, read.watched))
@@ -75,7 +78,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 .coerce_number(id)?
                 .filter(|n| n.fract() == 0.0)
                 .and_then(|n| u32::try_from(n as i64).ok());
-            let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let Some(read) = id.map(|id| read_faction(lua, &model, FactionQuery::Of(id))) else {
                 return Ok(MultiValue::new());
             };

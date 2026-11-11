@@ -4,7 +4,7 @@ use mlua::{Function, Lua, Table, Value};
 
 use super::modelframe::{with_model, REG_PLAYERMODEL_METHODS};
 use super::object::frame_handle_of;
-use super::{Model, UiScript};
+use super::UiScript;
 
 const ENABLED: &str = "__benilla_turtle_model_previews";
 

@@ -1,6 +1,6 @@
 //! Item subjects follow the stock builders and clear/hide lifecycle, outside stock widget state.
 
-use crate::script::{object::frame_handle_of, tooltip::REG_TOOLTIP_METHODS, Model};
+use crate::script::{object::frame_handle_of, tooltip::REG_TOOLTIP_METHODS};
 use crate::widget::{FrameHandle, KindState};
 use mlua::{Function, Lua, MultiValue, Table, Value};
 use std::collections::HashMap;
@@ -62,7 +62,9 @@ pub(crate) fn resume(lua: &Lua, handle: FrameHandle, epoch: u64) {
 }
 
 fn shown_item(lua: &Lua, handle: FrameHandle) -> Option<Item> {
-    let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     if !matches!(model.arena.frame(handle).map(|f| &f.kind_state), Some(KindState::Tooltip(t)) if t.num_lines > 0)
     {
         return None;
@@ -117,7 +119,9 @@ fn subject(lua: &Lua, verb: &str, args: &MultiValue) -> mlua::Result<Option<Item
             .or_else(|| link.split_once("|Hitem:").map(|(_, tail)| tail))?;
         raw.split([':', '|']).next()?.parse::<u32>().ok()
     });
-    let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     let index = number(args, 1);
     let row = index.and_then(|i| i.checked_sub(1));
     let fallback = match verb {
@@ -285,7 +289,10 @@ fn subject(lua: &Lua, verb: &str, args: &MultiValue) -> mlua::Result<Option<Item
 
 /// Fire one of ClassicAPI's tooltip scripts on `handle`, its error recorded.
 pub(super) fn fire_set(lua: &Lua, handle: FrameHandle, script: &str) {
-    let id = lua.app_data_mut::<crate::script::ModelCell>().expect("model").frame_id(handle);
+    let id = lua
+        .app_data_mut::<crate::script::ModelCell>()
+        .expect("model")
+        .frame_id(handle);
     if let Err(e) = crate::script::event::fire_widget_handler(lua, id, script, Vec::new()) {
         lua.app_data_mut::<crate::script::ModelCell>()
             .expect("model")
@@ -392,7 +399,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             name,
             lua.create_function(move |lua, this: Table| {
                 let handle = frame_handle_of(lua, &this)?;
-                let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model");
                 let has_lines = matches!(model.arena.frame(handle).map(|f| &f.kind_state),
                     Some(KindState::Tooltip(t)) if t.num_lines > 0);
                 let id = lua
@@ -440,7 +449,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             name,
             lua.create_function(move |lua, this: Table| {
                 let handle = frame_handle_of(lua, &this)?;
-                let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model");
                 let tooltip = match model.arena.frame(handle).map(|f| &f.kind_state) {
                     Some(KindState::Tooltip(t)) => Some(t),
                     _ => None,

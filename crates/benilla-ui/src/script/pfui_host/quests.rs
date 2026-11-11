@@ -1,6 +1,6 @@
 //! Quest details are a pure cache probe over server templates, separate from the visible log.
 
-use crate::script::{Model, ScriptValue};
+use crate::script::ScriptValue;
 use mlua::{Lua, Table};
 use std::collections::HashMap;
 
@@ -81,7 +81,9 @@ pub fn dispatch_log_events(lua: &Lua) {
         for id in std::mem::take(&mut life.removed) {
             events.push(("QUEST_REMOVED", vec![ScriptValue::Int(i64::from(id))]));
         }
-        let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model");
         life.accepted.retain(|id| {
             let index = model
                 .quest_log
@@ -189,7 +191,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     namespace.set(
         "GetQuestIDForLogIndex",
         lua.create_function(|lua, index: i64| {
-            let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(usize::try_from(index)
                 .ok()
                 .and_then(|i| i.checked_sub(1))

@@ -429,6 +429,7 @@ pub(crate) fn intercept(
         ScriptCall::CastSpell {
             spell_id: id,
             on_self,
+            unit: None,
             may_cast: true,
         }
     };

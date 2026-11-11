@@ -1,7 +1,7 @@
 //! Resolve extra tokens through live snapshots while reusing the stock read-only query ABI.
 //! Aliases are private to one query and restored before addons regain control, including errors.
 
-use super::{Metadata, Model, UnitState};
+use super::{Metadata, UnitState};
 use crate::script::{ScriptCall, SelectionRequest};
 
 #[path = "unit_events.rs"]
@@ -181,7 +181,10 @@ struct Aliases<'a> {
 }
 impl Drop for Aliases<'_> {
     fn drop(&mut self) {
-        let mut model = self.lua.app_data_mut::<crate::script::ModelCell>().expect("model");
+        let mut model = self
+            .lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model");
         for saved in self.saved.drain(..).rev() {
             match saved.state {
                 Some(state) => {
@@ -209,7 +212,10 @@ impl Aliases<'_> {
             return String::new();
         };
         {
-            let model = self.lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+            let model = self
+                .lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             for token in ["player", "pet", "target", "npc", "mouseover"] {
                 if crate::script::unit::guid_of(self.lua, &model, token)
                     .ok()
@@ -237,7 +243,10 @@ impl Aliases<'_> {
             "mouseover"
         };
         let replacement = state(self.lua, guid);
-        let mut model = self.lua.app_data_mut::<crate::script::ModelCell>().expect("model");
+        let mut model = self
+            .lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model");
         let old = model.units_by_lower.remove(token);
         if let Some(state) = replacement {
             model.units_by_lower.insert(token.into(), state);

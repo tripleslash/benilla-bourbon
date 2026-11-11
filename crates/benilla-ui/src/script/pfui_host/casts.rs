@@ -1,6 +1,6 @@
 //! Observed cast/channel snapshots and the modern lifecycle event projection.
 
-use crate::script::{Model, ScriptValue};
+use crate::script::ScriptValue;
 use mlua::{Lua, MultiValue, Table, Value};
 use std::collections::HashMap;
 
@@ -31,7 +31,10 @@ pub fn set_cast_targets(lua: &Lua, targets: impl IntoIterator<Item = (u64, u64)>
 }
 
 pub fn player_cast(lua: &Lua) -> Option<Cast> {
-    let me = lua.app_data_ref::<crate::script::ModelCell>()?.unit_guids.player;
+    let me = lua
+        .app_data_ref::<crate::script::ModelCell>()?
+        .unit_guids
+        .player;
     lua.app_data_ref::<Extras>()?.0.get(&me).cloned()
 }
 

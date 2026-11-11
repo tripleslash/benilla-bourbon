@@ -1,6 +1,6 @@
 //! The modern aura projection, with real descriptor slots kept separately from stock DTOs.
 
-use crate::script::{AuraState, Model};
+use crate::script::AuraState;
 use mlua::{Lua, MultiValue, Table, Value};
 use std::collections::HashMap;
 
@@ -87,16 +87,17 @@ fn player_timing(lua: &Lua, mut aura: Aura) -> Aura {
 
 /// The stock aura feed owns roster fallback even after a member or pet leaves object range.
 pub fn has_group_alias(lua: &Lua, guid: u64) -> bool {
-    lua.app_data_ref::<crate::script::ModelCell>().is_some_and(|model| {
-        let units = &model.unit_guids;
-        units
-            .party
-            .iter()
-            .chain(&units.party_pets)
-            .chain(&units.raid)
-            .chain(&units.raid_pets)
-            .any(|candidate| *candidate == guid && guid != 0)
-    })
+    lua.app_data_ref::<crate::script::ModelCell>()
+        .is_some_and(|model| {
+            let units = &model.unit_guids;
+            units
+                .party
+                .iter()
+                .chain(&units.party_pets)
+                .chain(&units.raid)
+                .chain(&units.raid_pets)
+                .any(|candidate| *candidate == guid && guid != 0)
+        })
 }
 
 /// Enrich a streamed aura only after an observed successful cast names its source.
@@ -260,7 +261,9 @@ pub(crate) fn list(lua: &Lua, token: &str, filter: Option<&str>) -> Vec<Aura> {
     let Some(auras) = extras.by_guid.get(&guid) else {
         return Vec::new();
     };
-    let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     let player = guid == model.unit_guids.player;
     let tokens: Vec<_> = filter
         .unwrap_or("HELPFUL")

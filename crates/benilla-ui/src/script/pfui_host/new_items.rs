@@ -1,6 +1,6 @@
 //! Bag glow follows instance GUIDs; a login baseline excludes already-owned items.
 
-use super::{Extras, Model};
+use super::Extras;
 use mlua::{Lua, Value};
 use std::collections::HashSet;
 
@@ -21,7 +21,9 @@ pub(super) fn update(lua: &Lua) {
         return;
     }
     let (owner, now) = {
-        let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+        let model = lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model");
         (model.unit_guids.player, model.now)
     };
     let resident: HashSet<_> = lua

@@ -1,10 +1,11 @@
 //! Merchant queries and paced junk sales reuse the vendor snapshot and sell queue.
 
-use crate::script::Model;
 use mlua::Lua;
 
 fn junk(lua: &Lua) -> Vec<(i64, u32, u64)> {
-    let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     if model.merchant.is_none() {
         return vec![];
     }
@@ -33,7 +34,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     api.set(
         "GetBuybackItemID",
         lua.create_function(|lua, index: i64| {
-            let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(usize::try_from(index)
                 .ok()
                 .and_then(|index| index.checked_sub(1))
@@ -61,7 +64,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     bridge.set(
         "context",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(model
                 .merchant
                 .as_ref()

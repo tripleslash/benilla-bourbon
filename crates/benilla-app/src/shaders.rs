@@ -675,8 +675,9 @@ mod tests {
             -> @builtin(position) vec4<f32> {\n\
                 return vec4<f32>(f32(d), f32(v), 0.0, 1.0);\n\
             }\n\
+            var<workgroup> w: u32;\n\
             @compute @workgroup_size(1) fn cs(@builtin(num_workgroups) n: vec3<u32>) {\n\
-                _ = n;\n\
+                w = n.x;\n\
             }\n";
         let module = naga::front::wgsl::parse_str(src).expect("the module parses");
         let info = naga::valid::Validator::new(

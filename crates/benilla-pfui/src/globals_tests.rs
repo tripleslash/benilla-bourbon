@@ -199,6 +199,7 @@ fn tracking_lists_book_spells_with_a_tracking_aura_and_casts_the_chosen_slot() {
         [ScriptCall::CastSpell {
             spell_id: 2383,
             on_self: false,
+            unit: None,
             may_cast: true
         }]
     ));

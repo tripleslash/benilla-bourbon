@@ -340,7 +340,14 @@ impl<W: fmt::Write> super::Writer<'_, W> {
         // semantics.  Arg names come from self.names and are the same names that
         // were collected into `args` when writing the inner function signature.
         if let Some(ref ep_input) = self.entry_point_io.get(&(ep_index as usize)).unwrap().input {
-            write!(self.out, "{} {}", ep_input.ty_name, ep_input.arg_name)?;
+            // BENILLA: the separator, because an argument follows the struct (the group index).
+            write!(
+                self.out,
+                "{}{} {}",
+                separator_if_needed(),
+                ep_input.ty_name,
+                ep_input.arg_name
+            )?;
         } else {
             for (index, arg) in entry_point.function.arguments.iter().enumerate() {
                 write!(self.out, "{}", separator_if_needed())?;

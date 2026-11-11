@@ -29,6 +29,8 @@ wgpu-core's indirect rewrite writes in front of each indirect draw's arguments o
 | `src/back/hlsl/writer.rs`, `write_ep_interface` | an entry point with a `draw_index` argument (or struct member) takes its inputs as one struct, as one with a subgroup built-in does. |
 | `src/back/hlsl/writer.rs`, `write_interface_struct` | `draw_index` is left out of that struct, as the subgroup built-ins are: it has no semantic. |
 | `src/back/hlsl/writer.rs`, `write_ep_argument_initialization` | `draw_index` is initialized as `_NagaConstants.other`; without a special constants binding the writer returns an error. |
+| `src/back/hlsl/writer.rs`, `write_ep_arguments_initialization` | the input struct goes back into `entry_point_io` after the body's initialization, where upstream leaves it taken: a task or mesh entry point's outer wrapper, written after the body, takes it as its input too, and left taken it lists `draw_index` as a plain argument with no semantic. |
+| `src/back/hlsl/mesh_shader.rs`, `write_nested_function_outer` | the separator after that struct, which upstream never needed (the group index follows it). |
 | `src/back/hlsl/mod.rs`, `supported_capabilities` | lists `Caps::DRAW_INDEX`. |
 
 **What a shader reads.** In vertex, task and mesh stages, `draw_index` is `_NagaConstants.other`:

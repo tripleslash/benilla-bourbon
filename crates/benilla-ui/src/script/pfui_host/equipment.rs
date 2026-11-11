@@ -43,7 +43,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "snapshot",
         lua.create_function(|lua, ()| {
             let extras = lua.app_data_ref::<Extras>().expect("items");
-            let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let snapshot = lua.create_table()?;
             for (&(bag, slot), item) in &extras.instances {
                 let Some(code) = location(bag, slot) else {
@@ -102,7 +104,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(false);
             }
             {
-                let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model");
                 if locked(&model, bag, slot) || locked(&model, EQUIPMENT_BAG, target) {
                     return Ok(false);
                 }

@@ -1230,11 +1230,6 @@ pub(crate) enum ClientCommand {
     SetSelection {
         guid: u64,
     },
-    /// tortoise: the language every later chat line goes out in, the self race's
-    /// `ChrRaces.BaseLanguage`.
-    SetChatLanguage {
-        language: u32,
-    },
     /// `CMSG_MESSAGECHAT`. A plain line, `.` GM commands included, goes as `Say`.
     /// The language every later chat line goes out in: the self race's `ChrRaces.BaseLanguage`.
     SetChatLanguage {

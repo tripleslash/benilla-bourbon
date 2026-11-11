@@ -119,9 +119,7 @@ fn queued_scripts_run_at_their_documented_priority_against_real_cast_commands() 
         casting(&app, None);
         for _ in 0..5 {
             app.insert_resource(crate::spell::PendingCast::default());
-            app.world_mut()
-                .non_send_mut::<UiScript>()
-                .tick(0.11);
+            app.world_mut().non_send_mut::<UiScript>().tick(0.11);
             run(&mut app, "");
         }
         assert_eq!(cast_packets(&rx), vec![5001, HEAL]);
@@ -130,10 +128,7 @@ fn queued_scripts_run_at_their_documented_priority_against_real_cast_commands() 
             2 => "assert(order[1]==5001 and order[2]=='script' and order[3]==2050)",
             _ => "assert(order[1]==5001 and order[2]==2050 and order[3]=='script')",
         };
-        app.world()
-            .non_send::<UiScript>()
-            .run(expected)
-            .unwrap();
+        app.world().non_send::<UiScript>().run(expected).unwrap();
     }
 }
 
@@ -230,23 +225,17 @@ fn non_gcd_queue_has_priority_and_spaces_sends_without_replacing_the_normal_queu
     run(&mut app, "");
     assert_eq!(cast_packets(&rx), vec![5001]);
     app.insert_resource(crate::spell::PendingCast::default());
-    app.world_mut()
-        .non_send_mut::<UiScript>()
-        .tick(0.05);
+    app.world_mut().non_send_mut::<UiScript>().tick(0.05);
     run(&mut app, "");
     assert!(
         cast_packets(&rx).is_empty(),
         "non-GCD casts retain their 100 ms buffer after an ACK"
     );
-    app.world_mut()
-        .non_send_mut::<UiScript>()
-        .tick(0.06);
+    app.world_mut().non_send_mut::<UiScript>().tick(0.06);
     run(&mut app, "");
     assert_eq!(cast_packets(&rx), vec![5002]);
     app.insert_resource(crate::spell::PendingCast::default());
-    app.world_mut()
-        .non_send_mut::<UiScript>()
-        .tick(0.11);
+    app.world_mut().non_send_mut::<UiScript>().tick(0.11);
     run(&mut app, "");
     assert_eq!(
         cast_packets(&rx),
@@ -324,9 +313,7 @@ fn forced_queue_waits_outside_window_and_a_noqueue_attempt_does_not_replace_it()
         HEAL
     );
     // A forced request survives a long cast, even if its server start arrived after the press.
-    app.world_mut()
-        .non_send_mut::<UiScript>()
-        .tick(8.0);
+    app.world_mut().non_send_mut::<UiScript>().tick(8.0);
     run(&mut app, "");
     assert!(cast_packets(&rx).is_empty());
     casting(&app, None);

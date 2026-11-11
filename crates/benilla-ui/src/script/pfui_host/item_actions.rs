@@ -1,6 +1,6 @@
 //! Item references bind a carried instance at request time, then the engine re-resolves its slot.
 
-use super::{id, Extras, Instance, Model};
+use super::{id, Extras, Instance};
 use crate::script::{pfui_host::attributes::ClickAction, ScriptCall, EQUIPMENT_BAG};
 use mlua::{Lua, Table, Value};
 
@@ -38,7 +38,9 @@ pub(in crate::script::pfui_host) fn instance(lua: &Lua, input: Value) -> mlua::R
         .and_then(|s| u64::from_str_radix(s, 16).ok());
     let entry = id(lua, input)?;
     let extras = lua.app_data_ref::<Extras>().expect("items");
-    let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     let matches = |item: &Instance| {
         if let Some(guid) = guid {
             return item.guid == guid;

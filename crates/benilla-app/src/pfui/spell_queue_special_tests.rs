@@ -272,9 +272,7 @@ fn six_non_gcd_entries_retain_fifo_order() {
     casting(&app, None);
     for id in 5001..=5006 {
         app.insert_resource(crate::spell::PendingCast::default());
-        app.world_mut()
-            .non_send_mut::<UiScript>()
-            .tick(0.11);
+        app.world_mut().non_send_mut::<UiScript>().tick(0.11);
         run(&mut app, "");
         assert_eq!(cast_packets(&rx), vec![id]);
     }
@@ -304,9 +302,7 @@ fn on_swing_is_opt_in_and_cannot_immediately_double_queue() {
         .unwrap()
         .on_swing
         .is_none());
-    app.world_mut()
-        .non_send_mut::<UiScript>()
-        .tick(0.51);
+    app.world_mut().non_send_mut::<UiScript>().tick(0.51);
     run(&mut app, "CastSpellByName('Heal2050','player')");
     assert!(cast_packets(&rx).is_empty());
     app.world()
@@ -314,9 +310,7 @@ fn on_swing_is_opt_in_and_cannot_immediately_double_queue() {
         .run("assert(#rows==2 and rows[2][1]==0)")
         .unwrap();
     // Even a very slow swing may retain the next strike until the server clears the melee slot.
-    app.world_mut()
-        .non_send_mut::<UiScript>()
-        .tick(8.0);
+    app.world_mut().non_send_mut::<UiScript>().tick(8.0);
     run(&mut app, "");
     assert!(cast_packets(&rx).is_empty());
     // The server's answer empties the melee slot.

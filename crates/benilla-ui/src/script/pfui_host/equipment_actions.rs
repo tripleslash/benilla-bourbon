@@ -98,17 +98,28 @@ pub(crate) fn cursor_changed(model: &mut Model) {
 
 pub(super) fn install(lua: &Lua, bridge: &Table) -> mlua::Result<()> {
     {
-        let mut model = lua.app_data_mut::<crate::script::ModelCell>().expect("model");
+        let mut model = lua
+            .app_data_mut::<crate::script::ModelCell>()
+            .expect("model");
         model.pfui_cursor = Some(cursor_state(&model));
     }
     bridge.set(
         "heldSet",
-        lua.create_function(|lua, ()| Ok(held_set(&lua.app_data_ref::<crate::script::ModelCell>().expect("model"))))?,
+        lua.create_function(|lua, ()| {
+            Ok(held_set(
+                &lua.app_data_ref::<crate::script::ModelCell>()
+                    .expect("model"),
+            ))
+        })?,
     )?;
     bridge.set(
         "hasCursor",
         lua.create_function(|lua, ()| {
-            Ok(lua.app_data_ref::<crate::script::ModelCell>().expect("model").cursor.is_some())
+            Ok(lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model")
+                .cursor
+                .is_some())
         })?,
     )?;
     bridge.set(
@@ -153,7 +164,9 @@ pub(super) fn install(lua: &Lua, bridge: &Table) -> mlua::Result<()> {
                 return Ok(false);
             }
             let displaced = {
-                let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model");
                 model
                     .actions
                     .get(&slot)

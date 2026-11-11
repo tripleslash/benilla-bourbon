@@ -1,6 +1,6 @@
 //! Attribute-script delivery through the same legacy/modern argument bridge as stock scripts.
 
-use crate::script::{Model, ScriptCall, ScriptValue};
+use crate::script::{ScriptCall, ScriptValue};
 use mlua::{Function, Lua, MultiValue, Table};
 
 #[cfg(feature = "nampower")]
@@ -191,7 +191,9 @@ pub fn run_macro(lua: &Lua, input: &str, named: bool, target: Option<u64>) -> ml
             return runner.call(input);
         }
         let body = if named {
-            let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             let index = input
                 .parse::<usize>()
                 .ok()

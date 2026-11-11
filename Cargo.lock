@@ -817,13 +817,13 @@ dependencies = [
 name = "benilla-pfui"
 version = "0.3.1"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "benilla-dbc",
  "benilla-formats",
  "benilla-mlua",
  "benilla-ui",
  "ciborium",
- "miniz_oxide",
+ "miniz_oxide 0.8.9",
  "roxmltree",
  "serde",
  "serde_json",

@@ -222,10 +222,7 @@ fn missing_target_item_or_pending_slot_refuses_before_a_bind_prompt() {
                     .remove(&4);
             }
             1 => set_slots(&mut app, 0, OTHER_ITEM),
-            _ => app
-                .world_mut()
-                .non_send_mut::<UiScript>()
-                .lock_item(ITEM),
+            _ => app.world_mut().non_send_mut::<UiScript>().lock_item(ITEM),
         }
         run(&mut app, "C_Item.UseItemByName(12345,'target')");
         assert!(uses(&rx).is_empty());
@@ -273,10 +270,7 @@ fn changed_items_units_locks_or_vm_invalidate_the_owned_confirmation() {
                     .remove(&4);
             }
             1 => set_slots(&mut app, 0, OTHER_ITEM),
-            2 => app
-                .world_mut()
-                .non_send_mut::<UiScript>()
-                .lock_item(ITEM),
+            2 => app.world_mut().non_send_mut::<UiScript>().lock_item(ITEM),
             3 => {
                 let mut template = crate::items::test_template("Transformed item");
                 template.start_quest = 42;
