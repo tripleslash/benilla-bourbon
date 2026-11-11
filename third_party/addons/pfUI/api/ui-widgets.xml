@@ -1,0 +1,153 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/">
+  <!--
+  pfUI's scroll bar for ClassicAPI's ScrollBox: a thin track with a flat
+  thumb. ScrollBarMixin needs Back and Forward steppers, so they exist but
+  stay hidden. Hook it up with ScrollUtil.InitScrollBoxListWithScrollBar.
+  -->
+  <EventFrame name="pfUIScrollBarTemplate" inherits="VerticalScrollBarTemplate" virtual="true">
+    <Size x="7"/>
+    <KeyValues>
+      <KeyValue key="hideIfUnscrollable" value="true" type="boolean"/>
+    </KeyValues>
+    <Frames>
+      <Frame parentKey="Track" setAllPoints="true" enableMouse="true">
+        <Frames>
+          <EventButton parentKey="Thumb">
+            <Size x="7"/>
+            <Layers>
+              <Layer level="ARTWORK">
+                <Texture setAllPoints="true">
+                  <Color r=".3" g="1" b=".8" a=".5"/>
+                </Texture>
+              </Layer>
+            </Layers>
+          </EventButton>
+        </Frames>
+      </Frame>
+      <EventButton parentKey="Back" hidden="true"/>
+      <EventButton parentKey="Forward" hidden="true"/>
+    </Frames>
+  </EventFrame>
+
+  <!--
+  A ScrollFrame for free-form content, with pfUIScrollBarTemplate inside its
+  right edge. Put the content in frame.Content, which spans the frame: the
+  engine measures the scroll range from the shown frames inside it, so the
+  content needs no height. Changes inside it are not measured until
+  frame:UpdateScrollChildRect().
+  -->
+  <ScrollFrame name="pfUIScrollFrameTemplate" virtual="true">
+    <Frames>
+      <EventFrame parentKey="ScrollBar" inherits="pfUIScrollBarTemplate">
+        <Anchors>
+          <Anchor point="TOPRIGHT"/>
+          <Anchor point="BOTTOMRIGHT"/>
+        </Anchors>
+      </EventFrame>
+    </Frames>
+    <ScrollChild>
+      <Frame parentKey="Content">
+        <Size x="1" y="1"/>
+      </Frame>
+    </ScrollChild>
+    <Scripts>
+      <OnLoad>
+        self.Content:SetAllPoints()
+        self:EnableMouseWheel(true)
+        ScrollUtil.InitScrollFrameWithScrollBar(self, self.ScrollBar)
+      </OnLoad>
+    </Scripts>
+  </ScrollFrame>
+
+  <!--
+  A WowScrollBoxList with pfUIScrollBarTemplate beside it, both 5px inside the
+  frame so CreateBackdrop(frame, nil, true) can frame them. Fill it with
+  ScrollUtil.InitScrollBoxListWithScrollBar(frame.ScrollBox, frame.ScrollBar, view).
+  -->
+  <Frame name="pfUIScrollBoxListTemplate" virtual="true">
+    <Frames>
+      <EventFrame parentKey="ScrollBar" inherits="pfUIScrollBarTemplate">
+        <Anchors>
+          <Anchor point="TOPRIGHT" x="-5" y="-5"/>
+          <Anchor point="BOTTOMRIGHT" x="-5" y="5"/>
+        </Anchors>
+      </EventFrame>
+      <Frame parentKey="ScrollBox" inherits="WowScrollBoxList">
+        <Anchors>
+          <Anchor point="TOPLEFT" x="5" y="-5"/>
+          <Anchor point="BOTTOMRIGHT" relativeKey="$parent.ScrollBar" relativePoint="BOTTOMLEFT"/>
+        </Anchors>
+      </Frame>
+    </Frames>
+  </Frame>
+
+  <!--
+  ClassicAPI's ScrollingEditBoxTemplate with pfUIScrollBarTemplate beside the
+  text. The frame needs a name: SetFont(font, size, flags) names its font
+  object after it.
+  -->
+  <Frame name="pfUIScrollingEditBoxTemplate" inherits="ScrollingEditBoxTemplate" mixin="pfUIScrollingEditBoxMixin" virtual="true">
+    <KeyValues>
+      <KeyValue key="maxLetters" value="0" type="number"/>
+    </KeyValues>
+    <Frames>
+      <EventFrame parentKey="ScrollBar" inherits="pfUIScrollBarTemplate">
+        <Anchors>
+          <Anchor point="TOPRIGHT"/>
+          <Anchor point="BOTTOMRIGHT"/>
+        </Anchors>
+      </EventFrame>
+    </Frames>
+    <Scripts>
+      <OnLoad method="InitScrollBar" inherit="prepend"/>
+    </Scripts>
+  </Frame>
+
+  <!--
+  A ClassicAPI dropdown in pfUI's style: the selection as right-aligned text
+  and pfUI's arrow box at the right. Its menu takes pfUIMenuStyleMixin. Fill it
+  with dropdown:SetupMenu(function(dropdown, rootDescription) ... end), and call
+  dropdown:GenerateMenu() when the data behind the selection changes.
+  -->
+  <DropdownButton name="pfUIDropdownTemplate" mixin="pfUIDropdownMixin" virtual="true">
+    <Size y="20"/>
+    <KeyValues>
+      <KeyValue key="menuMixin" value="pfUIMenuStyleMixin" type="global"/>
+      <KeyValue key="menuPointY" value="-2" type="number"/>
+    </KeyValues>
+    <Frames>
+      <Frame parentKey="Arrow">
+        <Size x="16" y="16"/>
+        <Anchors>
+          <Anchor point="RIGHT" x="-2"/>
+        </Anchors>
+        <Layers>
+          <Layer level="ARTWORK">
+            <Texture parentKey="Icon">
+              <Anchors>
+                <Anchor point="TOPLEFT" x="3" y="-3"/>
+                <Anchor point="BOTTOMRIGHT" x="-3" y="3"/>
+              </Anchors>
+            </Texture>
+          </Layer>
+        </Layers>
+      </Frame>
+    </Frames>
+    <Layers>
+      <Layer level="OVERLAY">
+        <FontString parentKey="Text" inherits="GameFontWhite" wordwrap="false" justifyH="RIGHT">
+          <Anchors>
+            <Anchor point="LEFT" x="2"/>
+            <Anchor point="RIGHT" relativeKey="$parent.Arrow" relativePoint="LEFT" x="-4"/>
+          </Anchors>
+        </FontString>
+      </Layer>
+    </Layers>
+    <Scripts>
+      <OnLoad method="OnLoad"/>
+      <OnShow method="OnShow"/>
+      <OnEnter method="OnEnter"/>
+      <OnLeave method="OnLeave"/>
+    </Scripts>
+  </DropdownButton>
+</Ui>

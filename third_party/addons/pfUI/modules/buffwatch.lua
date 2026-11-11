@@ -1,0 +1,517 @@
+pfUI:RegisterModule("buffwatch", function ()
+  local rawborder, border = GetBorderSize("panels")
+
+  local fcache = {}
+  local function BuffIsVisible(config, name)
+    -- return if all buffs should be shown
+    if config.filter == "none" then return true end
+
+    local index = tostring(config)
+    local mode = config.filter
+
+    if not fcache[index] then
+      fcache[index] = {}
+      for _, val in pairs({strsplit("#", config[mode])}) do
+        fcache[index][val] = true
+      end
+    end
+
+    if mode == "whitelist" then
+      return fcache[index][name]
+    elseif mode == "blacklist" then
+      return not fcache[index][name]
+    end
+  end
+
+  local rgbcache = setmetatable({},{__mode="kv"})
+  local function str2rgb(text)
+    if not text then return 1, 1, 1 end
+    if rgbcache[text] then return unpack(rgbcache[text]) end
+    local counter = 1
+    local l = string.len(text)
+    for i = 1, l, 3 do
+      counter = mod(counter*8161, 4294967279) + (string.byte(text,i)*16776193) + ((string.byte(text,i+1) or (l-i+256))*8372226) + ((string.byte(text,i+2) or (l-i+256))*3932164)
+    end
+    counter = mod(8161, 4294967279) + (string.byte(text,l)*16776193) + ((string.byte(text,l+1) or (l-l+256))*8372226) + ((string.byte(text,l+2) or (l+256))*3932164)
+
+    local hash = mod(mod(counter, 4294967291),16777216)
+    local r = (hash - (mod(hash,65536))) / 65536
+    local g = ((hash - r*65536) - ( mod((hash - r*65536),256)) ) / 256
+    local b = hash - r*65536 - g*256
+    rgbcache[text] = { r / 255, g / 255, b / 255 }
+    return unpack(rgbcache[text])
+  end
+
+
+  local function GetSafeTop(frame)
+    if frame and frame.IsShown and frame:IsShown() and frame:IsVisible() then
+      return frame:GetTop(), frame
+    end
+
+    return 0
+  end
+
+  -- iterate over given tables and return the first frame that is shown
+  local function GetTopAnchor(anchors)
+    local top, anchor = 0, anchors[1]
+
+    for _, tbl in pairs(anchors) do
+
+      -- in case of multiple anchor elements, iterate over each one
+      for i=32, 1, -1 do
+        if GetSafeTop(tbl[i]) > top then
+          top, anchor = GetSafeTop(tbl[i])
+        end
+      end
+
+      -- check top of regular anchor elements
+      if GetSafeTop(tbl) > top then
+        top, anchor = GetSafeTop(tbl)
+      end
+    end
+
+    return anchor
+  end
+
+  -- reusable GetAuraSlots buffer, filled once per RefreshBuffBarFrame
+  local auraSlots = {}
+
+  -- Reads one aura by the slot id GetAuraSlots returned (nil slot -> nil).
+  local function GetBuffData(unit, slot)
+    local name, icon, count, dispelType, _, expirationTime = C_UnitAuras.UnitAuraBySlot(unit, slot)
+    if not name then return end
+    local remaining = expirationTime > 0 and (expirationTime - GetTime()) or 0
+    return remaining, icon, name, count, dispelType
+  end
+
+  local function StatusBarOnClick()
+    if arg1 == "LeftButton" then
+      local config = this.parent.config
+      local skill = this.text:GetText()
+      if IsControlKeyDown() then
+        for _, val in pairs({strsplit("#", config.whitelist)}) do
+          if val == skill then return end
+        end
+        config.whitelist = config.whitelist .. "#" .. skill
+        fcache[tostring(config)] = nil -- invalidate so the new entry takes effect immediately
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ffcc" .. skill .. "|r" .. T["is now whitelisted."])
+      elseif IsShiftKeyDown() then
+        for _, val in pairs({strsplit("#", config.blacklist)}) do
+          if val == skill then return end
+        end
+        config.blacklist = config.blacklist .. "#" .. skill
+        fcache[tostring(config)] = nil -- invalidate so the new entry takes effect immediately
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ffcc" .. skill .. "|r" .. T["is now blacklisted."])
+      end
+      this.parent.Refresh()
+    elseif this.parent.unit == "player" then
+      local aura = C_UnitAuras.GetAuraDataByIndex("player", this.id, this.type)
+      if aura and aura.spellId then C_Spell.CancelSpellByID(aura.spellId) end
+    end
+  end
+
+  local function StatusBarOnEnter()
+    GameTooltip:SetOwner(this, "NONE")
+
+    -- C_UnitAuras lists the player's own auras first, so the selfdebuff
+    -- (HARMFUL|PLAYER) list is a prefix of the HARMFUL list: same index.
+    GameTooltip:SetUnitAura(this.unit, this.id, this.type)
+
+    if IsShiftKeyDown() then
+      GameTooltip:AddLine(" ")
+      GameTooltip:AddDoubleLine(T["Ctrl-Click"], T["Add to Whitelist"], 1,1,1, .2,1,.8)
+      GameTooltip:AddDoubleLine(T["Shift-Click"], T["Add to Blacklist"], 1,1,1, .2,1,.8)
+    end
+
+    GameTooltip:Show()
+  end
+
+  local function StatusBarOnLeave()
+    GameTooltip:Hide()
+  end
+
+  -- an enabled text binding writes every frame, shown or not
+  local function StatusBarOnShow()
+    this.timer:Enable()
+    this.parent:RefreshPosition()
+  end
+
+  local function StatusBarOnHide()
+    this.timer:Disable()
+    this.parent:RefreshPosition()
+  end
+
+  local function CreateStatusBar(bar, parent)
+    local color = parent.color
+    local bordercolor = parent.bordercolor
+    local textcolor = parent.textcolor
+    local width, height = parent:GetSize()
+    local framename = "pf" .. parent.unit .. ( parent.type == "HARMFUL" and "Debuff" or "Buff" ) .. "Bar" .. bar
+
+    local font = parent.config.use_unitfonts == "1" and pfUI.font_unit or pfUI.font_default
+
+    local frame = _G[framename] or CreateFrame("Button", framename, parent)
+    frame:EnableMouse(1)
+    frame:Hide()
+    frame:SetPoint("BOTTOM", 0, (bar-1)*(height+2*border+1))
+    frame:SetSize(width, height)
+
+    frame.bar = CreateFrame("StatusBar", "pfBuffBar" .. bar, frame)
+    frame.bar:SetPoint("TOPLEFT", frame, "TOPLEFT", height+1, 0)
+    frame.bar:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
+    frame.bar:SetStatusBarTexture(pfUI.media["img:bar"])
+    frame.bar:SetStatusBarColor(color.r, color.g, color.b, color.a)
+
+    frame.text = frame.bar:CreateFontString("Status", "DIALOG", "GameFontNormal")
+    frame.text:ClearAllPoints()
+    frame.text:SetPoint("TOPLEFT", frame.bar, "TOPLEFT", 3, 0)
+    frame.text:SetPoint("BOTTOMRIGHT", frame.bar, "BOTTOMRIGHT", -3, 0)
+    frame.text:SetNonSpaceWrap(false)
+    frame.text:SetFontObject(GameFontWhite)
+    frame.text:SetFont(font, C.global.font_size)
+    frame.text:SetTextColor(textcolor.r,textcolor.g,textcolor.b,1)
+    frame.text:SetJustifyH("LEFT")
+
+    frame.time = frame.bar:CreateFontString("Status", "DIALOG", "GameFontNormal")
+    frame.time:ClearAllPoints()
+    frame.time:SetPoint("TOPLEFT", frame.bar, "TOPLEFT", 3, 0)
+    frame.time:SetPoint("BOTTOMRIGHT", frame.bar, "BOTTOMRIGHT", -3, 0)
+    frame.time:SetNonSpaceWrap(false)
+    frame.time:SetFontObject(GameFontWhite)
+    frame.time:SetFont(font, C.global.font_size)
+    frame.time:SetTextColor(1,1,1,1)
+    frame.time:SetJustifyH("RIGHT")
+
+    -- the bar drains and the time counts down from this, engine-side
+    frame.duration = C_DurationUtil.CreateDuration()
+    frame.bar:SetTimerDuration(frame.duration, Enum.StatusBarInterpolation.Immediate, Enum.StatusBarTimerDirection.RemainingTime)
+    frame.timer = C_DurationUtil.CreateDurationTextBinding()
+    frame.timer:SetFontString(frame.time)
+    frame.timer:SetFormatter(GetTimeFormatter())
+    frame.timer:SetDuration(frame.duration)
+    frame.timer:SetExpiredText("")
+    frame.timer:SetZeroDurationText("")
+
+    frame.icon = frame:CreateTexture(nil, "OVERLAY")
+    frame.icon:SetSize(height, height)
+    frame.icon:SetPoint("LEFT", frame, "LEFT", 0, 0)
+    frame.icon:SetTexCoord(.07,.93,.07,.93)
+
+    frame.stacks = frame.bar:CreateFontString("Status", "DIALOG", "GameFontWhite")
+    frame.stacks:SetFont(font, C.global.font_size, "OUTLINE")
+    frame.stacks:SetAllPoints(frame.icon)
+    frame.stacks:SetJustifyH("CENTER")
+    frame.stacks:SetJustifyV("CENTER")
+
+    frame.parent = parent
+    frame:SetScript("OnShow", StatusBarOnShow)
+    frame:SetScript("OnHide", StatusBarOnHide)
+
+    frame:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    frame:SetScript("OnClick", StatusBarOnClick)
+    frame:SetScript("OnEnter", StatusBarOnEnter)
+    frame:SetScript("OnLeave", StatusBarOnLeave)
+
+    CreateBackdrop(frame)
+    CreateBackdropShadow(frame)
+    if bordercolor.r ~= 0 and bordercolor.g ~= 0 and bordercolor.b ~= 0 and bordercolor.a ~= 0 then
+      frame.backdrop:SetBackdropBorderColor(bordercolor.r,bordercolor.g,bordercolor.b,1)
+    end
+
+    return frame
+  end
+
+  local function RefreshBuffBarFrame(frame)
+    -- reinitialize all active buffs
+    local selfdebuff = frame.config.selfdebuff == "1"
+    local filter = (selfdebuff and frame.type == "HARMFUL") and "HARMFUL|PLAYER" or frame.type
+
+    -- one GetAuraSlots enumeration per refresh instead of a by-index walk per
+    -- bar; the i-th slot is the i-th aura of the filtered list, so `i` stays
+    -- the index the tooltip / cancel handlers pass to the by-index API
+    ScanAuraSlots(frame.unit, filter, auraSlots, 32)
+
+    for i=1,32 do
+      local timeleft, texture, name, stacks, dtype = GetBuffData(frame.unit, auraSlots[i])
+      timeleft = timeleft or 0
+
+      if texture and name and name ~= "" and BuffIsVisible(frame.config, name) then
+        frame.buffs[i][1] = timeleft
+        frame.buffs[i][2] = i
+        frame.buffs[i][3] = name
+        frame.buffs[i][4] = texture
+        frame.buffs[i][5] = stacks
+        frame.buffs[i][6] = dtype
+      else
+        frame.buffs[i][1] = 0
+        frame.buffs[i][2] = nil
+        frame.buffs[i][3] = nil
+        frame.buffs[i][4] = nil
+        frame.buffs[i][5] = 0
+        frame.buffs[i][6] = nil
+      end
+    end
+
+    table.sort(frame.buffs, frame.buffcmp)
+
+    -- create a buff bar for each below threshold
+    local bar, crossing = 1, nil
+    for id, data in pairs(frame.buffs) do
+      if data[1] and ((data[1] ~= 0 and data[1] < frame.threshold) or frame.threshold == -1) -- timeleft checks
+        and data[3] and data[3] ~= "" -- buff has a name
+        and data[4] and data[4] ~= "" -- buff has a texture
+      then
+        -- No slot in uuid: slots shift when debuffs expire causing timer resets
+        local uuid = data[4] .. data[3] -- texture + name only
+
+        -- update bar data
+        frame.bars[bar] = frame.bars[bar] or CreateStatusBar(bar, frame)
+        frame.bars[bar].id = data[2]
+        frame.bars[bar].unit = frame.unit
+        frame.bars[bar].type = frame.type
+
+        -- update max duration the cached remaining values is less than
+        -- the real one, indicates a buff renewal
+        frame.durations[uuid] = frame.durations[uuid] or {}
+        if not frame.durations[uuid][1] or frame.durations[uuid][1] < data[1] then
+          frame.durations[uuid][2] = data[1] -- max
+        end
+        frame.durations[uuid][1] = data[1] -- current
+
+        -- cache max stacks for the buff
+        if not frame.charges[uuid] or frame.charges[uuid] < data[5] then
+          frame.charges[uuid] = data[5]
+        end
+
+        -- set name
+        if frame.bars[bar].cacheName ~= data[3] then
+          frame.bars[bar].cacheName = data[3]
+          frame.bars[bar].text:SetText(data[3])
+
+          -- calculate dynamic auto color
+          local r, g, b
+          if frame.type == "HARMFUL" then
+            -- official Blizzard dispel-type colors (matches unitframes/buff);
+            -- nil/unknown type falls back to the DEBUFF_TYPE_NONE colour
+            r, g, b = C_UnitAuras.GetAuraDispelTypeColor(data[6] or ""):GetRGBA()
+          else
+            r,g,b = str2rgb(data[3])
+          end
+
+          -- set auto background color
+          if frame.config.dtypebg == "1" then
+            frame.bars[bar].bar:SetStatusBarColor(r,g,b,1)
+          end
+
+          -- set auto border color
+          if frame.config.dtypeborder == "1" then
+            frame.bars[bar].backdrop:SetBackdropBorderColor(r,g,b,1)
+          end
+
+          -- set auto text color
+          if frame.config.dtypetext == "1" then
+            frame.bars[bar].text:SetTextColor(r,g,b,1)
+          end
+        end
+
+        -- set texture
+        if frame.bars[bar].cacheTexture ~= data[4] then
+          frame.bars[bar].cacheTexture = data[4]
+          frame.bars[bar].icon:SetTexture(data[4])
+        end
+
+        -- the bar spans the longest time left seen for this aura; one without
+        -- a time left (threshold -1) shows an empty bar and no time
+        if data[1] > 0 then
+          frame.bars[bar].duration:SetTimeFromEnd(GetTime() + data[1], frame.durations[uuid][2])
+        else
+          frame.bars[bar].duration:Reset()
+        end
+
+        -- set stacks
+        if data[5] > 1 then
+          local stacks_percentage = data[5] / (frame.charges[uuid] * .01)
+          local sr, sg, sb, sa
+          if stacks_percentage >= 90 then
+            sr, sg, sb, sa = .3, 1, .3, 1
+          elseif stacks_percentage >= 60 then
+            sr, sg, sb, sa = 1, 1, .3, 1
+          elseif stacks_percentage >= 0 then
+            sr, sg, sb, sa = 1, .3, .3, 1
+          end
+          if frame.config.colorstacks == "1" then
+            frame.bars[bar].stacks:SetText(rgbhex(sr,sg,sb) .. data[5])
+          else
+            frame.bars[bar].stacks:SetText(data[5])
+          end
+        else
+          frame.bars[bar].stacks:SetText("")
+        end
+
+        frame.bars[bar]:Show()
+        bar = bar + 1
+      elseif data[1] and data[1] > 0 and data[3] and data[4] and frame.threshold ~= -1 then
+        -- still above the threshold: its bar shows once it drops under
+        local wait = data[1] - frame.threshold
+        if not crossing or wait < crossing then crossing = wait end
+      end
+    end
+
+    -- hide remaining bars
+    for i = bar, table.getn(frame.bars) do
+      frame.bars[i]:Hide()
+    end
+
+    -- no event marks an aura's time left dropping under the threshold, so
+    -- wake when the next one does
+    if frame.crossing then frame.crossing:Cancel() end
+    frame.crossing = crossing and C_Timer.NewTimer(crossing + .1, frame.Refresh) or nil
+  end
+
+  local function RefreshPosition(self)
+    -- avoid position changes during unlock
+    if pfUI.unlock and pfUI.unlock:IsShown() then return end
+
+    if not pfUI_config["position"][self:GetName()] then
+      local anchor = GetTopAnchor(self.anchors)
+
+      if not self.lastanchor or self.lastanchor ~= anchor then
+        self:ClearAllPoints()
+        self:SetPoint("LEFT", self.anchors[1], "LEFT", 0, 0)
+        self:SetPoint("BOTTOM", anchor, "TOP", 0, border*2+1)
+        UpdateMovable(self, true)
+        self.lastanchor = anchor
+      end
+    end
+  end
+
+  -- every watch frame: one stacks on the bars of another, so all of them
+  -- re-anchor together
+  local watched = {}
+  local function RefreshPositions()
+    for _, frame in pairs(watched) do frame:RefreshPosition() end
+  end
+
+  -- the bars sit above their unit frame's aura rows, which move when the
+  -- rows lay out again
+  pfUI.events:RegisterCallback("unitframe:auras", function(_, unit)
+    if unit == pfUI.uf.player or unit == pfUI.uf.target then RefreshPositions() end
+  end, "buffwatch")
+
+  local function CreateBuffBarFrame(unit, type)
+    local framename = "pf" .. unit .. ( type == "HARMFUL" and "Debuff" or "Buff" ) .. "Bar"
+    local frame = _G[framename] or CreateFrame("Frame", framename, UIParent)
+
+    frame.unit = strlower(unit)
+    frame.type = type
+    frame.bars = { }
+    frame.durations = { }
+    frame.charges = { }
+    frame.buffs = { }
+    for i=1,32 do
+      frame.buffs[i] = { }
+    end
+
+    frame.RefreshPosition = RefreshPosition
+    frame.Refresh = function()
+      RefreshBuffBarFrame(frame)
+      RefreshPositions()
+    end
+
+    -- UNIT_AURA_DELTA reports refreshes and new durations as well, so the bars
+    -- follow the auras on events alone. A new target is another unit, whose
+    -- auras no delta describes.
+    frame:RegisterUnitEvent("UNIT_AURA_DELTA", frame.unit)
+    frame:RegisterEvent("PLAYER_ENTERING_WORLD")
+    if frame.unit == "target" then frame:RegisterEvent("PLAYER_TARGET_CHANGED") end
+    frame:SetScript("OnEvent", frame.Refresh)
+    table.insert(watched, frame)
+
+    -- the first read waits until the caller has configured the frame
+    RunNextFrame(frame.Refresh)
+
+    return frame
+  end
+
+  local function asc(a,b)
+    return a[1] > b[1]
+  end
+
+  local function desc(a,b)
+    return a[1] < b[1]
+  end
+
+  -- create player buffbars
+  if pfUI.uf.player and C.buffbar.pbuff.enable == "1" then
+    pfUI.uf.player.buffbar = CreateBuffBarFrame("Player", "HELPFUL")
+    local config = C.buffbar.pbuff
+
+    pfUI.uf.player.buffbar:SetWidth(config.width == "-1" and pfUI.uf.player:GetWidth() or config.width)
+    pfUI.uf.player.buffbar:SetHeight(config.height)
+    pfUI.uf.player.buffbar.threshold = tonumber(config.threshold)
+    pfUI.uf.player.buffbar.config = config
+    pfUI.uf.player.buffbar.buffcmp = config.sort == "asc" and asc or desc
+    pfUI.uf.player.buffbar.color = GetStringColorObject(config.color)
+    pfUI.uf.player.buffbar.bordercolor = GetStringColorObject(config.bordercolor)
+    pfUI.uf.player.buffbar.textcolor = GetStringColorObject(config.textcolor)
+    pfUI.uf.player.buffbar.anchors = {
+      pfUI.uf.player,
+      pfUI.uf.player and pfUI.uf.player.debuffs,
+      pfUI.uf.player and pfUI.uf.player.buffs
+    }
+
+    pfUI.uf.player.buffbar:SetPoint("LEFT", pfUI.uf.player, "LEFT", 0, 0)
+    pfUI.uf.player.buffbar:SetPoint("BOTTOM", pfUI.uf.player, "TOP", 0, border*2+1)
+    UpdateMovable(pfUI.uf.player.buffbar)
+  end
+
+  -- create player debuffbars
+  if pfUI.uf.player and C.buffbar.pdebuff.enable == "1" then
+    local config = C.buffbar.pdebuff
+
+    pfUI.uf.player.debuffbar = CreateBuffBarFrame("Player", "HARMFUL")
+    pfUI.uf.player.debuffbar:SetWidth(config.width == "-1" and pfUI.uf.player:GetWidth() or config.width)
+    pfUI.uf.player.debuffbar:SetHeight(config.height)
+    pfUI.uf.player.debuffbar.threshold = tonumber(config.threshold)
+    pfUI.uf.player.debuffbar.config = config
+    pfUI.uf.player.debuffbar.buffcmp = config.sort == "asc" and asc or desc
+    pfUI.uf.player.debuffbar.color = GetStringColorObject(config.color)
+    pfUI.uf.player.debuffbar.bordercolor = GetStringColorObject(config.bordercolor)
+    pfUI.uf.player.debuffbar.textcolor = GetStringColorObject(config.textcolor)
+    pfUI.uf.player.debuffbar.anchors = {
+      pfUI.uf.player,
+      pfUI.uf.player and pfUI.uf.player.buffbar and pfUI.uf.player.buffbar.bars,
+      pfUI.uf.player and pfUI.uf.player.debuffs,
+      pfUI.uf.player and pfUI.uf.player.buffs
+    }
+
+    pfUI.uf.player.debuffbar:SetPoint("LEFT", pfUI.uf.player, "LEFT", 0, 0)
+    pfUI.uf.player.debuffbar:SetPoint("BOTTOM", pfUI.uf.player, "TOP", 0, border*2+1)
+    UpdateMovable(pfUI.uf.player.debuffbar)
+  end
+
+  -- create target debuffbars
+  if pfUI.uf.target and C.buffbar.tdebuff.enable == "1" then
+    local config = C.buffbar.tdebuff
+
+    pfUI.uf.target.debuffbar = CreateBuffBarFrame("Target", "HARMFUL")
+    pfUI.uf.target.debuffbar:SetWidth(config.width == "-1" and pfUI.uf.target:GetWidth() or config.width)
+    pfUI.uf.target.debuffbar:SetHeight(config.height)
+    pfUI.uf.target.debuffbar.config = config
+    pfUI.uf.target.debuffbar.buffcmp = config.sort == "asc" and asc or desc
+    pfUI.uf.target.debuffbar.color = GetStringColorObject(config.color)
+    pfUI.uf.target.debuffbar.bordercolor = GetStringColorObject(config.bordercolor)
+    pfUI.uf.target.debuffbar.textcolor = GetStringColorObject(config.textcolor)
+    pfUI.uf.target.debuffbar.threshold = tonumber(config.threshold)
+    pfUI.uf.target.debuffbar.anchors = {
+      pfUI.uf.target,
+      pfUI.uf.target and pfUI.uf.target.buffbar and pfUI.uf.target.buffbar.bars,
+      pfUI.uf.target and pfUI.uf.target.debuffs,
+      pfUI.uf.target and pfUI.uf.target.buffs
+    }
+
+    pfUI.uf.target.debuffbar:SetPoint("LEFT", pfUI.uf.target, "LEFT", 0, 0)
+    pfUI.uf.target.debuffbar:SetPoint("BOTTOM", pfUI.uf.target, "TOP", 0, border*2+1)
+    UpdateMovable(pfUI.uf.target.debuffbar)
+  end
+end)

@@ -1,0 +1,96 @@
+pfUI:RegisterModule("focus", function ()
+  -- do not go further on disabled UFs
+  if C.unitframes.disable == "1" then return end
+
+  pfUI.uf.focus = pfUI.uf:CreateUnitFrame("Focus", nil, C.unitframes.focus)
+  pfUI.uf.focus:UpdateFrameSize()
+  pfUI.uf.focus:SetPoint("BOTTOMLEFT", UIParent, "BOTTOM", 220, 220)
+  UpdateMovable(pfUI.uf.focus)
+  pfUI.uf.focus:Hide()
+
+  pfUI.uf.focustarget = pfUI.uf:CreateUnitFrame("FocusTarget", nil, C.unitframes.focustarget)
+  pfUI.uf.focustarget:UpdateFrameSize()
+  pfUI.uf.focustarget:SetPoint("BOTTOMLEFT", pfUI.uf.focus, "TOP", 0, 10)
+  UpdateMovable(pfUI.uf.focustarget)
+  pfUI.uf.focustarget:Hide()
+
+  -- PLAYER_FOCUS_CHANGED drives immediate refresh on focus assign / clear.
+  -- Between events, ClassicAPI fires UNIT_* (health/mana/aura/...) with
+  -- arg1 == "focus", so the bars update event-driven like target.
+  -- focustarget is a chained unit like targettarget, but ClassicAPI fires its
+  -- UNIT_* as "focustarget", and UNIT_TARGET on "focus" follows the focus
+  -- retargeting. A new focus only needs its visibility re-checked, which
+  -- queues the full refresh when its target is a different unit.
+  pfUI.events:RegisterFrameEventAndCallback("PLAYER_FOCUS_CHANGED", function()
+    pfUI.uf:RefreshUnit(pfUI.uf.focus, "all")
+    pfUI.uf.focustarget:UpdateVisibility()
+  end)
+end)
+
+-- /focus and /clearfocus live in ClassicAPI's SlashCommandsRegistry now.
+-- `/focus Name` takes the nearest prefix match; /focusname tries the exact
+-- name first, so "Bob" still wins over a nearer "Bobby".
+
+pfUI.api.RegisterSlashCommand("PFFOCUSNAME", { '/focusname', '/pffocusname' }, function(msg)
+  if msg == "" then return end
+
+  local unit = UnitTokenFromName(msg, true) or UnitTokenFromName(msg)
+  if unit then
+    FocusUnit(unit)
+  end
+end, true)
+
+pfUI.api.RegisterSlashCommand("PFCASTFOCUS", { '/castfocus', '/pfcastfocus' }, function(msg)
+  local focusGUID = UnitGUID("focus")
+  if not focusGUID or focusGUID == "0x0000000000000000" then
+    UIErrorsFrame:AddMessage(SPELL_FAILED_BAD_TARGETS, 1, 0, 0)
+    return
+  end
+
+  local func = pfUI.api.TryMemoizedFuncLoadstringForSpellCasts(msg)
+
+  -- GUID-based cast (Nampower) - no target toggle needed
+  if not func then
+    CastSpellByName(msg, focusGUID)
+    return
+  end
+
+  -- Lua-function cast: short target swap via GUID
+  local prevGUID = UnitGUID("target")
+  local prevPlayer = UnitIsUnit("target", "player")
+
+  TargetUnit(focusGUID)
+  if UnitGUID("target") ~= focusGUID then
+    if prevGUID and prevGUID ~= "0x0000000000000000" then
+      TargetUnit(prevGUID)
+    elseif prevPlayer then
+      TargetUnit("player")
+    else
+      TargetLastTarget()
+    end
+    UIErrorsFrame:AddMessage(SPELL_FAILED_BAD_TARGETS, 1, 0, 0)
+    return
+  end
+
+  func()
+
+  if prevGUID and prevGUID ~= "0x0000000000000000" then
+    TargetUnit(prevGUID)
+  elseif prevPlayer then
+    TargetUnit("player")
+  else
+    TargetLastTarget()
+  end
+end, true)
+
+pfUI.api.RegisterSlashCommand("PFSWAPFOCUS", { '/swapfocus', '/pfswapfocus' }, function(msg)
+  local targetGUID = UnitGUID("target")
+  local oldFocusGUID = UnitGUID("focus")
+
+  if targetGUID and targetGUID ~= "0x0000000000000000" then
+    FocusUnit("target")
+    if oldFocusGUID and oldFocusGUID ~= "0x0000000000000000" then
+      TargetUnit(oldFocusGUID)
+    end
+  end
+end, true)

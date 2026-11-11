@@ -1,0 +1,182 @@
+pfUI:RegisterModule("afkcam", function ()
+  local social_chats = {
+    "CHAT_MSG_SAY",
+    "CHAT_MSG_WHISPER",
+    "CHAT_MSG_PARTY",
+    "CHAT_MSG_RAID",
+    "CHAT_MSG_RAID_LEADER",
+    "CHAT_MSG_RAID_WARNING",
+    "CHAT_MSG_GUILD",
+    "CHAT_MSG_OFFICER"
+  }
+
+  local afkcam = CreateFrame("Frame", "pfAFKCam", WorldFrame)
+  local overlay = CreateFrame("Button", "pfAFKCamOverlay", afkcam)
+  overlay.top = overlay:CreateTexture("pfAFKGradientTop", "BACKGROUND")
+  overlay.top:SetPoint("TOPLEFT", overlay, "TOPLEFT")
+  overlay.top:SetPoint("TOPRIGHT", overlay, "TOPRIGHT")
+  overlay.top:SetHeight(100)
+  overlay.top:SetColorTexture(1,1,1,1)
+  overlay.top:SetGradientAlpha("VERTICAL", 0,0,0,0,  0,0,0,1)
+
+  overlay.bottom = overlay:CreateTexture("pfAFKGradientTop", "BACKGROUND")
+  overlay.bottom:SetPoint("BOTTOMLEFT", overlay, "BOTTOMLEFT")
+  overlay.bottom:SetPoint("BOTTOMRIGHT", overlay, "BOTTOMRIGHT")
+  overlay.bottom:SetHeight(100)
+  overlay.bottom:SetColorTexture(1,1,1,1)
+  overlay.bottom:SetGradientAlpha("VERTICAL", 0,0,0,1,  0,0,0,0)
+
+  overlay:SetFrameStrata("DIALOG")
+  overlay:SetAllPoints(WorldFrame)
+
+  -- /afk toggles, so send it only while AFK is still set: once the client
+  -- or the server has cleared it, /afk would set it again
+  local function Wake()
+    if IsChatAFK() then SendChatMessage("", "AFK") end
+    afkcam:stop()
+  end
+  overlay:SetScript("OnMouseUp", Wake)
+  overlay:SetScript("OnShow", function()
+    this:EnableKeyboard(true)
+  end)
+  overlay:SetScript("OnHide", function()
+    this:EnableKeyboard(false)
+  end)
+  overlay:SetScript("OnKeyUp", Wake)
+  overlay:Hide()
+
+  local chat = CreateFrame("ScrollingMessageFrame", "pfAFKCamChat", overlay)
+  chat:EnableMouse(false)
+  chat:EnableMouseWheel(true)
+  chat:SetSize(500, 150)
+  chat:SetPoint("BOTTOMLEFT",overlay,"BOTTOMLEFT", 10, 10)
+  chat:SetTimeVisible(1800.0)
+  chat:SetMaxLines(500)
+  chat:SetFading(false)
+  chat:SetJustifyH("LEFT")
+  chat:SetFont(pfUI.font_default, C.global.font_size + 1, "OUTLINE")
+  chat:SetScript("OnEvent", function()
+    if not this:IsVisible() then return end
+    local info = _G.ChatTypeInfo[string.gsub(event,"CHAT_MSG_","")]
+    if not info then return end
+    -- the engine name-queries a chat sender before the event fires, so the
+    -- sender's GUID (arg12) always resolves
+    local _, class
+    if arg12 and arg12 ~= "" then _, class = GetPlayerInfoByGUID(arg12) end
+    local author, msg
+    if class and class ~= UNKNOWN then
+      local class_color = PFUI_CLASS_COLORS[class]:GenerateHexColorMarkup()
+      author = string.format("%s%s|r",class_color,arg2)
+    else
+      author = arg2
+    end
+    msg = string.format("%s|cffffffff:|r %s",author,arg1)
+    this:AddMessage(msg, info.r, info.g, info.b, 1.0)
+  end)
+  for _,ctype in ipairs(social_chats) do
+    chat:RegisterEvent(ctype)
+  end
+  chat:SetScript("OnMouseWheel",function()
+    this:ScrollByAmount(arg1)
+  end)
+  overlay.chat = chat
+
+  afkcam.overlay = overlay
+
+  local clock = CreateFrame("Frame", "pfAFKClock", overlay)
+  clock:SetAllPoints(overlay)
+  clock.time = clock:CreateFontString("Status", "OVERLAY")
+  clock.time:SetFont(pfUI.media["font:Hooge.ttf"], 32, "THICKOUTLINE")
+  clock.time:SetJustifyH("CENTER")
+  clock.time:SetPoint("TOP", 0, -10)
+  clock:SetScript("OnUpdate", function()
+    local fmt
+    if C.global.twentyfour == "0" then
+      fmt = "%I|cff33ffcc:|r%M %p"
+    else
+      fmt = "%H|cff33ffcc:|r%M"
+    end
+    local time = C.global.servertime == "1" and date(fmt, GetServerEpoch()) or date(fmt)
+    clock.time:SetText(time)
+  end)
+
+  function afkcam:start()
+    if afkcam._spinning then return end
+    afkcam._speed = GetCVar("cameraYawMoveSpeed")
+    afkcam._ownname = GetCVar("UnitNameOwn")
+    afkcam._ui_visible = UIParent:IsVisible()
+    SaveView(4)
+    if afkcam._ui_visible then
+      CloseAllWindows()
+      UIParent:Hide()
+    end
+    if afkcam._ownname == "0" then
+      SetCVar("UnitNameOwn", "1")
+    end
+    SetCVar("cameraYawMoveSpeed","8")
+    MoveViewRightStart()
+    afkcam.overlay:Show()
+    afkcam.overlay.chat:Clear()
+    afkcam._spinning = true
+  end
+
+  function afkcam:stop()
+    MoveViewRightStop()
+    SetCVar("cameraYawMoveSpeed",afkcam._speed)
+    SetCVar("UnitNameOwn", afkcam._ownname)
+    SetView(4)
+
+    SetCVar("cameraCustomViewSmoothing", "1")
+
+    if not UIParent:IsVisible() and afkcam._ui_visible then
+      UIParent:Show()
+    end
+    if pfUI.uf.player then pfUI.uf:RefreshUnit(pfUI.uf.player, "all") end
+    afkcam.overlay:Hide()
+    afkcam._spinning = false
+  end
+
+  local delay = CreateFrame("Frame")
+  delay:Hide()
+
+  delay:RegisterEvent("AUCTION_ITEM_LIST_UPDATE")
+  delay:SetScript("OnEvent", function()
+    this.delay = GetTime() + 10
+  end)
+
+  delay:SetScript("OnUpdate", function()
+    if ( this.tick or 0) > GetTime() then return else this.tick = GetTime() + 1 end
+
+    local cast = C_Spell.UnitCastingInfo("player") or C_Spell.UnitChannelInfo("player")
+    if not this.delay then this.delay = 0 end
+
+    if cast then
+      this.delay = GetTime() + 10
+    end
+
+    if this.delay < GetTime() then
+      afkcam:start()
+      this:Hide()
+    end
+  end)
+
+  afkcam:SetScript("OnEvent", function()
+    if event == "PLAYER_FLAGS_CHANGED" then
+      if UnitIsAFK('player') then
+        delay:Show()
+      else
+        delay:Hide()
+        if this._spinning then this:stop() end
+      end
+    else
+      if this._spinning then
+        delay:Hide()
+        this:stop()
+      end
+    end
+  end)
+
+  afkcam:RegisterEvent("PLAYER_FLAGS_CHANGED")
+  afkcam:RegisterEvent("PLAYER_REGEN_DISABLED")
+  afkcam:RegisterEvent("PLAYER_LEAVING_WORLD") -- reseting cvars on PLAYER_LOGOUT crashes the client ¯\_(ツ)_/¯
+end)

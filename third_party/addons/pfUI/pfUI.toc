@@ -1,0 +1,16 @@
+## Interface: 11200
+## Title: |cff33ffccpf|cffffffffUI
+## Author: Shagu - modified by me0wg4ming & brues
+## Notes: A complete user interface replacement.
+## Notes-ruRU: Полная замена пользовательского интерфейса.
+## Version: @project-version@
+## SavedVariables: pfUI_profiles, pfUI_addon_profiles, pfUI_cache, pfUI_throttle, pfUI_combatlog
+## SavedVariablesPerCharacter: pfUI_config, pfUI_init, pfUI_playerDB, pfUI_eqmgr
+## X-Website: https://github.com/brues-code/pfUI
+
+# ClassicAPI-less fallback. ClassicAPI redirects this read to pfUI_Turtle.toc
+# (Turtle clients) or pfUI_ClassicAPI.toc (everything else), so the client only
+# ever reaches THIS file when the DLL is missing. Load the notice and nothing
+# else.
+
+API_Check.lua

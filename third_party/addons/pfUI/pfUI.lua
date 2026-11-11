@@ -1,0 +1,520 @@
+SLASH_RELOAD1 = '/rl'
+function SlashCmdList.RELOAD(msg, editbox)
+  ReloadUI()
+end
+
+local addonName = ...
+
+SLASH_PFUI1 = '/pfui'
+function SlashCmdList.PFUI(msg, editbox)
+  pfUI.gui:SetShown(not pfUI.gui:IsShown())
+end
+
+SLASH_GM1, SLASH_GM2 = '/gm', '/support'
+function SlashCmdList.GM(msg, editbox)
+  ToggleHelpFrame(1)
+end
+
+local pfUI = CreateFrame("Frame", addonName, UIParent)
+pfUI:RegisterEvent("ADDON_LOADED")
+
+-- setup bootvar
+pfUI.bootup = true
+
+pfUI_playerDB = pfUI_playerDB or {}
+pfUI_config = pfUI_config or {}
+pfUI_init = pfUI_init or {}
+pfUI_profiles = pfUI_profiles or {}
+pfUI_addon_profiles = pfUI_addon_profiles or {}
+pfUI_cache = pfUI_cache or {}
+pfUI_throttle = pfUI_throttle or {}
+
+-- localization
+pfUI_locale = {}
+pfUI_translation = {}
+
+-- initialize default variables
+pfUI.cache = {}
+pfUI.module = {}
+pfUI.modules = {}
+pfUI.skin = {}
+pfUI.skins = {}
+pfUI.environment = {}
+pfUI.movables = {}
+pfUI.version = {}
+pfUI.env = {}
+
+-- Capability flag: this fork's pfActionBar buttons correctly handle the modern
+-- HookScript widget method, so ClassicAPI's AddOnCompat shim must NOT shadow
+-- HookScript during actionbar load (older forks branch on `if button.HookScript`
+-- and take a modern path they were never written for). This describes behavior,
+-- not identity: a fork that keeps the HookScript-correct actionbar code keeps
+-- the flag; one that lacks it should drop the flag and get the safe fallback.
+pfUI.handlesHookScript = true
+
+-- pfUI's own EventRegistry: carries pfUI's custom events ("bag:closed",
+-- "config:changed", ...) and game events alike. Register game events with
+-- RegisterFrameEventAndCallback instead of creating a frame per listener.
+pfUI.events = CreateFromMixins(EventRegistry)
+pfUI.events:OnLoad()
+
+-- check if macro addons are loaded (disables macrotweak/macroscan)
+function pfUI:MacroAddonsLoaded()
+  return IsAddOnLoaded("Supermacro") or IsAddOnLoaded("SuperCleveRoidMacros") or IsAddOnLoaded("UltimaMacros")
+end
+
+pfUI.name = addonName
+pfUI.path = "Interface\\AddOns\\" .. addonName
+
+-- handle/convert media dir paths
+pfUI.media = setmetatable({}, { __index = function(tab,key)
+  local value = tostring(key)
+  if value:find("img:") then
+    value = string.gsub(value, "img:", pfUI.path .. "\\img\\")
+  elseif value:find("font:") then
+    value = string.gsub(value, "font:", pfUI.path .. "\\fonts\\")
+  else
+    value = string.gsub(value, "Interface\\AddOns\\pfUI\\", pfUI.path .. "\\")
+  end
+  rawset(tab,key,value)
+  return value
+end})
+
+pfUI.client = INTERFACE_VERSION
+
+-- setup pfUI namespace
+setmetatable(pfUI.env, {__index = getfenv(0)})
+pfUI.env._G = getfenv(0)
+
+-- every pfUI.api entry is also a global of the pfUI environment
+pfUI.api = setmetatable({}, {__newindex = function(api, key, value)
+  rawset(api, key, value)
+  pfUI.env[key] = value
+end})
+
+PFUI_CLASS_COLORS = setmetatable({
+  WARRIOR = { r = 0.78, g = 0.61, b = 0.43 },
+  MAGE    = { r = 0.25, g = 0.78, b = 0.92 },
+  ROGUE   = { r = 1,    g = 0.96, b = 0.41 },
+  DRUID   = { r = 1,    g = 0.49, b = 0.04 },
+  HUNTER  = { r = 0.67, g = 0.83, b = 0.45 },
+  SHAMAN  = { r = 0,    g = 0.44, b = 0.87 },
+  PRIEST  = { r = 1,    g = 1,    b = 1    },
+  WARLOCK = { r = 0.53, g = 0.53, b = 0.93 },
+  PALADIN = { r = 0.96, g = 0.55, b = 0.73 },
+}, { __index = function(t,k)
+  local unknownColor = CreateColor(0.6, 0.6, 0.6, 1)
+  unknownColor.colorStr = unknownColor:GenerateHexColor()
+  return unknownColor
+end})
+
+for _, classColor in pairs(PFUI_CLASS_COLORS) do
+  Mixin(classColor, ColorMixin)
+  classColor.a = 1
+  classColor.colorStr = classColor:GenerateHexColor()
+end
+
+function pfUI:UpdateFonts()
+  -- abort when config is not ready yet
+  if not pfUI_config or not pfUI_config.global then return end
+
+  -- load font configuration
+  local default, tooltip, unit, unit_name, combat
+  if pfUI_config.global.force_region == "1" and GetLocale() == "zhCN" then
+    -- force locale compatible fonts (zhCN 1.12)
+    default = "Fonts\\FZXHLJW.TTF"
+    tooltip = "Fonts\\FZXHLJW.TTF"
+    combat = "Fonts\\FZXHLJW.TTF"
+    unit = "Fonts\\FZXHLJW.TTF"
+    unit_name = "Fonts\\FZXHLJW.TTF"
+  elseif pfUI_config.global.force_region == "1" and GetLocale() == "zhTW" then
+    -- force locale compatible fonts (zhTW 1.12)
+    default = "Fonts\\FZXHLJW.ttf"
+    tooltip = "Fonts\\FZXHLJW.ttf"
+    combat = "Fonts\\FZXHLJW.ttf"
+    unit = "Fonts\\FZXHLJW.ttf"
+    unit_name = "Fonts\\FZXHLJW.ttf"
+  elseif pfUI_config.global.force_region == "1" and GetLocale() == "koKR" then
+    -- force locale compatible fonts (koKR)
+    default = "Fonts\\2002.TTF"
+    tooltip = "Fonts\\2002.TTF"
+    combat = "Fonts\\2002.TTF"
+    unit = "Fonts\\2002.TTF"
+    unit_name = "Fonts\\2002.TTF"
+  else
+    -- use default entries
+    default = pfUI.media[pfUI_config.global.font_default]
+    tooltip = pfUI.media[pfUI_config.tooltip.font_tooltip]
+    combat = pfUI.media[pfUI_config.global.font_combat]
+    unit = pfUI.media[pfUI_config.global.font_unit]
+    unit_name = pfUI.media[pfUI_config.global.font_unit_name]
+  end
+
+  -- write setting shortcuts
+  pfUI.font_default = default
+  pfUI.font_combat = combat
+  pfUI.font_unit = unit
+  pfUI.font_unit_name = unit_name
+
+  -- skip setting fonts, keep blizzard defaults
+  if pfUI_config.global.font_blizzard == "1" then
+    return
+  end
+
+  -- set game constants
+  STANDARD_TEXT_FONT = default
+  DAMAGE_TEXT_FONT   = combat
+  NAMEPLATE_FONT     = default
+  UNIT_NAME_FONT     = unit_name
+
+  -- If the Invisible font is selected, suppress all combat text entirely
+  if string.find(combat or "", "AdobeBlank") then
+    SHOW_COMBAT_TEXT = "0"
+  end
+
+  -- set dropdown font to default size
+  UIDROPDOWNMENU_DEFAULT_TEXT_HEIGHT = 11
+
+  -- change default game font objects
+  SystemFont:SetFont(default, 15)
+  GameFontNormal:SetFont(default, 12)
+  GameFontBlack:SetFont(default, 12)
+  GameFontNormalSmall:SetFont(default, 11)
+  GameFontNormalLarge:SetFont(default, 16)
+  GameFontNormalHuge:SetFont(default, 20)
+  NumberFontNormal:SetFont(default, 14, "OUTLINE")
+  NumberFontNormalSmall:SetFont(default, 14, "OUTLINE")
+  NumberFontNormalLarge:SetFont(default, 16, "OUTLINE")
+  NumberFontNormalHuge:SetFont(default, 30, "OUTLINE")
+  QuestTitleFont:SetFont(default, 18)
+  QuestFont:SetFont(default, 13)
+  QuestFontHighlight:SetFont(default, 14)
+  ItemTextFontNormal:SetFont(default, 15)
+  MailTextFontNormal:SetFont(default, 15)
+  SubSpellFont:SetFont(default, 12)
+  DialogButtonNormalText:SetFont(default, 16)
+  ZoneTextFont:SetFont(default, 34, "OUTLINE")
+  SubZoneTextFont:SetFont(default, 24, "OUTLINE")
+  GameTooltipText:SetFont(tooltip, pfUI_config.tooltip.font_tooltip_size)
+  GameTooltipTextSmall:SetFont(tooltip, pfUI_config.tooltip.font_tooltip_size)
+  GameTooltipHeaderText:SetFont(tooltip, pfUI_config.tooltip.font_tooltip_size + 1)
+  WorldMapTextFont:SetFont(default, 102, "THICK")
+  InvoiceTextFontNormal:SetFont(default, 12)
+  InvoiceTextFontSmall:SetFont(default, 12)
+  CombatTextFont:SetFont(combat, 25)
+  ChatFontNormal:SetFont(default, 13, pfUI_config.chat.text.outline == "1" and "OUTLINE")
+
+  if TextStatusBarTextSmall then -- does not exist in koKR
+    TextStatusBarTextSmall:SetFont(default, 12, "NORMAL")
+  end
+end
+
+-- the locale table is built on the first call, which comes from the
+-- api files, after the locale files have loaded
+function pfUI:GetEnvironment()
+  if not pfUI.env.L then
+    local L = pfUI_locale[GetLocale()] or pfUI_locale["enUS"]
+    L["class"] = L["class"] or tInvert(LOCALIZED_CLASS_NAMES_MALE)
+    if not L["race"] then
+      L["race"] = {}
+      local i = 1
+      local raceInfo = C_CreatureInfo.GetRaceInfo(i)
+      while raceInfo ~= nil do
+        L["race"][raceInfo.clientFileString] = {
+          raceName = raceInfo.raceName,
+          raceID = raceInfo.raceID,
+          faction = C_CreatureInfo.GetFactionInfo(i).groupTag,
+        }
+        i = i + 1
+        raceInfo = C_CreatureInfo.GetRaceInfo(i)
+      end
+    end
+    pfUI.env.L = L
+  end
+
+  return pfUI.env
+end
+
+-- C and T read the saved config, so they are set once it has loaded
+local function SetupConfigEnvironment()
+  local language = pfUI_config.global.language
+  local lang = pfUI_translation[language] and language or GetLocale()
+  pfUI.env.T = setmetatable(pfUI_translation[lang] or {}, { __index = function(tab,key)
+    local value = tostring(key)
+    rawset(tab,key,value)
+    return value
+  end})
+  pfUI.env.C = pfUI_config
+end
+
+-- [ New Module Registry ]
+-- Tracks modules introduced after initial release so existing users get
+-- a one-time prompt asking if they want to enable them.
+pfUI.new_modules = {}
+
+function pfUI:RegisterNewModule(name, label, class)
+  table.insert(pfUI.new_modules, { name = name, label = label, class = class })
+end
+
+function pfUI:CheckNewModules()
+  pfUI_init.seen_modules = pfUI_init.seen_modules or {}
+
+  local pending = 0
+  local playerClass = UnitClassBase("player")
+  for _, entry in pairs(pfUI.new_modules) do
+    if not pfUI_init.seen_modules[entry.name] and pfUI_init["finalize"] then
+      if not entry.class or entry.class == playerClass then
+        pending = pending + 1
+      end
+    end
+  end
+
+  if pending == 0 then return end
+
+  local remaining = pending
+  local needsReload = false
+
+  local function onAnswer()
+    remaining = remaining - 1
+    if remaining <= 0 and needsReload then
+      ReloadUI()
+    end
+  end
+
+  for _, entry in pairs(pfUI.new_modules) do
+    local name = entry.name
+    if not pfUI_init.seen_modules[name] then
+      -- Skip modules restricted to a different class
+      if entry.class and entry.class ~= playerClass then
+        -- don't mark as seen - player might have a druid alt later
+      else
+      pfUI_init.seen_modules[name] = true
+
+      -- Only prompt existing users (firstrun wizard already ran)
+      if pfUI_init["finalize"] then
+        StaticPopupDialogs["PFUI_NEW_MODULE_" .. strupper(name)] = {
+          text = "|cff33ffccpfUI|r: New module available!\n\n|cffffffffDo you want to enable |cff33ffcc" .. (entry.label or name) .. "|r|cffffffff?\n\nYou can always change this later in the pfUI settings.|r",
+          button1 = "Yes",
+          button2 = "No",
+          OnAccept = function()
+            pfUI_config["disabled"] = pfUI_config["disabled"] or {}
+            pfUI_config["disabled"][name] = nil
+            onAnswer()
+          end,
+          OnCancel = function()
+            pfUI_config["disabled"] = pfUI_config["disabled"] or {}
+            pfUI_config["disabled"][name] = "1"
+            needsReload = true
+            onAnswer()
+          end,
+          timeout = 0,
+          whileDead = true,
+          hideOnEscape = false,
+        }
+        StaticPopup_Show("PFUI_NEW_MODULE_" .. strupper(name))
+      end
+      end -- else (class match)
+    end
+  end
+end
+
+local function BackwardsCompatRegister(func, arg3)
+  if arg3 and type(func) == "string" and type(arg3) == "function" and func:find("vanilla") then
+    return arg3
+  end
+  return func
+end
+
+function pfUI:RegisterModule(name, func, arg3)
+  if pfUI.module[name] then return end
+  func = BackwardsCompatRegister(func, arg3)
+  pfUI.module[name] = func
+  table.insert(pfUI.modules, name)
+  if not pfUI.bootup then
+    pfUI:LoadModule(name)
+  end
+end
+
+function pfUI:RegisterSkin(name, func, arg3)
+  if pfUI.skin[name] then return end
+  func = BackwardsCompatRegister(func, arg3)
+  pfUI.skin[name] = func
+  table.insert(pfUI.skins, name)
+  if not pfUI.bootup then
+    pfUI:LoadSkin(name)
+  end
+end
+
+-- an error in one module or skin goes to the error handler without
+-- stopping the ones that load after it
+function pfUI:LoadModule(m)
+  setfenv(pfUI.module[m], pfUI:GetEnvironment())
+  securecallfunction(pfUI.module[m])
+end
+
+function pfUI:LoadSkin(s)
+  setfenv(pfUI.skin[s], pfUI:GetEnvironment())
+  securecallfunction(pfUI.skin[s])
+end
+
+pfUI:SetScript("OnEvent", function()
+
+  -- make sure to initialize and set our fonts
+  -- each time an addon got loaded but only
+  -- when the config is already accessible
+  if not pfUI.bootup then
+    pfUI:UpdateFonts()
+  end
+
+  if arg1 == pfUI.name then
+    -- read pfUI version from .toc file. Source/dev installs leave Version as
+    -- "@project-version@" until release tooling substitutes it — mark those
+    -- explicitly as "dev" instead of pretending they're a real numbered build.
+    local raw = tostring(GetAddOnMetadata(pfUI.name, "Version"))
+    if raw:find("@") then
+      pfUI.version.major, pfUI.version.minor, pfUI.version.fix = 0, 0, 0
+      pfUI.version.string = "dev"
+    else
+      local major, minor, fix = pfUI.api.strsplit(".", (string.gsub(raw, "^[vV]", "")))
+      pfUI.version.major = tonumber(major) or 0
+      pfUI.version.minor = tonumber(minor) or 0
+      pfUI.version.fix   = tonumber(fix)   or 0
+      pfUI.version.string = pfUI.version.major .. "." .. pfUI.version.minor .. "." .. pfUI.version.fix
+    end
+
+    -- use "Modern" as default profile on a fresh install
+    if TableIsEmpty(pfUI_init) and TableIsEmpty(pfUI_config) then
+      pfUI_config = pfUI.api.CopyTable(pfUI_profiles["Modern"]) or {}
+    end
+
+    pfUI:LoadConfig()
+    pfUI:MigrateConfig()
+    SetupConfigEnvironment()
+    pfUI:UpdateFonts()
+
+    -- scale UIParent before the modules size their borders from it
+    pfUI.api.UpdateUIScale()
+    pfUI.events:RegisterFrameEventAndCallback("UI_SCALE_CHANGED", pfUI.api.UpdateUIScale)
+
+    -- load modules
+    for _, m in pairs(this.modules) do
+      if not ( pfUI_config["disabled"] and pfUI_config["disabled"][m]  == "1" ) then
+        pfUI:LoadModule(m)
+      end
+    end
+
+    -- load skins
+    for _, s in pairs(this.skins) do
+      if not ( pfUI_config["disabled"] and pfUI_config["disabled"]["skin_" .. s]  == "1" ) then
+        pfUI:LoadSkin(s)
+      end
+    end
+
+    pfUI.bootup = nil
+
+    -- Prompt existing users about newly introduced modules
+    pfUI:CheckNewModules()
+  end
+end)
+
+pfUI.backdrop = {
+  bgFile = "Interface\\BUTTONS\\WHITE8X8", tile = false, tileSize = 0,
+  edgeFile = "Interface\\BUTTONS\\WHITE8X8", edgeSize = 1,
+  insets = {left = -1, right = -1, top = -1, bottom = -1},
+}
+pfUI.backdrop_no_top = pfUI.backdrop
+
+pfUI.backdrop_thin = {
+  bgFile = "Interface\\BUTTONS\\WHITE8X8", tile = false, tileSize = 0,
+  edgeFile = "Interface\\BUTTONS\\WHITE8X8", edgeSize = 1,
+  insets = {left = 0, right = 0, top = 0, bottom = 0},
+}
+
+pfUI.backdrop_hover = {
+  edgeFile = "Interface\\BUTTONS\\WHITE8X8", edgeSize = 24,
+  insets = {left = -1, right = -1, top = -1, bottom = -1},
+}
+
+pfUI.backdrop_shadow = {
+  edgeFile = pfUI.media["img:glow2"], edgeSize = 8,
+  insets = {left = 0, right = 0, top = 0, bottom = 0},
+}
+
+pfUI.backdrop_blizz_bg = {
+  bgFile =  "Interface\\BUTTONS\\WHITE8X8", tile = true, tileSize = 8,
+  insets = { left = 3, right = 3, top = 3, bottom = 3 }
+}
+
+pfUI.backdrop_blizz_border = {
+  edgeFile = pfUI.media["img:border_blizz"], edgeSize = 6,
+  insets = { left = 3, right = 3, top = 3, bottom = 3 }
+}
+
+pfUI.backdrop_blizz_full = {
+  bgFile =  "Interface\\BUTTONS\\WHITE8X8", tile = true, tileSize = 8,
+  edgeFile = pfUI.media["img:border_blizz"], edgeSize = 6,
+  insets = { left = 3, right = 3, top = 3, bottom = 3 }
+}
+
+message = function(msg)
+  DEFAULT_CHAT_FRAME:AddMessage("|cffcccc33INFO: |cffffff55" .. ( msg or "nil" ))
+end
+print = print or message
+
+-- Errors print to chat: pfUI's own always, other addons' when the errors
+-- option is on. In debug mode the stack follows, starting at the code that
+-- raised the error rather than at this handler.
+seterrorhandler(function(msg)
+  msg = tostring(msg)
+  if PF_DEBUG_MODE then
+    local height = GetErrorCallstackHeight()
+    message(height and debugstack(GetCallstackHeight() - height + 1) or debugstack(2))
+  end
+  if string.find(msg, "AddOns\\pfUI") or not pfUI_config
+  or (pfUI_config.global and pfUI_config.global.errors == "1") then
+    DEFAULT_CHAT_FRAME:AddMessage("|cffcc3333ERROR: |cffff5555" .. msg)
+  end
+end)
+
+function pfUI.SetupCVars()
+  ClearTutorials()
+  TutorialFrame_HideAllAlerts()
+
+  ConsoleExec("CameraDistanceMaxFactor 5")
+
+  SetCVar("autoSelfCast", "1")
+  SetCVar("profanityFilter", "0")
+  SetCVar("countdownForCooldowns", "1")
+
+  MultiActionBar_ShowAllGrids()
+  ALWAYS_SHOW_MULTIBARS = "1"
+
+  SHOW_BUFF_DURATIONS = "1"
+  QUEST_FADING_DISABLE = "1"
+  NAMEPLATES_ON = "1"
+  SIMPLE_CHAT = "0"
+
+  -- Only force combat text CVars when not using the Invisible font.
+  -- If AdobeBlank is selected, the player wants no combat text -- respect that.
+  local isInvisible = pfUI_config.global.font_combat and
+    string.find(pfUI_config.global.font_combat, "AdobeBlank")
+  if not isInvisible then
+    SHOW_COMBAT_TEXT = "1"
+    COMBAT_TEXT_SHOW_LOW_HEALTH_MANA = "1"
+    COMBAT_TEXT_SHOW_AURAS = "1"
+    COMBAT_TEXT_SHOW_AURA_FADE = "1"
+    COMBAT_TEXT_SHOW_COMBAT_STATE = "1"
+    COMBAT_TEXT_SHOW_DODGE_PARRY_MISS = "1"
+    COMBAT_TEXT_SHOW_RESISTANCES = "1"
+    COMBAT_TEXT_SHOW_REPUTATION = "1"
+    COMBAT_TEXT_SHOW_REACTIVES = "1"
+    COMBAT_TEXT_SHOW_FRIENDLY_NAMES = "1"
+    COMBAT_TEXT_SHOW_COMBO_POINTS = "1"
+    COMBAT_TEXT_SHOW_MANA = "1"
+    COMBAT_TEXT_FLOAT_MODE = "1"
+    COMBAT_TEXT_SHOW_HONOR_GAINED = "1"
+  end
+  UIParentLoadAddOn("Blizzard_CombatText")
+end
+
+_G.PLAYER_BUFF_START_ID = -1

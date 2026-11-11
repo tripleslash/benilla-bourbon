@@ -390,9 +390,13 @@ fn discover(flavor: UiFlavor) -> Vec<Addon> {
 
 /// The addons benilla bundles and the flavor each is offered in, `None` for both: pfQuest's
 /// Turtle WoW database names Turtle's own quests, zones and NPCs and means nothing on a 1.12 realm.
-const BUNDLED_ADDONS: [(&str, Option<UiFlavor>); 2] = [
+/// pfUI (brues-code's ClassicAPI build) loads through its flavor TOC, which only a `pfui` build
+/// reads, and is offered on Turtle alone, as its Turtle TOC is the one this client carries.
+const BUNDLED_ADDONS: &[(&str, Option<UiFlavor>)] = &[
     ("pfQuest", None),
     ("pfQuest-turtle", Some(UiFlavor::Turtle)),
+    #[cfg(feature = "pfui")]
+    ("pfUI", Some(UiFlavor::Turtle)),
 ];
 
 /// The bundled addons `flavor` offers, from what the bundle actually holds. Deviation: each is off
@@ -418,13 +422,20 @@ fn bundled_addons_in(
         .filter(|(_, only)| only.is_none_or(|f| f == flavor))
         .filter_map(|(name, _)| {
             let folder = folders.iter().find(|f| f.eq_ignore_ascii_case(name))?;
-            let bytes = read(&format!("{ADDONS_PREFIX}{folder}/{folder}.toc"))?;
+            let prefix = format!("{ADDONS_PREFIX}{folder}/");
+            // A ClassicAPI client's flavor TOC wins, as for a folder addon.
+            #[cfg(feature = "pfui")]
+            let text = crate::pfui::toc::manifest_read(&prefix, folder, &read);
+            #[cfg(not(feature = "pfui"))]
+            let text: Option<String> = None;
+            let text = match text {
+                Some(text) => text,
+                None => benilla_ui::source::decode(&read(&format!("{prefix}{folder}.toc"))?)
+                    .into_owned(),
+            };
             // Opt-in: a last `## DefaultState` line, which the reader lets win over the file's
             // own (`Toc::default_state`).
-            let toc = Toc::parse(&format!(
-                "{}\n## DefaultState: disabled\n",
-                benilla_ui::source::decode(&bytes)
-            ));
+            let toc = Toc::parse(&format!("{text}\n## DefaultState: disabled\n"));
             Some(Addon {
                 name: folder.clone(),
                 toc,
@@ -2803,7 +2814,9 @@ mod tests {
         let _ = load_third_party(&mut script, None, &[], true);
 
         assert_eq!(
-            script.eval::<bool>("return IsAddOnLoaded('Base') == 1").ok(),
+            script
+                .eval::<bool>("return IsAddOnLoaded('Base') == 1")
+                .ok(),
             Some(true),
             "a startup-loaded addon reads as loaded, else a dependent answers DEP_NOT_DEMAND_LOADED"
         );

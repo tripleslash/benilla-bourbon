@@ -1,0 +1,26 @@
+pfUI:RegisterSkin("Battlefield Minimap", function ()
+  local rawborder, border = GetBorderSize()
+
+  HookAddon("Blizzard_BattlefieldMinimap", function()
+    StripTextures(BattlefieldMinimap)
+    CreateBackdrop(BattlefieldMinimap, nil, nil, 0)
+    CreateBackdropShadow(BattlefieldMinimap)
+
+    BattlefieldMinimap:SetSize(220, 146)
+
+    SkinCloseButton(BattlefieldMinimapCloseButton, BattlefieldMinimap, 0, 0)
+
+    SkinTab(BattlefieldMinimapTab)
+    BattlefieldMinimapTabText:ClearAllPoints()
+    BattlefieldMinimapTabText:SetPoint("CENTER", 0, 0)
+
+    BattlefieldMinimap:HookScript("OnShow", function()
+      BattlefieldMinimapTab:Hide()
+    end)
+
+    hooksecurefunc("BattlefieldMinimap_ShowOpacity", function()
+      OpacityFrame:ClearAllPoints()
+      OpacityFrame:SetPoint("TOPRIGHT", "BattlefieldMinimap", "TOPLEFT", -2*border, 0)
+    end)
+  end)
+end)

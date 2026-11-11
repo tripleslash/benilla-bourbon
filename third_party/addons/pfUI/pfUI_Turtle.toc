@@ -1,0 +1,40 @@
+## Interface: 11200
+## Title: |cff33ffccpf|cffffffffUI
+## Author: Shagu - modified by me0wg4ming & brues
+## Notes: A complete user interface replacement.
+## Notes-ruRU: Полная замена пользовательского интерфейса.
+## Version: @project-version@
+## SavedVariables: pfUI_profiles, pfUI_addon_profiles, pfUI_cache, pfUI_throttle, pfUI_combatlog
+## SavedVariablesPerCharacter: pfUI_config, pfUI_init, pfUI_playerDB, pfUI_eqmgr
+## X-Website: https://github.com/brues-code/pfUI
+
+# Selected by ClassicAPI on Turtle WoW, where it wins over pfUI_ClassicAPI.toc.
+# Same list with init\stock.xml swapped for init\turtle.xml: the modules, skins
+# and vendor prices that only mean anything on a Turtle client.
+
+API_Check.lua
+
+pfUI.lua
+
+# Client strings: enUS always (the fallback), plus the client's own locale.
+env\locales_enUS.lua
+env\combatlog_enUS.lua
+env\locales_koKR.lua      [AllowLoadTextLocale koKR]
+env\combatlog_koKR.lua    [AllowLoadTextLocale koKR]
+env\locales_frFR.lua      [AllowLoadTextLocale frFR]
+env\combatlog_frFR.lua    [AllowLoadTextLocale frFR]
+env\locales_deDE.lua      [AllowLoadTextLocale deDE]
+env\combatlog_deDE.lua    [AllowLoadTextLocale deDE]
+env\locales_zhCN.lua      [AllowLoadTextLocale zhCN]
+env\combatlog_zhCN.lua    [AllowLoadTextLocale zhCN]
+env\locales_esES.lua      [AllowLoadTextLocale esES]
+env\combatlog_esES.lua    [AllowLoadTextLocale esES]
+env\locales_ruRU.lua      [AllowLoadTextLocale ruRU]
+env\combatlog_ruRU.lua    [AllowLoadTextLocale ruRU]
+
+init\env.xml
+init\api.xml
+init\libs.xml
+init\skins.xml
+init\modules.xml
+init\turtle.xml

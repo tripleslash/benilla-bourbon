@@ -1,0 +1,147 @@
+pfUI:RegisterModule("tracking", function ()
+
+  _G.MiniMapTrackingFrame:UnregisterAllEvents()
+  _G.MiniMapTrackingFrame:Hide()
+
+  local rawborder, border = GetBorderSize()
+  local size = tonumber(C.appearance.minimap.tracking_size)
+  local pulse = C.appearance.minimap.tracking_pulse == "1"
+
+  -- Tracking spells come from ClassicAPI's native GetNumTrackingTypes /
+  -- GetTrackingInfo (see the DLL's docs/API.md "Tracking"). The DLL
+  -- enumerates them straight from the spellbook by tracking-aura effect,
+  -- so there is no spell table to maintain here and server-custom trackers
+  -- (e.g. Turtle's Find Trees) are picked up automatically.
+
+  local state = {
+    texture = nil,
+    spells = {}
+  }
+
+  pfUI.tracking = CreateFrame("Button", "pfUITracking", UIParent)
+  pfUI.tracking.invalidSpells = {}
+
+  pfUI.tracking:SetFrameStrata("HIGH")
+  CreateBackdrop(pfUI.tracking, border)
+  CreateBackdropShadow(pfUI.tracking)
+
+  pfUI.tracking:SetPoint("TOPLEFT", pfUI.minimap, -10, -10)
+  UpdateMovable(pfUI.tracking)
+  pfUI.tracking:SetWidth(size)
+  pfUI.tracking:SetHeight(size)
+
+  pfUI.tracking.icon = pfUI.tracking:CreateTexture(nil, "BACKGROUND")
+  pfUI.tracking.icon:SetTexCoord(.08, .92, .08, .92)
+  pfUI.tracking.icon:SetAllPoints(pfUI.tracking)
+
+  -- Pulses the icon while no tracking spell is active
+  pfUI.tracking.pulse = pfUI.tracking.icon:CreateAnimationGroup()
+  pfUI.tracking.pulse:SetLooping("BOUNCE")
+  local fade = pfUI.tracking.pulse:CreateAnimation("Alpha")
+  fade:SetFromAlpha(1)
+  fade:SetToAlpha(.5)
+  fade:SetDuration(.5)
+  fade:SetSmoothing("IN_OUT")
+
+  pfUI.tracking.menuMixin = pfUIMenuStyleMixin
+
+  local function IsTracking(spell)
+    return spell.texture == state.texture
+  end
+
+  local function Track(spell)
+    SetTracking(spell.index)
+  end
+
+  local function GenerateTrackingMenu(owner, rootDescription)
+    rootDescription:CreateTitle(T["Minimap Tracking"])
+    for _, spell in pairs(state.spells) do
+      local icon = CreateTextureMarkup(spell.texture, 64, 64, 16, 16, .1, .9, .1, .9)
+      rootDescription:CreateRadio(icon .. " " .. spell.name, IsTracking, Track, spell)
+    end
+  end
+
+  pfUI.tracking:RegisterEvent("PLAYER_ENTERING_WORLD")
+  pfUI.tracking:RegisterEvent("PLAYER_AURAS_CHANGED")
+  pfUI.tracking:RegisterEvent("SPELLS_CHANGED")
+  pfUI.tracking:RegisterEvent("UPDATE_SHAPESHIFT_FORMS")
+  pfUI.tracking:SetScript("OnEvent", function()
+    if event == "SPELLS_CHANGED" then
+      state.spells = {}
+    end
+    this:RefreshSpells()
+    this:RefreshMenu()
+  end)
+
+  pfUI.tracking:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+  pfUI.tracking:SetScript("OnClick", function()
+    if arg1 == "RightButton" then
+      MenuUtil.CreateContextMenu(this, GenerateTrackingMenu)
+    end
+    if arg1 == "LeftButton" and state.texture then
+      CancelTrackingBuff()
+    end
+  end)
+
+  pfUI.tracking:SetScript("OnEnter", function()
+    GameTooltip_SetDefaultAnchor(GameTooltip, this)
+    if state.texture then
+      GameTooltip:SetTrackingSpell()
+    else
+      GameTooltip:SetText(T["No tracking spell active"])
+    end
+    GameTooltip:Show()
+  end)
+
+  pfUI.tracking:SetScript("OnLeave", function()
+    GameTooltip:Hide()
+  end)
+
+  function pfUI.tracking:RefreshSpells()
+    state.spells = {}
+    if not GetNumTrackingTypes then return end
+
+    -- Druid Track Humanoids (5225) only casts in Cat Form. Hide it out of
+    -- form so the menu never offers a tracker that would fail to cast.
+    local isCatForm = pfUI.tracking:PlayerIsDruidInCatForm(UnitClassBase("player"))
+
+    for i = 1, GetNumTrackingTypes() do
+      local name, texture, _, _, spellId = GetTrackingInfo(i)
+      local castable = not (spellId == 5225 and not isCatForm)
+      if name and texture and castable
+        and not pfUI.tracking.invalidSpells[name] then
+        state.spells[i] = {
+          index   = i,        -- tracking index, passed to SetTracking()
+          name    = name,
+          texture = texture,
+          spellId = spellId,
+        }
+      end
+    end
+  end
+
+  function pfUI.tracking:RefreshMenu()
+    local texture = GetTrackingTexture()
+    if texture and texture ~= state.texture then
+      state.texture = texture
+      pfUI.tracking.pulse:Stop()
+      pfUI.tracking.icon:SetTexture(texture)
+      pfUI.tracking:Show()
+    elseif not texture then
+      state.texture = nil
+
+      if pulse and next(state.spells) ~= nil then
+        pfUI.tracking.icon:SetTexture("Interface\\Icons\\INV_Misc_QuestionMark")
+        if not pfUI.tracking.pulse:IsPlaying() then pfUI.tracking.pulse:Play() end
+        pfUI.tracking:Show()
+      else
+        pfUI.tracking.pulse:Stop()
+        pfUI.tracking:Hide()
+      end
+    end
+  end
+
+  function pfUI.tracking:PlayerIsDruidInCatForm(playerClass)
+    return playerClass == "DRUID" and GetShapeshiftFormID() == 1
+  end
+end)

@@ -1,0 +1,414 @@
+pfUI:RegisterModule("xpbar", function ()
+  local rawborder, default_border = GetBorderSize()
+
+  -- Rested-XP gain tracking constants
+  local REST_WINDOW = 300    -- seconds of sliding-window samples for rate calc
+
+  local REST_CAP_MUL = 1.5   -- target rested cap = UnitXPMax * 1.5
+  if TURTLE_WOW_VERSION then
+    REST_CAP_MUL = 1.13
+  end
+
+  -- Resolve the faction to display: the explicitly remembered one (last to
+  -- gain rep) if set, else the player's watched faction. Returns the same
+  -- 5-tuple GetFactionInfo's relevant slots produced.
+  local function GetRepDisplay(factionID)
+    if factionID then
+      local name, _, standingID, barMin, barMax, barValue = GetFactionInfoByID(factionID)
+      if name then return name, standingID, barMin, barMax, barValue end
+    end
+    local w = C_Reputation.GetWatchedFactionData()
+    if w then
+      return w.name, w.reaction, w.currentReactionThreshold, w.nextReactionThreshold, w.currentStanding
+    end
+  end
+
+  local data = CreateFrame("Frame", "pfExperienceBarData", UIParent)
+  data.rest_samples = {}
+  data:RegisterEvent("FACTION_STANDING_CHANGED")
+  data:RegisterEvent("PLAYER_ENTERING_WORLD")
+  data:RegisterEvent("PLAYER_LEVEL_UP")
+  data:RegisterEvent("UPDATE_EXHAUSTION")
+  data:RegisterEvent("UPDATE_FACTION")
+  data:SetScript("OnEvent", function()
+    if event == "PLAYER_ENTERING_WORLD" then
+      this.starttime = GetTime()
+      this.startxp = UnitXP("player") or 0
+      -- zone change can change resting location / rate; start fresh
+      this.rest_samples = {}
+    elseif event == "PLAYER_LEVEL_UP" then
+      -- add previously gained experience to the session
+      this.startxp = this.startxp - UnitXPMax("player")
+      -- level-up rescales exhaustion proportionally; old samples no longer
+      -- describe the same gain trajectory
+      this.rest_samples = {}
+    elseif event == "UPDATE_EXHAUSTION" then
+      local now, exh = GetTime(), GetXPExhaustion() or 0
+      table.insert(this.rest_samples, { now, exh })
+      while this.rest_samples[1] and (now - this.rest_samples[1][1]) > REST_WINDOW do
+        table.remove(this.rest_samples, 1)
+      end
+    elseif event == "FACTION_STANDING_CHANGED" then
+      -- arg1=factionID, arg2=newStanding, arg3=repGained — no chat-string
+      -- parsing, no locale dependency.
+      this.factionID = arg1
+    elseif event == "UPDATE_FACTION" then
+      -- drop the auto-tracked faction when the user changes the watched one
+      local watched = C_Reputation.GetWatchedFactionData()
+      local watchedID = watched and watched.factionID or nil
+      if watchedID ~= this.watchedID then
+        this.watchedID = watchedID
+        this.factionID = nil
+      end
+    end
+  end)
+
+  -- Cancel a running fade-out and show the bar at full alpha
+  local function Reveal(self)
+    self.fade:Stop()
+    self:SetAlpha(1)
+  end
+
+  -- (Re)arm the auto-hide: fade the bar out after delay seconds unless it is
+  -- always shown or under the cursor
+  local function ScheduleFade(self, delay)
+    if self.fadeTimer then self.fadeTimer:Cancel() end
+    self.fadeTimer = nil
+    if self.always or self.hover then return end
+    self.fadeTimer = C_Timer.NewTimer(delay, function()
+      self.fadeTimer = nil
+      if self.hover or self:GetAlpha() == 0 then return end
+      self.fade:Play()
+    end)
+  end
+
+  local function OnLeave(self)
+    local self = self or this
+
+    self.hover = nil
+    if self.text_mouse == "1" then self.bar.text:Hide() end
+    ScheduleFade(self, 3)
+    GameTooltip:Hide()
+  end
+
+local function OnEnter(self)
+  local self = self or this
+  local lines = {}
+
+  -- set either experience, reputation or flex-rep handler
+  local mode = self.display
+  if self.display == "XPFLEX" then
+    mode = UnitLevel("player") < MAX_PLAYER_LEVEL and "XP" or "REP"
+  elseif self.display == "FLEX" then
+    mode = "REP"
+  end
+
+  self.hover = true
+  if self.fadeTimer then self.fadeTimer:Cancel() end
+  self.fadeTimer = nil
+  if self.text_mouse == "1" then self.bar.text:Show() end
+  Reveal(self)
+
+  if mode == "XP" then
+    local xp, xpmax, exh = UnitXP("player"), UnitXPMax("player"), GetXPExhaustion()
+    local xp_perc = round(xp / xpmax * 100)
+    local remaining = xpmax - xp
+    local remaining_perc = round(remaining / xpmax * 100)
+    local exh_perc = GetXPExhaustion() and round(GetXPExhaustion() / xpmax * 100) or 0
+    local xp_persec = ((xp - data.startxp)/(GetTime() - data.starttime))
+    local session = UnitXP("player") - data.startxp
+    local avg_hour = floor(((UnitXP("player") - data.startxp) / (GetTime() - data.starttime)) * 60 * 60)
+    local time_remaining = xp_persec > 0 and SecondsToTime(remaining/xp_persec) or 0
+
+    -- fill gametooltip data
+    table.insert(lines, { "|cff555555" .. T["Experience"], "" })
+    table.insert(lines, { T["XP"], "|cffffffff" .. xp .. " / " .. xpmax .. " (" .. xp_perc .. "%)" })
+    table.insert(lines, { T["Remaining"], "|cffffffff" .. remaining .. " (" .. remaining_perc .. "%)" })
+    if IsResting() then
+      table.insert(lines, { T["Status"], "|cffffffff" .. T["Resting"] })
+    end
+    if GetXPExhaustion() then
+      table.insert(lines, { T["Rested"], "|cff5555ff+" .. exh .. " (" .. exh_perc .. "%)" })
+      -- if exh_perc >= 112 then
+      --   table.insert(lines, { "|cffff8800" .. exh_perc .. "% is the current max cap." })
+      --   table.insert(lines, { "|cffff8800Report to TWoW if you want a proper display." })
+      -- end
+
+      -- Rested gain rate + time to UnitXPMax * REST_CAP_MUL, when sampled
+      -- UPDATE_EXHAUSTION events span a meaningful interval (e.g., resting
+      -- under a Turtle WoW tent generates a fast continuous stream).
+      local samples = data.rest_samples
+      local n = table.getn(samples)
+      if n >= 2 then
+        local first, last = samples[1], samples[n]
+        local span = last[1] - first[1]
+        local gain = last[2] - first[2]
+        if span > 0 and gain > 0 then
+          local rate_per_sec = gain / span
+          local rate_per_min = floor(rate_per_sec * 60)
+          table.insert(lines, { T["Rested Gain"], "|cff5555ff+" .. rate_per_min .. " / min" })
+
+          local cap = xpmax * REST_CAP_MUL
+          if exh < cap then
+            local sec = (cap - exh) / rate_per_sec
+            table.insert(lines, { T["Time to Rested Cap"], "|cffffffff" .. SecondsToTime(sec) })
+          end
+        end
+      end
+    end
+    table.insert(lines, { "" })
+    table.insert(lines, { T["This Session"], "|cffffffff" .. session })
+    table.insert(lines, { T["Average Per Hour"], "|cffffffff" .. avg_hour })
+    table.insert(lines, { T["Time Remaining"], "|cffffffff" .. time_remaining })
+  elseif mode == "PETXP" then
+    local xp, xpmax = GetPetExperience()
+    local xp_perc = round(xp / xpmax * 100)
+    local remaining = xpmax - xp
+    local remaining_perc = round(remaining / xpmax * 100)
+
+    -- fill gametooltip data
+    table.insert(lines, { "|cff555555" .. T["Experience"], "" })
+    table.insert(lines, { T["XP"], "|cffffffff" .. xp .. " / " .. xpmax .. " (" .. xp_perc .. "%)" })
+    table.insert(lines, { T["Remaining"], "|cffffffff" .. remaining .. " (" .. remaining_perc .. "%)" })
+  elseif mode == "REP" then
+    local name, standingID, barMin, barMax, barValue = GetRepDisplay(self.factionID)
+    if name then
+      barMax = barMax - barMin
+      barValue = barValue - barMin
+
+      local color = FACTION_BAR_COLORS[standingID]
+      if color then
+        color = rgbhex(color.r + .3, color.g + .3, color.b + .3)
+      else
+        color = rgbhex(.5, .5, .5)
+      end
+
+      table.insert(lines, { "|cff555555" .. T["Reputation"], "" })
+      table.insert(lines, { color .. name .. " (" .. GetText("FACTION_STANDING_LABEL"..standingID, gender) .. ")"})
+      table.insert(lines, { barValue .. " / " .. barMax .. " (" .. round(barValue / barMax * 100) .. "%)" })
+    end
+  end
+
+  -- draw tooltip
+  GameTooltip:ClearLines()
+  GameTooltip_SetDefaultAnchor(GameTooltip, self)
+  GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
+
+  for id, data in pairs(lines) do
+    if data[2] then
+      GameTooltip:AddDoubleLine(data[1], data[2])
+    else
+      GameTooltip:AddLine(data[1])
+    end
+  end
+  GameTooltip:Show()
+end
+
+  local function OnEvent(self)
+    local self = self or this
+
+    -- realign when entering world to ensure all frames got loaded
+    AlignToPosition(self, _G[self.anchor], self.position, default_border*3)
+    UpdateMovable(self, true)
+
+    -- set either experience, reputation or flex-rep handler
+    local mode = self.display
+    if self.display == "XPFLEX" then
+      self.factionID = data.factionID or nil
+      mode = UnitLevel("player") < MAX_PLAYER_LEVEL and "XP" or "REP"
+    elseif self.display == "FLEX" then
+      self.factionID = data.factionID or nil
+      mode = "REP"
+    end
+
+    if self.always then
+      Reveal(self)
+      self:Show()
+    end
+
+    -- skip on events of no interest
+    if mode == "XP" and ( event == "FACTION_STANDING_CHANGED" or event == "UPDATE_FACTION" ) then return end
+    if mode == "REP" and ( event == "PLAYER_XP_UPDATE" or event == "UPDATE_EXHAUSTION" ) then return end
+
+    if mode == "XP" then
+      self.enabled = true
+      Reveal(self)
+      self.bar:SetMinMaxValues(0, UnitXPMax("player"))
+      self.bar:SetValue(UnitXP("player"))
+      if GetXPExhaustion() then
+        self.restedbar:Show()
+        self.restedbar:SetMinMaxValues(0, UnitXPMax("player"))
+        self.restedbar:SetValue(UnitXP("player") + GetXPExhaustion())
+      else
+        self.restedbar:Hide()
+      end
+
+      local text = "%s: %s%%"
+      local xp, xpmax, ex = UnitXP("player"), UnitXPMax("player"), GetXPExhaustion()
+      local xpperc = round(xp / xpmax * 100)
+      local experc = ex and round(ex / xpmax * 100) or 0
+      if ex then text = "%s: %s%% (%s%% %s)" end
+      self.bar.text:SetFormattedText(text, T["Experience"], xpperc, experc, T["Rested"])
+
+      ScheduleFade(self, self.timeout)
+      if event == "UPDATE_EXHAUSTION" and GameTooltip:IsOwned(self) then
+        OnEnter(self)
+      end
+      return
+    elseif mode == "PETXP" then
+      self.restedbar:Hide()
+      self.enabled = true
+      Reveal(self)
+
+      local currXP, nextXP = GetPetExperience()
+      self.bar:SetMinMaxValues(min(0, currXP), nextXP)
+      self.bar:SetValue(currXP)
+
+      local text = "%s: %s%%"
+      local xpperc = nextXP and nextXP ~= 0 and round(currXP / nextXP * 100) or 0
+      self.bar.text:SetFormattedText(text, T["Pet Experience"], xpperc)
+
+      ScheduleFade(self, self.timeout)
+      return
+    elseif mode == "REP" then
+      self.restedbar:Hide()
+
+      local name, standingID, barMin, barMax, barValue = GetRepDisplay(self.factionID)
+      if name then
+        self.enabled = true
+        Reveal(self)
+
+        barMax = barMax - barMin
+        barValue = barValue - barMin
+
+        self.bar:SetMinMaxValues(0, barMax)
+        self.bar:SetValue(barValue)
+
+        local color = FACTION_BAR_COLORS[standingID]
+        if color then
+          self.bar:SetStatusBarColor((color.r + .5) * .5, (color.g + .5) * .5, (color.b + .5) * .5, 1)
+        else
+          self.bar:SetStatusBarColor(.5,.5,.5,1)
+        end
+
+        local text = "%s: %s%% (%s)"
+        local perc = round(barValue / barMax * 100)
+        local standing = GetText("FACTION_STANDING_LABEL"..standingID, gender)
+        self.bar.text:SetFormattedText(text, name, perc, standing)
+
+        ScheduleFade(self, self.timeout)
+        return
+      end
+    end
+
+    self.bar:SetStatusBarColor(.5,.5,.5,1)
+    self.bar:SetMinMaxValues(0, 1)
+    self.bar:SetValue(0)
+
+    -- nothing to show: hide now unless an earlier update is still on display
+    if not self.fadeTimer then ScheduleFade(self, 0) end
+  end
+
+  local function CreateBar(t)
+    local name = t == "XP" and "pfExperienceBar" or "pfReputationBar"
+    local b = _G[name] or CreateFrame("Frame", name, UIParent)
+
+    b.xp_color = C.panel.xp.xp_color
+    b.rest_color = C.panel.xp.rest_color
+    b.width = t == "XP" and C.panel.xp.xp_width or C.panel.xp.rep_width
+    b.height = t == "XP" and C.panel.xp.xp_height or C.panel.xp.rep_height
+    b.mode = t == "XP" and C.panel.xp.xp_mode or C.panel.xp.rep_mode
+    b.timeout = t == "XP" and tonumber(C.panel.xp.xp_timeout) or tonumber(C.panel.xp.rep_timeout)
+    b.anchor = t == "XP" and C.panel.xp.xp_anchor or C.panel.xp.rep_anchor
+    b.position = t == "XP" and C.panel.xp.xp_position or C.panel.xp.rep_position
+    b.display = t == "XP" and C.panel.xp.xp_display or C.panel.xp.rep_display
+    b.text = t == "XP" and C.panel.xp.xp_text or C.panel.xp.rep_text
+    b.text_off_y = t == "XP" and C.panel.xp.xp_text_off_y or C.panel.xp.rep_text_off_y
+    b.text_mouse = t == "XP" and C.panel.xp.xp_text_mouse or C.panel.xp.rep_text_mouse
+
+    local barLevel, restedLevel = 0, 1
+    if C.panel.xp.dont_overlap == "1" then
+      barLevel, restedLevel = 1, 0
+    end
+
+    if t == "XP" and C.panel.xp.xp_always == "1" then
+      b.always = true
+    elseif t == "REP" and C.panel.xp.rep_always == "1" then
+      b.always = true
+    else
+      b.always = nil
+    end
+
+    b:SetWidth(b.width)
+    b:SetHeight(b.height)
+    b:SetFrameStrata("BACKGROUND")
+
+    AlignToPosition(b, _G[b.anchor], b.position, default_border*3)
+    UpdateMovable(b, true)
+    CreateBackdrop(b)
+    CreateBackdropShadow(b)
+
+    b.bar = b.bar or CreateFrame("StatusBar", nil, b)
+    b.bar:SetStatusBarTexture(pfUI.media[C.panel.xp.texture])
+    b.bar:ClearAllPoints()
+    b.bar:SetAllPoints(b)
+    b.bar:SetFrameLevel(barLevel)
+
+    local cr, cg, cb, ca = pfUI.api.GetStringColor(b.xp_color)
+    b.bar:SetStatusBarColor(cr,cg,cb,ca)
+    b.bar:SetOrientation(b.mode)
+    b.bar:SetRotatesTexture(b.mode == "VERTICAL")
+
+    b.bar.text = b.bar.text or b.bar:CreateFontString()
+    b.bar.text:SetPoint("CENTER", b, "CENTER", 0, b.text_off_y)
+    b.bar.text:SetJustifyH("CENTER")
+    b.bar.text:SetFont(pfUI.font_default, C.global.font_size, "OUTLINE")
+
+    b.bar.text:SetShown(b.text == "1" and b.text_mouse ~= "1")
+
+    b.restedbar = b.restedbar or CreateFrame("StatusBar", nil, b)
+    b.restedbar:SetStatusBarTexture(pfUI.media[C.panel.xp.texture])
+    b.restedbar:ClearAllPoints()
+    b.restedbar:SetAllPoints(b)
+    b.restedbar:SetFrameLevel(restedLevel)
+    local cr, cg, cb, ca = pfUI.api.GetStringColor(b.rest_color)
+    b.restedbar:SetStatusBarColor(cr,cg,cb,ca)
+    b.restedbar:SetOrientation(b.mode)
+    b.restedbar:SetRotatesTexture(b.mode == "VERTICAL")
+
+    -- auto hide
+    b:EnableMouse(true)
+
+    if not b.fade then
+      b.fade = b:CreateAnimationGroup()
+      b.fade:SetToFinalAlpha(true)
+      local fade = b.fade:CreateAnimation("Alpha")
+      fade:SetChange(-1)
+      fade:SetDuration(.3)
+    end
+
+    b:RegisterEvent("FACTION_STANDING_CHANGED")
+    b:RegisterUnitEvent("UNIT_PET", "player")
+    b:RegisterUnitEvent("UNIT_LEVEL", "player")
+    b:RegisterUnitEvent("UNIT_PET_EXPERIENCE", "player", "pet")
+    b:RegisterEvent("PLAYER_ENTERING_WORLD")
+    b:RegisterEvent("UPDATE_EXHAUSTION")
+    b:RegisterEvent("PLAYER_XP_UPDATE")
+    b:RegisterEvent("PLAYER_LEVEL_UP")
+    b:RegisterEvent("UPDATE_FACTION")
+
+    b:SetScript("OnEvent", OnEvent)
+    b:SetScript("OnEnter", OnEnter)
+    b:SetScript("OnLeave", OnLeave)
+    b:GetScript("OnEvent")(b)
+
+    return b
+  end
+
+  pfUI.xpbar = { ["UpdateConfig"] = function()
+    pfUI.xp = CreateBar("XP")
+    pfUI.rep = CreateBar("REP")
+  end}
+
+  pfUI.xpbar:UpdateConfig()
+end)

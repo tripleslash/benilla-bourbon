@@ -34,6 +34,18 @@ pub(crate) fn manifest(dir: &Path, name: &str) -> Option<String> {
     })
 }
 
+/// [`manifest`] through a reader of chain paths (`<prefix><Name><flavor>.toc`), the bundle's form.
+pub(crate) fn manifest_read(
+    prefix: &str,
+    name: &str,
+    read: impl Fn(&str) -> Option<Vec<u8>>,
+) -> Option<String> {
+    flavors().iter().find_map(|flavor| {
+        let bytes = read(&format!("{prefix}{name}{flavor}.toc"))?;
+        Some(benilla_ui::source::decode(&bytes).into_owned())
+    })
+}
+
 /// The bindings file an addon loads: a flavor one, else `Bindings.xml`, as `exists` finds them.
 pub(crate) fn bindings(prefix: &str, exists: impl Fn(&str) -> bool) -> Option<String> {
     flavors()

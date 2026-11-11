@@ -1,0 +1,9 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/">
+  <Include file="..\libs\libspell.lua"/>
+  <Include file="..\libs\libdebuff.lua"/>
+  <Include file="..\libs\libunitscan.lua"/>
+  <Include file="..\libs\libhealth.lua"/>
+  <Include file="..\libs\libthrottle.lua"/>
+  <Include file="..\libs\libpredict.lua"/>
+  <Include file="..\libs\libbagsort.lua"/>
+</Ui>

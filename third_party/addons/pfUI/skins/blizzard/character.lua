@@ -1,0 +1,400 @@
+pfUI:RegisterSkin("Character", function ()
+  local rawborder, border = GetBorderSize()
+  local bpad = rawborder > 1 and border - GetPerfectPixel() or GetPerfectPixel()
+
+  -- Honor Tab
+  StripTextures(HonorFrame)
+  if ArenaFrame then
+    StripTextures(ArenaFrame)
+    for _, frame in pairs({'Arena', 'Honor'}) do
+      for i = 1, 2 do
+        local tab = _G[frame.."FrameTab"..i]
+        local lastTab = _G[frame.."FrameTab"..(i-1)]
+        if lastTab and lastTab:IsShown() then
+          tab:ClearAllPoints()
+          tab:SetPoint("LEFT", lastTab, "RIGHT", border*2 + 1, 0)
+        end
+        SkinTab(tab)
+      end
+    end
+    for i = 1, 3 do
+      local team = _G["ArenaFrameTeam"..i]
+      StripTextures(team)
+      CreateBackdrop(team)
+    end
+  end
+
+  HonorFrameProgressBar:SetStatusBarTexture(pfUI.media["img:bar"])
+  CreateBackdrop(HonorFrameProgressBar)
+  HonorFrameProgressBar:SetHeight(24)
+
+  local magicResTextureCords = {
+    {0.21875, 0.78125, 0.25, 0.3203125},
+    {0.21875, 0.78125, 0.0234375, 0.09375},
+    {0.21875, 0.78125, 0.13671875, 0.20703125},
+    {0.21875, 0.78125, 0.36328125, 0.43359375},
+    {0.21875, 0.78125, 0.4765625, 0.546875}
+  }
+
+  CreateBackdrop(CharacterFrame, nil, nil, .75)
+  CreateBackdropShadow(CharacterFrame)
+
+  CharacterFrame.backdrop:SetPoint("TOPLEFT", 10, -10)
+  CharacterFrame.backdrop:SetPoint("BOTTOMRIGHT", -30, 72)
+  CharacterFrame:SetHitRectInsets(10,30,10,72)
+  EnableMovable("CharacterFrame", CHARACTERFRAME_SUBFRAMES)
+
+  SkinCloseButton(CharacterFrameCloseButton, CharacterFrame.backdrop, -6, -6)
+
+  CharacterFrame:DisableDrawLayer("ARTWORK")
+
+  CharacterNameText:ClearAllPoints()
+  CharacterNameText:SetPoint("TOP", CharacterFrame.backdrop, "TOP", 0, -10)
+
+  CharacterFrameTab1:ClearAllPoints()
+  CharacterFrameTab1:SetPoint("TOPLEFT", CharacterFrame.backdrop, "BOTTOMLEFT", bpad, -(border + (border == 1 and 1 or 2)))
+  for i = 1, 5 do
+    local tab = _G["CharacterFrameTab"..i]
+    local lastTab = _G["CharacterFrameTab"..(i-1)]
+    if lastTab and lastTab:IsShown() then
+      tab:ClearAllPoints()
+      tab:SetPoint("LEFT", lastTab, "RIGHT", border*2 + 1, 0)
+    end
+    SkinTab(tab)
+  end
+
+  do -- Character Tab
+    local slots = {
+      "HeadSlot",
+      "NeckSlot",
+      "ShoulderSlot",
+      "BackSlot",
+      "ChestSlot",
+      "ShirtSlot",
+      "TabardSlot",
+      "WristSlot",
+      "HandsSlot",
+      "WaistSlot",
+      "LegsSlot",
+      "FeetSlot",
+      "Finger0Slot",
+      "Finger1Slot",
+      "Trinket0Slot",
+      "Trinket1Slot",
+      "MainHandSlot",
+      "SecondaryHandSlot",
+      "RangedSlot",
+      "AmmoSlot"
+    }
+
+    local function RefreshPetPosition()
+      CharacterFrameTab3:ClearAllPoints()
+      CharacterFrameTab3:SetPoint("LEFT", HasPetUI() and CharacterFrameTab2 or CharacterFrameTab1, "RIGHT", border*2 + 1, 0)
+    end
+
+    local function RefreshCharacterSlot(slot)
+      local slotId = slot:GetID()
+      local itemID = GetInventoryItemID("player", slotId)
+      if slot and slot.backdrop then
+        if itemID then
+          local isBroken = GetInventoryItemBroken("player", slotId)
+          local quality = GetInventoryItemQuality("player", slotId)
+          if isBroken then
+            slot.backdrop:SetBackdropBorderColor(0.9, 0, 0, 1)
+          elseif quality and quality > 0 then
+            local r, g, b = GetItemQualityColor(quality)
+            slot.backdrop:SetBackdropBorderColor(r, g, b, 1)
+          else
+            slot.backdrop:SetBackdropBorderColor(pfUI.cache.er, pfUI.cache.eg, pfUI.cache.eb, pfUI.cache.ea)
+          end
+          if C.character.inventory.durability == "1" then
+            local current, maximum = GetInventoryItemDurability(slotId)
+            if current and maximum and maximum > 0 then
+              local pct = floor((current / maximum) * 100)
+              slot.durabilityText:SetText(pct .. "%")
+              local r, g, b = GetColorGradient(pct / 100)
+              slot.durabilityText:SetTextColor(r, g, b)
+              slot.durabilityText:Show()
+            else
+              slot.durabilityText:SetText("")
+              slot.durabilityText:Hide()
+            end
+          else
+            slot.durabilityText:SetText("")
+            slot.durabilityText:Hide()
+          end
+        else
+          slot.backdrop:SetBackdropBorderColor(pfUI.cache.er, pfUI.cache.eg, pfUI.cache.eb, pfUI.cache.ea)
+          slot.durabilityText:SetText("")
+          slot.durabilityText:Hide()
+        end
+
+        if ShaguScore and itemID then
+          local itemLevel = C_Item.GetCurrentItemLevel({ equipmentSlotIndex = slotId })
+          local _, _, quality, _, _, _, _, _, itemSlot, _ = C_Item.GetItemInfo(itemID)
+          local score = ShaguScore:Calculate(itemSlot, quality, itemLevel)
+          if score and score > 0 and quality and quality > 0 then
+            local r,g,b = GetItemQualityColor(quality)
+            slot.scoreText:SetText(score)
+            slot.scoreText:SetTextColor(r, g, b, 1)
+          else
+            slot.scoreText:SetText("")
+            slot.scoreText:SetTextColor(1, 1, 1, 1)
+          end
+        else
+          slot.scoreText:SetText("")
+          slot.scoreText:SetTextColor(1, 1, 1, 1)
+        end
+      end
+    end
+    local function RefreshCharacterSlots()
+      for _, slotName in pairs(slots) do
+        local slot = _G["Character"..slotName]
+        RefreshCharacterSlot(slot)
+      end
+    end
+
+    hooksecurefunc("CharacterFrame_OnShow", function()
+      RefreshCharacterSlots()
+      RefreshPetPosition()
+    end)
+
+    hooksecurefunc("PaperDollItemSlotButton_Update", function()
+      if this:GetParent() == PaperDollFrame then
+        RefreshCharacterSlot(this)
+      end
+    end)
+
+    hooksecurefunc("PetTab_Update", RefreshPetPosition)
+
+    StripTextures(PaperDollFrame)
+    StripTextures(CharacterAttributesFrame)
+    StripTextures(CharacterResistanceFrame)
+
+    EnableModelControls(CharacterModelFrame)
+    CharacterModelFrameRotateLeftButton:Hide()
+    CharacterModelFrameRotateRightButton:Hide()
+
+    for i,c in pairs(magicResTextureCords) do
+      local magicResFrame = _G["MagicResFrame"..i]
+      magicResFrame:SetSize(26, 26)
+      CreateBackdrop(magicResFrame)
+      SetAllPointsOffset(magicResFrame.backdrop, magicResFrame, 2)
+      local icon = GetNoNameObject(magicResFrame, "Texture", "BACKGROUND", "ResistanceIcons")
+      SetAllPointsOffset(icon, magicResFrame, 3)
+      icon:SetTexCoord(c[1], c[2], c[3], c[4])
+    end
+
+    for _, slotName in pairs(slots) do
+      local frame = _G["Character"..slotName]
+      StripTextures(frame)
+      CreateBackdrop(frame)
+      SetAllPointsOffset(frame.backdrop, frame, 0)
+
+      HandleIcon(frame.backdrop, _G["Character"..slotName.."IconTexture"])
+
+      -- native cooldown frame in place of the template's indicator Model,
+      -- which has no countdown numbers. PaperDollItemSlotButton_Update reads
+      -- the "<button>Cooldown" global on every update. 1.12 binds a frame's
+      -- name only while that global is unset, so the global is rebound by
+      -- hand; the Model starts hidden and nothing reaches it after that
+      local cdname = "Character"..slotName.."Cooldown"
+      _G[cdname] = CreateCooldown(frame, "spell", C.cooldown, "blizzard_timers", cdname)
+
+      CreateFontString(frame, "scoreText", "OVERLAY", 12)
+      frame.scoreText:SetPoint("TOPRIGHT", 0, 0)
+
+      CreateFontString(frame, "durabilityText", "OVERLAY", 10)
+      frame.durabilityText:SetPoint("BOTTOM", 0, 2)
+    end
+  end
+
+  do -- Pet Tab
+    StripTextures(PetPaperDollFrame)
+
+    PetNameText:ClearAllPoints()
+    PetNameText:SetPoint("TOP", CharacterFrame.backdrop, "TOP", 0, -10)
+
+    EnableModelControls(PetModelFrame)
+    PetModelFrameRotateLeftButton:Hide()
+    PetModelFrameRotateRightButton:Hide()
+
+    PetPaperDollCloseButton:Hide()
+
+    StripTextures(PetAttributesFrame)
+    StripTextures(PetPaperDollFrameExpBar)
+    CreateBackdrop(PetPaperDollFrameExpBar, nil, true)
+    PetPaperDollFrameExpBar:SetStatusBarTexture(pfUI.media["img:bar"])
+    PetPaperDollFrameExpBar:ClearAllPoints()
+    PetPaperDollFrameExpBar:SetPoint("BOTTOM", PetModelFrame, "BOTTOM", 0, -120)
+
+    PetTrainingPointLabel:ClearAllPoints()
+    PetTrainingPointLabel:SetPoint("TOPLEFT", PetArmorFrame, "BOTTOMLEFT", 0, -16)
+
+    PetTrainingPointText:ClearAllPoints()
+    PetTrainingPointText:SetPoint("TOPRIGHT", PetArmorFrame, "BOTTOMRIGHT", 0, -16)
+
+    PetPaperDollPetInfo:ClearAllPoints()
+    PetPaperDollPetInfo:SetPoint("TOPLEFT", PetModelFrame, "TOPLEFT")
+    PetPaperDollPetInfo:SetFrameLevel(255)
+
+    PetResistanceFrame:ClearAllPoints()
+    PetResistanceFrame:SetPoint("TOPRIGHT", PetModelFrame, "TOPRIGHT")
+
+    for i,c in pairs(magicResTextureCords) do
+      local magicResFrame = _G["PetMagicResFrame"..i]
+      magicResFrame:SetSize(26, 26)
+      CreateBackdrop(magicResFrame)
+      SetAllPointsOffset(magicResFrame.backdrop, magicResFrame, 2)
+      local icon = GetNoNameObject(magicResFrame, "Texture", "BACKGROUND", "ResistanceIcons")
+      SetAllPointsOffset(icon, magicResFrame, 3)
+      icon:SetTexCoord(c[1], c[2], c[3], c[4])
+    end
+  end
+
+  do -- Reputation Tab
+    StripTextures(ReputationFrame)
+
+    for i = 1, NUM_FACTIONS_DISPLAYED do
+      local bar = _G["ReputationBar" .. i]
+      StripTextures(bar)
+      CreateBackdrop(bar)
+      bar:SetStatusBarTexture(pfUI.media["img:bar"])
+
+      local war = _G["ReputationBar"..i.."AtWarCheck"]
+      StripTextures(war)
+      war:SetSize(13, 13)
+      war:ClearAllPoints()
+      war:SetPoint("LEFT", bar.backdrop, "RIGHT", 6, 0)
+      war.icon = war:CreateTexture(nil, "OVERLAY")
+      war.icon:SetPoint("LEFT", -3, -8)
+      war.icon:SetTexture("Interface\\Buttons\\UI-CheckBox-SwordCheck")
+
+      SkinCollapseButton(_G["ReputationHeader"..i])
+    end
+
+    StripTextures(ReputationListScrollFrame)
+    SkinScrollbar(ReputationListScrollFrameScrollBar)
+
+    StripTextures(ReputationDetailFrame)
+    CreateBackdrop(ReputationDetailFrame, nil, nil, .75)
+    SkinCloseButton(ReputationDetailCloseButton, ReputationDetailFrame.backdrop, -6, -6)
+
+    ReputationDetailFrame:ClearAllPoints()
+    ReputationDetailFrame:SetPoint("TOPLEFT", CharacterFrame.backdrop, "TOPRIGHT", 2*border, 0)
+
+    SkinCheckbox(ReputationDetailAtWarCheckBox)
+    SkinCheckbox(ReputationDetailInactiveCheckBox)
+    SkinCheckbox(ReputationDetailMainScreenCheckBox)
+
+    -- Expand or collapse every header at once, as the Skills tab's button
+    -- does. It shows "+" while any header is collapsed.
+    local collapseAll = CreateFrame("Button", "pfReputationCollapseAllButton", ReputationFrame, "ReputationHeaderTemplate")
+    collapseAll:SetText(ALL)
+    collapseAll:SetWidth(collapseAll:GetTextWidth() + 20)
+    -- on the "Faction" label's row, in the headers' +/- column
+    collapseAll:SetPoint("LEFT", ReputationFrameFactionLabel, "LEFT", -43, 0)
+    collapseAll:SetScript("OnClick", function()
+      if this.isCollapsed then
+        ExpandAllFactionHeaders()
+      else
+        CollapseAllFactionHeaders()
+      end
+    end)
+    SkinCollapseButton(collapseAll, true)
+
+    -- GetFactionInfo, not C_Reputation.GetFactionDataByIndex: the latter
+    -- returns nil for the Other and Inactive headers.
+    hooksecurefunc("ReputationFrame_Update", function()
+      collapseAll.isCollapsed = nil
+      for i = 1, GetNumFactions() do
+        local _, _, _, _, _, _, _, _, isHeader, isCollapsed = GetFactionInfo(i)
+        if isHeader and isCollapsed then
+          collapseAll.isCollapsed = true
+          break
+        end
+      end
+      collapseAll:SetNormalTexture(collapseAll.isCollapsed and "Interface\\Buttons\\UI-PlusButton-Up" or "Interface\\Buttons\\UI-MinusButton-Up")
+    end)
+
+    -- Append "(N)" to each standing label where N is rep remaining to the
+    -- next reaction. Skip exalted (reaction 8) and effectively-capped bars.
+    -- Each bar's OnLeave handler (Blizzard's ReputationFrame.xml) restores
+    -- the FactionStanding text from `bar.standingText` on mouseout, so we
+    -- stash our augmented text there too — otherwise hovering a bar strips
+    -- the "(N)" suffix off.
+    hooksecurefunc("ReputationFrame_Update", function()
+      if C.character.reputation.repRequired ~= "1" then return end
+      local offset = FauxScrollFrame_GetOffset(ReputationListScrollFrame)
+      for i = 1, NUM_FACTIONS_DISPLAYED do
+        local standing = _G["ReputationBar"..i.."FactionStanding"]
+        if standing and standing:IsVisible() then
+          local faction = C_Reputation.GetFactionDataByIndex(offset + i)
+          if faction and faction.reaction and faction.reaction < 8 then
+            local repLeft = faction.nextReactionThreshold - faction.currentStanding
+            if repLeft > 1 then
+              standing:SetFormattedText("%s (%d)", standing:GetText(), repLeft)
+              standing:GetParent().standingText = standing:GetText()
+            end
+          end
+        end
+      end
+    end)
+  end
+
+  do -- Skills Tab
+    StripTextures(SkillFrame)
+
+    SkillFrameExpandButtonFrame:DisableDrawLayer("BACKGROUND")
+
+    SkillFrameCancelButton:Hide()
+
+    StripTextures(SkillFrameCollapseAllButton)
+    SkinCollapseButton(SkillFrameCollapseAllButton, true)
+    SkillFrameCollapseAllButton:ClearAllPoints()
+    SkillFrameCollapseAllButton:SetPoint("BOTTOMLEFT", SkillTypeLabel1, "TOPLEFT", 2, 2)
+
+    for i = 1, SKILLS_TO_DISPLAY do
+      local header = _G["SkillTypeLabel"..i]
+      StripTextures(header)
+      SkinCollapseButton(header)
+
+      StripTextures(_G["SkillRankFrame"..i.."Border"])
+
+      local frame = _G["SkillRankFrame" .. i]
+      local lastframe = _G["SkillRankFrame" .. i-1]
+      StripTextures(frame)
+      CreateBackdrop(frame)
+
+      if lastframe then
+        frame:ClearAllPoints()
+        frame:SetPoint("TOPLEFT", lastframe, "BOTTOMLEFT", 0, -6)
+      end
+      frame:SetStatusBarTexture(pfUI.media["img:bar"])
+      frame:SetHeight(12)
+    end
+
+    StripTextures(SkillListScrollFrame)
+    SkinScrollbar(SkillListScrollFrameScrollBar)
+
+    StripTextures(SkillDetailScrollFrame)
+    SkillDetailScrollFrameScrollBar:Hide()
+    SkillDetailScrollChildFrame:Hide()
+
+    SkillDetailCostText:SetParent(SkillDetailScrollFrame)
+    SkillDetailDescriptionText:SetParent(SkillDetailScrollFrame)
+
+    StripTextures(SkillDetailStatusBar)
+    CreateBackdrop(SkillDetailStatusBar)
+    SkillDetailStatusBar:SetStatusBarTexture(pfUI.media["img:bar"])
+    SkillDetailStatusBar:SetParent(SkillDetailScrollFrame)
+
+    StripTextures(SkillDetailStatusBarUnlearnButton)
+    SkillDetailStatusBarUnlearnButton:SetSize(20, 20)
+    SkillDetailStatusBarUnlearnButton:SetHitRectInsets(0,0,0,0)
+    SkillDetailStatusBarUnlearnButton:ClearAllPoints()
+    SkillDetailStatusBarUnlearnButton:SetPoint("LEFT", SkillDetailStatusBar, "RIGHT", 6, 0)
+    SkillDetailStatusBarUnlearnButton:SetPushedTexture(nil)
+    SkillDetailStatusBarUnlearnButton:SetNormalTexture("Interface\\Buttons\\UI-GroupLoot-Pass-Up")
+  end
+end)
