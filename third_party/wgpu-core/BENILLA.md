@@ -202,6 +202,31 @@ to 5.7 ms at Goldshire.
 | `src/command/pass.rs`, `PassState`, `flush_bindings_helper` | `init_registered`; a group already in it skips straight to the raw `set_bind_group`. |
 | `src/command/render.rs`, `encode_render_pass`; `src/command/compute.rs`, `encode_compute_pass` | initialize it empty. |
 
+## A bind group's repeated views, once
+
+A binding array keeps one tracker entry per element: `create_texture_binding` pushes the view
+into the group's `TextureViewBindGroupState` and a `TextureInitTrackerAction` for its texture
+range, for every element, repeats included. A render pass then merges every entry into its usage
+scope at each `set_bind_group` (a compute pass at each dispatch), and registers every init action
+of each group it binds once. static_gx's bindless group is a 1024-element
+`binding_array<texture_2d_array>` whose elements past the pool's last class all bind the white
+class, and its ray-traced scene group another, so each pass that bound them paid ~1000 merges and
+~1000 init-action checks for a few dozen distinct textures. Merging a view again with the same
+usage changes no state and raises no conflict the first did not, and a repeated init action
+queues only what the first queued (the section above), so the group keeps one of each:
+`optimize` sorts the views by texture, view and usage and drops exact repeats, and the init
+actions keep the first per texture and range.
+
+Measured on an RTX 5080 (Vulkan, `benilla-worldview`, Darnassus at 1440×810, a temporary encode
+timer): views merged 3.5 M/s -> 0.39 M/s; the encode of `multi_draw_indirect_count` (the first
+draw after the bind) 46.8 -> 8.0 ms/s; the three static_gx passes 89 -> 45 ms/s; all encoding
+607 -> 528 ms/s, across the render thread and the recording workers.
+
+| file | hunk |
+|---|---|
+| `src/track/texture.rs`, `TextureViewBindGroupState::optimize` | sorts by texture, view and usage, then drops repeats of the same view and usage. |
+| `src/device/resource.rs`, `Device::create_bind_group` | keeps one texture init action per texture and range. |
+
 ## How to check
 
 ```sh

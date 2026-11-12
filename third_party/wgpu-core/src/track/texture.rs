@@ -151,9 +151,20 @@ impl TextureViewBindGroupState {
     ///
     /// When this list of states is merged into a tracker, the memory
     /// accesses will be in a constant ascending order.
+    ///
+    /// BENILLA: a binding array that repeats a view (a pool's filler slots) keeps one entry per
+    /// view and usage: merging the same view with the same usage again changes no state and can
+    /// raise no conflict the first merge did not.
     pub(crate) fn optimize(&mut self) {
+        self.views.sort_unstable_by_key(|(view, usage)| {
+            (
+                view.parent.tracker_index(),
+                Arc::as_ptr(view) as usize,
+                usage.bits(),
+            )
+        });
         self.views
-            .sort_unstable_by_key(|(view, _)| view.parent.tracker_index());
+            .dedup_by(|(a, ua), (b, ub)| Arc::ptr_eq(a, b) && ua == ub);
     }
 
     /// Adds the given resource with the given state.

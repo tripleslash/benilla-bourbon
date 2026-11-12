@@ -3654,6 +3654,18 @@ impl Device {
         }
 
         used.optimize();
+        // BENILLA: one init action per texture range, as `optimize` keeps one view entry: a pass
+        // registers every action of each group it binds, and a repeat registers nothing new.
+        {
+            let mut seen = crate::FastHashSet::default();
+            texture_init_actions.retain(|action| {
+                seen.insert((
+                    Arc::as_ptr(&action.texture) as usize,
+                    action.range.mip_range.clone(),
+                    action.range.layer_range.clone(),
+                ))
+            });
+        }
 
         hal_entries.sort_by_key(|entry| entry.binding);
         for (a, b) in hal_entries.iter().zip(hal_entries.iter().skip(1)) {
