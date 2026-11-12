@@ -114,6 +114,7 @@ fn project(slot: u8, flags: u8, state: &AuraState, catalog: Option<&SpellCatalog
     let mut state = state.clone();
     let mut crowd_control = false;
     let (mut self_only, mut applies_aura) = (false, false);
+    let mut immunities = Vec::new();
     if let Some(spell) = catalog.and_then(|catalog| catalog.get(state.spell_id)) {
         // The nibble names active effects in reverse bit order (effect 0 is bit 3).
         // Roster-only records carry no flags, so all DBC effects remain candidates there.
@@ -141,6 +142,7 @@ fn project(slot: u8, flags: u8, state: &AuraState, catalog: Option<&SpellCatalog
             .effects
             .iter()
             .any(|effect| matches!(effect, 6 | 27 | 35));
+        immunities = crate::pfui::interrupts::immunities(spell, active);
         crowd_control = !state.helpful
             && (control_effect
                 || mechanic(spell.mechanic)
@@ -153,6 +155,7 @@ fn project(slot: u8, flags: u8, state: &AuraState, catalog: Option<&SpellCatalog
         crowd_control,
         self_only,
         applies_aura,
+        immunities,
     }
 }
 

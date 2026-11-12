@@ -16,6 +16,7 @@ mod editbox_caret;
 mod engine;
 pub(crate) mod equipment_actions;
 pub mod inline_texture;
+pub mod interrupts;
 pub mod items;
 pub mod macro_verbs;
 pub mod maps;

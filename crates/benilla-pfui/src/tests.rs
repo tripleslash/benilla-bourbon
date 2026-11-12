@@ -1196,6 +1196,7 @@ fn aura_tooltips_use_the_modern_index_space_and_existing_spell_renderer() {
             crowd_control: false,
             self_only: false,
             applies_aura: false,
+            immunities: Vec::new(),
             slot: 7,
             state: AuraState {
                 spell_id: 123,
@@ -3223,6 +3224,7 @@ fn modern_auras_keep_descriptor_slots_and_report_only_known_casters_and_timers()
         crowd_control: false,
         self_only: false,
         applies_aura: false,
+        immunities: Vec::new(),
         slot,
         source_guid,
         state: AuraState {
@@ -3355,12 +3357,14 @@ fn observed_cast_queries_and_events_share_ids_timing_and_unit_filters() {
         tradeskill: false,
         delay_ms: 200,
         channel: false,
+        silenceable: false,
+        interruptible: false,
     };
     casts::set_casts(script.lua(), [(3, cast.clone())]);
     script.run(r#"
       local name,display,icon,start,finish,trade,id,immune,spell,bar,delay=C_Spell.UnitCastingInfo('target')
       assert(name=='Cast' and display==name and icon=='Icon' and start==1000 and finish==3000)
-      assert(not trade and id=='Cast-3-1' and immune==nil and spell==100 and bar==nil and delay==200)
+      assert(not trade and id=='Cast-3-1' and immune==false and spell==100 and bar==nil and delay==200)
       assert(select('#',C_Spell.UnitCastingInfo('player'))==11)
       assert(C_Spell.UnitChannelInfo('player')==nil and C_Spell.UnitCastingInfo('pet')==nil)
       castEvents=0
@@ -3386,7 +3390,7 @@ fn observed_cast_queries_and_events_share_ids_timing_and_unit_filters() {
     script.run(r#"
       assert(C_Spell.UnitCastingInfo('player')==nil)
       local name,_,_,start,finish,trade,immune,spell=C_Spell.ChannelInfo()
-      assert(name=='Cast' and start==1000 and finish==3000 and spell==100 and immune==nil and not trade)
+      assert(name=='Cast' and start==1000 and finish==3000 and spell==100 and immune==false and not trade)
       assert(select('#',C_Spell.UnitChannelInfo('0x00000003'))==8)
     "#).unwrap();
     casts::set_casts(script.lua(), []);

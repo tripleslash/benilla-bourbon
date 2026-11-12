@@ -41,6 +41,8 @@ fn feed(
     self_q: Query<&crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
     mut removed: RemovedComponents<crate::net::ObjectStore>,
     actions: Res<crate::ui_action::PlayerActions>,
+    spells: Option<Res<crate::ui_action::Spells>>,
+    pet_bar: Option<Res<crate::ui_pet::PetBar>>,
     mut memo: Local<crate::ui_script::VmMemo<bool>>,
 ) {
     let Some(script) = script else { return };
@@ -67,6 +69,23 @@ fn feed(
     );
     if fresh || actions.is_changed() {
         units::set_known_spells(script.lua(), actions.spells.iter().copied());
+    }
+    let pet_changed = pet_bar.as_ref().is_some_and(|bar| bar.is_changed());
+    if let Some(spells) = spells
+        .as_ref()
+        .filter(|s| fresh || actions.is_changed() || s.is_changed() || pet_changed)
+    {
+        // The player's spells and their pet's book (a Felhunter's Spell Lock).
+        let pet_book = pet_bar
+            .iter()
+            .flat_map(|bar| bar.spells.spells.iter().map(|entry| entry.action()));
+        benilla_ui::script::pfui_host::interrupts::set_stoppers(
+            script.lua(),
+            super::interrupts::stoppers(
+                actions.spells.iter().copied().chain(pet_book),
+                &spells.catalog,
+            ),
+        );
     }
     if fresh || had_removed || objects.iter().any(|(_, object)| object.is_changed()) {
         // UpdateFields_1_12_1.h: UNIT_MOD_CAST_SPEED follows UNIT_FIELD_BYTES_1 (138).

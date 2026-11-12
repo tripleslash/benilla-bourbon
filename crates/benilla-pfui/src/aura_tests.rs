@@ -25,6 +25,7 @@ fn aura(slot: u8, spell: u32, helpful: bool, crowd_control: bool) -> Aura {
         source_guid: None,
         self_only: false,
         applies_aura: false,
+        immunities: Vec::new(),
         state: AuraState {
             spell_id: spell,
             name: Some(format!("Aura{spell}")),

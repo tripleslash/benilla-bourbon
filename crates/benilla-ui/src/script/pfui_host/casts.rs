@@ -16,6 +16,12 @@ pub struct Cast {
     pub cast_guid: String,
     pub delay_ms: u32,
     pub channel: bool,
+    /// A silence stops it (`PreventionType` silence).
+    pub silenceable: bool,
+    /// An interrupt effect stops it: silenceable, and its interrupt flags take an interrupt
+    /// (`SPELL_INTERRUPT_FLAG_DAMAGE` for a cast, `CHANNEL_FLAG_INTERRUPT` for a channel, as the
+    /// server's `EffectInterruptCast` reads them).
+    pub interruptible: bool,
 }
 
 #[derive(Default)]
@@ -50,9 +56,9 @@ fn info(lua: &Lua, token: &str, channel: bool) -> mlua::Result<MultiValue> {
     let Some(extras) = lua.app_data_ref::<Extras>() else {
         return Ok(MultiValue::new());
     };
-    let Some(cast) = guid
-        .and_then(|guid| extras.0.get(&guid))
-        .filter(|cast| cast.channel == channel)
+    let Some((guid, cast)) = guid
+        .and_then(|guid| extras.0.get(&guid).map(|cast| (guid, cast)))
+        .filter(|(_, cast)| cast.channel == channel)
     else {
         return Ok(MultiValue::new());
     };
@@ -71,8 +77,9 @@ fn info(lua: &Lua, token: &str, channel: bool) -> mlua::Result<MultiValue> {
     if !channel {
         values.push(Value::String(lua.create_string(&cast.cast_guid)?));
     }
-    // Relative interrupt immunity has no feed yet; do not label a cast immune without evidence.
-    values.push(Value::Nil);
+    values.push(Value::Boolean(super::interrupts::not_interruptible(
+        lua, guid, cast,
+    )));
     values.push(Value::Integer(i64::from(cast.spell_id)));
     if !channel {
         values.extend([Value::Nil, Value::Integer(i64::from(cast.delay_ms))]);

@@ -967,6 +967,8 @@ fn a_casts_unit_target_is_named_while_the_cast_runs() {
         cast_guid: "Cast-7-1".into(),
         delay_ms: 0,
         channel: false,
+        silenceable: false,
+        interruptible: false,
     };
     casts::set_casts(script.lua(), [(7, cast)]);
     casts::set_cast_targets(script.lua(), [(7, 9)]);
@@ -1166,4 +1168,130 @@ fn derived_events_fire_on_change_with_their_payloads() {
     "#,
         )
         .unwrap();
+}
+
+/// ClassicAPI's notInterruptible, by the server's rules: a known interrupt stops an interruptible
+/// cast until the caster wears an immunity that blocks it, a hostile immunity blocks only with the
+/// both-polarities attribute, a cast nothing can stop reads uninterruptible, and the target's
+/// changes during a cast fire UNIT_SPELLCAST_(NOT_)INTERRUPTIBLE.
+#[test]
+fn not_interruptible_follows_known_interrupts_and_the_casters_immunities() {
+    use benilla_ui::script::pfui_host::{
+        auras::{self, Aura},
+        casts,
+        interrupts::{self, Immunity, Stopper},
+        units,
+    };
+    use benilla_ui::script::{AuraState, UnitGuids, UnitState};
+    let mut script = extended();
+    crate::spell::Catalog(Default::default())
+        .install(script.lua())
+        .unwrap();
+    script.set_unit_guids(&UnitGuids {
+        player: 3,
+        target: 7,
+        ..Default::default()
+    });
+    let caster = UnitState {
+        guid: 7,
+        exists: true,
+        has_object: true,
+        name: Some("Caster".into()),
+        ..Default::default()
+    };
+    units::set_unit_states(script.lua(), [(7, caster, 0)]);
+    let cast = |silenceable, interruptible| casts::Cast {
+        spell_id: 2054,
+        name: "Heal".into(),
+        rank: String::new(),
+        icon: None,
+        start_ms: 0.0,
+        end_ms: 3000.0,
+        tradeskill: false,
+        cast_guid: "Cast-7-1".into(),
+        delay_ms: 0,
+        channel: false,
+        silenceable,
+        interruptible,
+    };
+    let immune = |aura, misc, helpful, both_polarities| Aura {
+        slot: 0,
+        crowd_control: false,
+        source_guid: None,
+        self_only: false,
+        applies_aura: true,
+        immunities: vec![Immunity {
+            aura,
+            misc,
+            both_polarities,
+        }],
+        state: AuraState {
+            spell_id: 642,
+            name: Some("Shield".into()),
+            helpful,
+            ..Default::default()
+        },
+    };
+    let read = |script: &mut UiScript| {
+        script
+            .eval::<Option<bool>>(r#"return (select(8, C_Spell.UnitCastingInfo("target")))"#)
+            .unwrap()
+    };
+    script
+        .run(
+            r#"
+      flips = {}
+      local f = CreateFrame("Frame")
+      f:RegisterEvent("UNIT_SPELLCAST_INTERRUPTIBLE")
+      f:RegisterEvent("UNIT_SPELLCAST_NOT_INTERRUPTIBLE")
+      f:SetScript("OnEvent", function() table.insert(flips, event .. ":" .. arg1) end)
+    "#,
+        )
+        .unwrap();
+    casts::set_casts(script.lua(), [(7, cast(true, true))]);
+    // Without a known interrupt or silence the value is always false.
+    assert_eq!(read(&mut script), Some(false));
+    let kick = Stopper {
+        silence: false,
+        school_mask: 1,
+        effect: 68,
+        effect_mechanic: 26,
+        ..Default::default()
+    };
+    interrupts::set_stoppers(script.lua(), vec![kick.clone()]);
+    assert_eq!(read(&mut script), Some(false));
+    script.tick(0.01);
+    // A helpful physical immunity blocks a physical interrupt.
+    auras::set_auras(script.lua(), 7, Some(vec![immune(39, 1, true, false)]));
+    assert_eq!(read(&mut script), Some(true));
+    script.tick(0.01);
+    // A hostile one does not, unless it blocks both polarities (Banish).
+    auras::set_auras(script.lua(), 7, Some(vec![immune(39, 127, false, false)]));
+    assert_eq!(read(&mut script), Some(false));
+    script.tick(0.01);
+    auras::set_auras(script.lua(), 7, Some(vec![immune(39, 127, false, true)]));
+    assert_eq!(read(&mut script), Some(true));
+    // An arcane silence passes a physical immunity.
+    let silence = Stopper {
+        silence: true,
+        school_mask: 64,
+        effect: 6,
+        effect_aura: 27,
+        ..kick
+    };
+    interrupts::set_stoppers(script.lua(), vec![kick, silence]);
+    auras::set_auras(script.lua(), 7, Some(vec![immune(39, 1, true, false)]));
+    assert_eq!(read(&mut script), Some(false));
+    // A cast no interrupt takes still falls to the silence; one neither takes cannot be stopped.
+    casts::set_casts(script.lua(), [(7, cast(true, false))]);
+    assert_eq!(read(&mut script), Some(false));
+    casts::set_casts(script.lua(), [(7, cast(false, false))]);
+    assert_eq!(read(&mut script), Some(true));
+    let flips = script
+        .eval::<String>("return table.concat(flips, ',')")
+        .unwrap();
+    assert_eq!(
+        flips,
+        "UNIT_SPELLCAST_NOT_INTERRUPTIBLE:target,UNIT_SPELLCAST_INTERRUPTIBLE:target"
+    );
 }

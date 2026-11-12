@@ -9,6 +9,7 @@ pub(crate) mod clicks;
 mod combat_log;
 mod icons;
 pub(crate) mod input;
+pub(crate) mod interrupts;
 mod item_sets;
 mod lockout;
 mod loot;

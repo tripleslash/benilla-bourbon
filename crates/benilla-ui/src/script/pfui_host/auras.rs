@@ -17,6 +17,8 @@ pub struct Aura {
     pub self_only: bool,
     /// One of the spell's effects applies an aura, which a player who knows it could cast.
     pub applies_aura: bool,
+    /// The spell's active immunity effects, which can keep an interrupt or silence off its wearer.
+    pub immunities: Vec<super::interrupts::Immunity>,
 }
 
 /// An aura's group in the order the modern getters list them: the player's or their pet's, then
@@ -249,6 +251,13 @@ pub(crate) fn unit_guid(lua: &Lua, token: &str) -> Option<u64> {
     crate::script::unit::guid_of(lua, &model, token)
         .ok()
         .flatten()
+}
+
+/// The auras a unit wears, by GUID.
+pub(crate) fn of_guid(lua: &Lua, guid: u64) -> Vec<Aura> {
+    lua.app_data_ref::<Extras>()
+        .and_then(|extras| extras.by_guid.get(&guid).cloned())
+        .unwrap_or_default()
 }
 
 pub(crate) fn list(lua: &Lua, token: &str, filter: Option<&str>) -> Vec<Aura> {

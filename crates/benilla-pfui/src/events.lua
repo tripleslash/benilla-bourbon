@@ -251,6 +251,33 @@ onFrame(function()
   scale, width, height, scaleSet = s, w, h, nil
 end)
 
+---------------------------------------------------------------------------------------------------
+-- UNIT_SPELLCAST_INTERRUPTIBLE / UNIT_SPELLCAST_NOT_INTERRUPTIBLE: a change of the
+-- notInterruptible value during the target's or focus's cast; a cast's first value fires nothing.
+---------------------------------------------------------------------------------------------------
+local shield = {}
+local function castShield(unit)
+  local name, _, _, startMs, _, _, castID, noInterrupt = C_Spell.UnitCastingInfo(unit)
+  if name then return "cast" .. tostring(castID) .. tostring(startMs), noInterrupt and true or false end
+  local spellID
+  name, _, _, startMs, _, _, noInterrupt, spellID = C_Spell.UnitChannelInfo(unit)
+  if name then return "channel" .. tostring(spellID) .. tostring(startMs), noInterrupt and true or false end
+end
+onFrame(function()
+  if not UnitGUID("player") then return end
+  for _, unit in ipairs({ "target", "focus" }) do
+    local guid = UnitGUID(unit)
+    local key, value
+    if guid then key, value = castShield(unit) end
+    if key then key = guid .. key end
+    local was = shield[unit]
+    if key and was and was.key == key and was.value ~= value then
+      fire(value and "UNIT_SPELLCAST_NOT_INTERRUPTIBLE" or "UNIT_SPELLCAST_INTERRUPTIBLE", unit)
+    end
+    shield[unit] = key and { key = key, value = value } or nil
+  end
+end)
+
 driver:SetScript("OnUpdate", function()
   local elapsed = arg1
   for _, pass in ipairs(passes) do pass(elapsed) end
