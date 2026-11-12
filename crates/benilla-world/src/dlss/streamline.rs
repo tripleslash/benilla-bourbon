@@ -108,6 +108,10 @@ const SL_SDK_VERSION: u64 = (2 << 48) | (14 << 32) | (16 << 16) | 0xfedc;
 
 const ePreferenceDisableCLStateTracking: u64 = 1 << 0;
 const ePreferenceUseManualHooking: u64 = 1 << 2;
+/// `PreferenceFlags::eUseFrameBasedResourceTagging` (`sl_core_types.h`): required by
+/// `slSetTagForFrame`, the only tagging call here; without it Streamline refuses every tag
+/// (`'slSetTagForFrame' SL API is called but … flag is not set`) and DLSS-G has no inputs.
+const ePreferenceUseFrameBasedResourceTagging: u64 = 1 << 7;
 
 const eRenderD3D12: u32 = 1;
 const eRenderVulkan: u32 = 2;
@@ -714,7 +718,9 @@ pub(super) fn boot(_app: &mut App, runtime: &DlssRuntime, backends: wgpu::Backen
         allocate_callback: ptr::null(),
         release_callback: ptr::null(),
         log_message_callback: Some(log_message),
-        flags: ePreferenceDisableCLStateTracking | ePreferenceUseManualHooking,
+        flags: ePreferenceDisableCLStateTracking
+            | ePreferenceUseManualHooking
+            | ePreferenceUseFrameBasedResourceTagging,
         features_to_load: features.as_ptr(),
         num_features_to_load: features.len() as u32,
         application_id: 0,
