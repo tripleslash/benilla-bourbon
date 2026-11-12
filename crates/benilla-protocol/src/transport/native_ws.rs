@@ -80,9 +80,12 @@ pub(super) fn connect(base: &str, host: &str, port: u16) -> io::Result<Arc<Link>
     };
     // The drain's short wait, on the descriptor tungstenite reads: Windows keeps `SO_RCVTIMEO` per
     // descriptor, so set on the clone it would never reach the session's reads. The clone only
-    // waits (`peek`, no timeout) and shuts down.
+    // waits (`peek`) and shuts down: with no timeout on Windows; elsewhere the option is the
+    // socket's, shared by both descriptors, so the clone keeps the drain's wait (clearing it would
+    // leave the drain blocked holding the lock) and its `peek` timing out reads as nothing yet.
     inner.set_read_timeout(Some(DRAIN_WAIT))?;
     let raw = inner.try_clone()?;
+    #[cfg(windows)]
     raw.set_read_timeout(None)?;
     // Nagle off, as the TCP body sets it (decision 0617).
     let _ = raw.set_nodelay(true);
@@ -116,8 +119,12 @@ fn run_pump(shared: &Shared) {
         if drained {
             // Wait for bytes with the lock free, so a write never queues behind an idle read.
             match shared.raw.peek(&mut probe) {
-                Ok(0) | Err(_) => break,
+                Ok(0) => break,
                 Ok(_) => {}
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                    continue
+                }
+                Err(_) => break,
             }
         }
         drained = true;
