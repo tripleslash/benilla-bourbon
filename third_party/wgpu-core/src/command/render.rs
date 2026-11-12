@@ -2390,6 +2390,8 @@ pub(super) fn encode_render_pass(
                 dynamic_offset_count: 0,
 
                 string_offset: 0,
+
+                init_registered: Default::default(),
             },
 
             immediate_slots_set: Default::default(),

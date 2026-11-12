@@ -57,6 +57,13 @@ pub(crate) struct PassState<'scope, 'snatch_guard, 'cmd_enc> {
     pub(crate) dynamic_offset_count: usize,
 
     pub(crate) string_offset: usize,
+
+    /// BENILLA: the bind groups (by tracker index) whose init actions this pass has registered.
+    /// A rebind re-flushes a group, and a pipeline-layout change every group, before each draw;
+    /// registering a group's buffers and textures again within one pass adds nothing (the
+    /// discards a registration consumes only change at a pass's end), and it was the most of a
+    /// draw's encoding cost.
+    pub(crate) init_registered: crate::FastHashSet<usize>,
 }
 
 pub(crate) fn set_bind_group<E>(
@@ -147,6 +154,24 @@ pub(super) fn flush_bindings_helper(state: &mut PassState) -> Result<(), Destroy
     let pipeline_layout = state.binder.pipeline_layout.as_ref().unwrap();
 
     for (i, bind_group, dynamic_offsets) in entries {
+        // BENILLA: the init actions once per bind group per pass (`PassState::init_registered`).
+        if !state
+            .init_registered
+            .insert(bind_group.tracking_data.tracker_index().as_usize())
+        {
+            let raw_bg = bind_group.try_raw(state.base.snatch_guard)?;
+            unsafe {
+                state.base.raw_encoder.set_bind_group(
+                    pipeline_layout
+                        .raw()
+                        .expect("Pipeline layout should be valid at this point"),
+                    i as u32,
+                    raw_bg,
+                    dynamic_offsets,
+                );
+            }
+            continue;
+        }
         state.base.buffer_memory_init_actions.extend(
             bind_group.buffer_init_actions.iter().filter_map(|action| {
                 action

@@ -701,6 +701,7 @@ pub(super) fn encode_compute_pass(
             pending_discard_init_fixups: SurfacesInDiscardState::new(),
             scope: device.new_usage_scope(),
             string_offset: 0,
+            init_registered: Default::default(),
         },
         active_query: None,
 

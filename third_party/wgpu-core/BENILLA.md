@@ -177,6 +177,31 @@ queues.
 | `src/track/buffer.rs`, `src/track/texture.rs`, `src/track/mod.rs` | `transitioned`, `read_only_state`, `mark_for_async_queue`. |
 | `src/lock/rank.rs` | `ASYNC_QUEUE_LIFE_TRACKER` wherever the main queue's life tracker may be taken, after it, and followed by what it may be; `ASYNC_QUEUE_FENCE` a leaf (wgpu 30 holds the device's own fence unlocked, so `command_indices`, held across both submits, orders the async submit against the main queue's). |
 
+## Init actions once per bind group per pass
+
+Before each draw or dispatch, `flush_bindings_helper` (`src/command/pass.rs`) re-flushes every group
+the binder marks dirty: the one a `set_bind_group` replaced, and every group from the first one a
+pipeline-layout change invalidated. Upstream registers each flushed group's buffer and texture
+init actions every time: per buffer a `RwLock` read and a range check, per texture a `RwLock`
+read, a range check per mip level and a scan of the pass's discarded surfaces. Re-registering a
+group the pass already registered adds nothing: the first registration has already queued every
+uninitialized range for the submit (a second only queues the same ranges again, which the submit
+skips once the first has initialized them), and it has already consumed every discarded surface
+the group's textures cover, because discards are added only when a pass ends
+(`RenderPassInfo::finish`), never inside one. So a pass registers a group once
+(`PassState::init_registered`, by the group's tracker index; a group the pass holds keeps its
+index), and a re-flush only binds the raw group.
+
+Measured on an RTX 5080 (Vulkan, `benilla-worldview`, 1440×810, where the frame is CPU-bound): the
+flush was 726 ms/s of the render thread's 880 ms/s of render-pass encoding at Darnassus (200k
+flushes a second, 3.6 µs each), and the frame went from p50 8.2 ms to 5.9 ms there and from 7.9 ms
+to 5.7 ms at Goldshire.
+
+| file | hunk |
+|---|---|
+| `src/command/pass.rs`, `PassState`, `flush_bindings_helper` | `init_registered`; a group already in it skips straight to the raw `set_bind_group`. |
+| `src/command/render.rs`, `encode_render_pass`; `src/command/compute.rs`, `encode_compute_pass` | initialize it empty. |
+
 ## How to check
 
 ```sh
