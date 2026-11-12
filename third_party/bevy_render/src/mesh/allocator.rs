@@ -878,6 +878,51 @@ mod tests {
         assert_eq!(mesh_allocator.slab_count(), 0);
     }
 
+    /// benilla fork (BENILLA.md, "The nineteenth delta"): a `Render` run with no extract before
+    /// it, after the frame's `prepare_assets` drained `extracted` and `Cleanup` ran, keeps the
+    /// meshes this frame added or modified. Without the cleanup it frees them and allocates nothing.
+    #[test]
+    fn a_render_run_without_an_extract_keeps_this_frames_meshes() {
+        let (render_device, render_queue) = create_dummy_device();
+        let settings = MeshAllocatorSettings::default();
+        let mut mesh_vertex_buffer_layouts = MeshVertexBufferLayouts::default();
+        let mut run = |mesh_allocator: &mut MeshAllocator, extracted: &ExtractedAssets<RenderMesh>| {
+            mesh_allocator.free_meshes(extracted);
+            mesh_allocator.allocate_meshes(
+                &settings,
+                extracted,
+                &mut mesh_vertex_buffer_layouts,
+                &render_device,
+                &render_queue,
+            );
+        };
+        for retire in [false, true] {
+            let mut mesh_allocator = mesh_allocator(true);
+            let mesh_id = mesh_id(1);
+            let mut world = bevy_ecs::world::World::new();
+            world.insert_resource(modified_mesh(mesh_id, test_mesh()));
+            run(&mut mesh_allocator, world.resource());
+            // `prepare_assets` takes the extracted meshes, then `Cleanup` runs.
+            world
+                .resource_mut::<ExtractedAssets<RenderMesh>>()
+                .extracted
+                .clear();
+            if retire {
+                use bevy_ecs::system::RunSystemOnce;
+                world
+                    .run_system_once(crate::render_asset::retire_extracted_assets::<RenderMesh>)
+                    .unwrap();
+            }
+            // The held frame's `Render`, with no extract between.
+            run(&mut mesh_allocator, world.resource());
+            assert_eq!(
+                mesh_allocator.mesh_vertex_slice(&mesh_id).is_some(),
+                retire,
+                "retire = {retire}"
+            );
+        }
+    }
+
     /// A mesh flagged `modified` must be freed even when it isn't re-extracted.
     ///
     /// `added` covers meshes that come back around for reallocation, but a mesh

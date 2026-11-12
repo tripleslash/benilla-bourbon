@@ -389,6 +389,20 @@ render graph (`SubmitStart`), after the last submit (`SubmitEnd`) and around the
 (`PresentStart`, `PresentEnd`). Streamline's PC Latency markers, which DLSS Frame Generation
 requires, are set there (`benilla-world/src/dlss/streamline.rs`). Unset, a `OnceLock` read per point.
 
+## The nineteenth delta: a `Render` run with no extract keeps this frame's assets
+
+`src/render_asset.rs` and `src/erased_render_asset.rs`: each asset plugin adds
+`retire_extracted_assets::<A>` (`retire_extracted_erased_assets::<A>`) in `RenderSystems::Cleanup`,
+which empties `ExtractedAssets<A>`. Extract clears it before the next frame anyway, so an ordinary
+frame is unchanged. benilla's frame-generation held frame (`benilla-world/src/fsr/cadence.rs`,
+`run_held_frames`) runs `Render` again with no extract, and upstream's sets then read as this
+frame's a second time. `allocate_and_free_meshes` frees every mesh in `added` and `modified` and
+allocates only `extracted`, which `prepare_assets` already drained, so each mesh written that frame
+lost its slab and drew nothing until it was written again: the player UI, whose batch meshes are
+rewritten as it changes, blinked under FSR frame generation. `prepare_assets` also skips a deferred
+asset that is in `added`, so an asset budgeted to the next frame was dropped. Test:
+`mesh::allocator::tests::a_render_run_without_an_extract_keeps_this_frames_meshes`.
+
 ## What this does NOT do
 
 It does not make the render app single-threaded, and it is not a general fix for "wgpu on a worker".

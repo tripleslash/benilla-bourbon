@@ -149,6 +149,12 @@ impl<A: RenderAsset, AFTER: RenderAssetDependency + 'static> Plugin
                 .add_systems(
                     ExtractSchedule,
                     extract_render_asset::<A>.in_set(AssetExtractionSystems),
+                )
+                // benilla fork (BENILLA.md, "The nineteenth delta"): a `Render` run with no
+                // extract before it sees this frame's sets as processed.
+                .add_systems(
+                    Render,
+                    retire_extracted_assets::<A>.in_set(RenderSystems::Cleanup),
                 );
             AFTER::register_system(
                 render_app,
@@ -391,6 +397,19 @@ impl<A: RenderAsset> Default for PrepareNextFrameAssets<A> {
             assets: Default::default(),
         }
     }
+}
+
+/// benilla fork (BENILLA.md, "The nineteenth delta"): `Cleanup`, empty this frame's extraction
+/// sets, which extract would clear before the next frame anyway. A `Render` run with no extract
+/// before it (benilla's frame-generation held frame) otherwise reads them again: the mesh allocator
+/// frees every mesh in `added` and `modified` and reallocates only `extracted`, which `prepare_assets`
+/// drained, and an asset budgeted to the next frame is skipped for being in `added`.
+pub fn retire_extracted_assets<A: RenderAsset>(mut extracted_assets: ResMut<ExtractedAssets<A>>) {
+    let assets = &mut *extracted_assets;
+    assets.extracted.clear();
+    assets.removed.clear();
+    assets.modified.clear();
+    assets.added.clear();
 }
 
 /// This system prepares all assets of the corresponding [`RenderAsset::SourceAsset`] type

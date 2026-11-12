@@ -134,6 +134,11 @@ impl<A: ErasedRenderAsset, AFTER: ErasedRenderAssetDependency + 'static> Plugin
                 .add_systems(
                     ExtractSchedule,
                     extract_erased_render_asset::<A>.in_set(AssetExtractionSystems),
+                )
+                // benilla fork (BENILLA.md, "The nineteenth delta").
+                .add_systems(
+                    Render,
+                    retire_extracted_erased_assets::<A>.in_set(RenderSystems::Cleanup),
                 );
             AFTER::register_system(
                 render_app,
@@ -369,6 +374,18 @@ impl<A: ErasedRenderAsset> Default for PrepareNextFrameAssets<A> {
 
 /// This system prepares all assets of the corresponding [`ErasedRenderAsset::SourceAsset`] type
 /// which where extracted this frame for the GPU.
+/// benilla fork (BENILLA.md, "The nineteenth delta"): `Cleanup`, empty this frame's extraction
+/// sets, as [`crate::render_asset::retire_extracted_assets`] does for a [`crate::render_asset::RenderAsset`].
+pub fn retire_extracted_erased_assets<A: ErasedRenderAsset>(
+    mut extracted_assets: ResMut<ExtractedAssets<A>>,
+) {
+    let assets = &mut *extracted_assets;
+    assets.extracted.clear();
+    assets.removed.clear();
+    assets.modified.clear();
+    assets.added.clear();
+}
+
 pub fn prepare_erased_assets<A: ErasedRenderAsset>(
     mut extracted_assets: ResMut<ExtractedAssets<A>>,
     mut render_assets: ResMut<ErasedRenderAssets<A::ErasedAsset>>,
