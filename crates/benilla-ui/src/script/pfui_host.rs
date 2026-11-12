@@ -11,6 +11,7 @@ pub mod casts;
 pub(crate) mod chat_event;
 mod cursor;
 mod descriptors;
+pub mod durations;
 mod editbox_caret;
 mod engine;
 pub(crate) mod equipment_actions;
@@ -329,6 +330,7 @@ pub fn install(lua: &Lua) -> mlua::Result<()> {
     bubbles::install(lua)?;
     descriptors::install(lua)?;
     engine::install(lua)?;
+    durations::install(lua)?;
     xml::install(lua)?;
     message_history::install(lua)?;
     editbox_caret::install(lua)?;

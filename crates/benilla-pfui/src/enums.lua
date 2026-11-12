@@ -1,4 +1,4 @@
-Enum = {
+local enums = {
   UICursorType = { Default=0, Item=1, Money=2, Spell=3, PetAction=4, Merchant=5,
     ActionBar=6, Macro=7, Ammo=8, Pet=9, EquipmentSet=12 },
   PowerType = { HealthCost = -2, None = -1, Mana = 0, Rage = 1, Focus = 2, Energy = 3, Happiness = 4 },
@@ -9,6 +9,9 @@ Enum = {
     CurrencyTokenObsolete = 10, Quiver = 11, Questitem = 12, Key = 13,
     PermanentObsolete = 14, Miscellaneous = 15 },
 }
+-- Merged into what an earlier chunk already declared (durations.lua's enums).
+Enum = Enum or {}
+for name, values in pairs(enums) do Enum[name] = values end
 
 -- Slot IDs match the host's 1.12 inventory snapshots (ammo is slot zero).
 local slots = { 'AMMO', 'HEAD', 'NECK', 'SHOULDER', 'BODY', 'CHEST', 'WAIST',

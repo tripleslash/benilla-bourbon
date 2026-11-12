@@ -351,7 +351,26 @@ pub fn install(script: &UiScript) -> mlua::Result<()> {
         .call::<()>(tables.clone())?;
     lua.load(include_str!("animations.lua"))
         .set_name("@benilla-pfui/animations.lua")
-        .call::<()>(tables)?;
+        .call::<()>(tables.clone())?;
+    // Duration objects, text bindings and timer bars; their per-frame pass runs after C_Timer's.
+    let duration_pass = lua
+        .load(include_str!("durations.lua"))
+        .set_name("@benilla-pfui/durations.lua")
+        .call::<mlua::Function>((
+            tables,
+            lua.named_registry_value::<mlua::Table>(
+                benilla_ui::script::pfui_host::durations::DURATION_ENGINE,
+            )?,
+        ))?;
+    let timer_pass: mlua::Function =
+        lua.named_registry_value(benilla_ui::script::pfui_host::TIMER_PASS)?;
+    lua.set_named_registry_value(
+        benilla_ui::script::pfui_host::TIMER_PASS,
+        lua.create_function(move |_, ()| {
+            let timers = timer_pass.call::<()>(());
+            duration_pass.call::<()>(()).and(timers)
+        })?,
+    )?;
     swing_range::install(lua)?;
     combat_log::install(lua)?;
     resurrect::install(lua)?;
@@ -550,6 +569,9 @@ mod tests;
 
 #[cfg(test)]
 mod classicapi_tests;
+
+#[cfg(test)]
+mod durations_tests;
 
 #[cfg(test)]
 mod aura_tests;

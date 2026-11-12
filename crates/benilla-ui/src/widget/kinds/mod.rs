@@ -1392,9 +1392,21 @@ pub struct StatusBarState {
     vertical: bool,
     /// The fill texture (`<BarTexture>`, `+0x324`), whose coordinates the update writes.
     pub bar: Option<RegionHandle>,
+    /// A ClassicAPI client's shown fill, drawn in place of the value's while set (a timer bar, an
+    /// eased value); the range, the value and `OnValueChanged` are untouched by it.
+    display: Option<f32>,
 }
 
 impl StatusBarState {
+    /// Shows `fraction` (0 to 1) as the fill, or the value's fill again with `None`.
+    pub fn set_display(&mut self, fraction: Option<f32>) {
+        let fraction = fraction.map(|f| if f.is_nan() { 0.0 } else { f.clamp(0.0, 1.0) });
+        if self.display != fraction {
+            self.display = fraction;
+            self.fill_dirty = true;
+        }
+    }
+
     /// The range, `(min, max)`, as `GetMinMaxValues` answers it.
     pub fn min_max(&self) -> (f32, f32) {
         (self.min, self.max)
@@ -1462,7 +1474,9 @@ impl StatusBarState {
     /// The fill fraction `(value − min) / (max − min)` (`0x783380`), `0.0` when `max − min` is not
     /// above 0.
     pub fn fraction(&self) -> f32 {
-        if self.max - self.min > 0.0 {
+        if let Some(display) = self.display {
+            display
+        } else if self.max - self.min > 0.0 {
             ((self.value - self.min) / (self.max - self.min)).clamp(0.0, 1.0)
         } else {
             0.0
@@ -1477,7 +1491,8 @@ impl StatusBarState {
     /// VERTICAL (`0x78342f`-`0x783436`), so a vertical bar shows the top of its art. Otherwise it
     /// answers `None` and the texture keeps whatever coordinates it holds.
     pub fn take_fill(&mut self) -> Option<[f32; 4]> {
-        if !(self.fill_dirty && self.bar.is_some() && self.range_valid && self.has_value) {
+        let filled = (self.range_valid && self.has_value) || self.display.is_some();
+        if !(self.fill_dirty && self.bar.is_some() && filled) {
             return None;
         }
         self.fill_dirty = false;
