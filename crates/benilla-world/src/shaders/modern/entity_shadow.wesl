@@ -24,7 +24,9 @@ struct EntityDraw {
     world_from_local: mat4x4<f32>,
     rig_slot: u32,
 }
-@group(1) @binding(0) var<uniform> part: EntityDraw;
+// fork (perf): the caster table, one row per part of the frame; a draw's instances are its parts'
+// slots (`modern_shadow.rs`, `draw_caster_runs`), so one instanced draw takes a run of one mesh.
+@group(1) @binding(0) var<storage, read> parts: array<EntityDraw>;
 
 @if(SKINNED) {
 // The shared light buffer, laid out exactly as `wow_model.wesl`'s `WowLight`; only the rig
@@ -63,11 +65,12 @@ struct PartVertex {
     @if(CUTOUT) @location(2) uv: vec2<f32>,
     @if(SKINNED) @location(10) joint_indices: vec4<u32>,
     @if(SKINNED) @location(11) joint_weights: vec4<f32>,
-    // fork: the layer this invocation draws, and the layers this part is culled into: the draw
-    // passes its view mask as its one instance (`first_instance`), and a view outside it gets
-    // nothing, exactly as the per-layer pass that would not have drawn it there.
+    // fork: the layer this invocation draws (MULTIVIEW).
     @if(MULTIVIEW) @builtin(view_index) view_index: u32,
-    @if(MULTIVIEW) @builtin(instance_index) view_mask: u32,
+    // The part's caster-table slot. fork: under MULTIVIEW the draw's one instance carries the slot
+    // above the layers this part is culled into (`multiview.rs`, `instance_of`), and a view outside
+    // them gets nothing, exactly as the per-layer pass that would not have drawn it there.
+    @builtin(instance_index) instance: u32,
 }
 
 struct PartVsOut {
@@ -80,6 +83,12 @@ struct PartVsOut {
 @vertex
 fn vertex(v: PartVertex) -> PartVsOut {
     var out: PartVsOut;
+@if(MULTIVIEW) {
+    let part = parts[v.instance >> 4u];
+    let view_mask = v.instance & 15u;
+} @else {
+    let part = parts[v.instance];
+}
 @if(SKINNED) {
     let slot = part.rig_slot;
     let word = skin.rig_table[slot];
@@ -107,7 +116,7 @@ fn vertex(v: PartVertex) -> PartVsOut {
 @if(MULTIVIEW) {
     // Every vertex of the part lands on one point outside the clip volume in a view it was not
     // culled into: no triangle of it rasterizes there.
-    if ((v.view_mask >> v.view_index) & 1u) == 0u {
+    if ((view_mask >> v.view_index) & 1u) == 0u {
         out.position = vec4<f32>(2.0, 2.0, 0.5, 1.0);
     }
 }

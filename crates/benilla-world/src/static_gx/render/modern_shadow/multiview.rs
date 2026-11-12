@@ -16,8 +16,9 @@
 //! the mask's highest bit), so `entity_shadow.wesl`'s `MULTIVIEW` variant reads cascade `i`'s
 //! matrix at row `i` of [`MultiviewViews`].
 //!
-//! **Per-view culling is kept.** Each part's draw carries its own view mask as its one instance
-//! (`first_instance`): the layers of the pass whose entity cull ([`entity_cull_for`]) takes it.
+//! **Per-view culling is kept.** Each part's draw carries its own view mask in its one instance
+//! (`first_instance`, under its caster-table slot, [`instance_of`]): the layers of the pass whose
+//! entity cull ([`entity_cull_for`]) takes it.
 //! The vertex stage moves the part outside the clip volume in any other view, so every layer
 //! receives exactly the triangles its own pass would have drawn, and the dirty tiles each layer
 //! records for the next frame's restore are unchanged (the layer's own loop still marks them).
@@ -61,6 +62,12 @@ pub(super) struct MultiviewViews {
 pub(crate) fn switch_on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| crate::launch_env::var("WOW_SHADOW_MULTIVIEW").as_deref() != Some("0"))
+}
+
+/// A multiview draw's one instance: the part's caster-table slot above its view mask's
+/// [`MAX_CASCADES`] bits (`entity_shadow.wesl`, `MULTIVIEW`).
+fn instance_of(slot: u32, views: u32) -> u32 {
+    slot << MAX_CASCADES | views
 }
 
 /// The layers a pass under `mask` spans: `0..=` its highest bit.
@@ -237,7 +244,7 @@ pub(super) fn plan<'a>(
     let caps = world.get_resource::<HwCaps>()?;
     let bind = frame.mv_bind.as_ref()?;
     let entities = world.get_resource::<EntityShadowFrame>()?;
-    if entities.draw_bind.is_none() || entities.skin_bind.is_none() || entities.draws.is_empty() {
+    if entities.draw_bind.is_none() || entities.draws.is_empty() {
         return None;
     }
     let wanted = wanted(Some(caps), cascades.count);
@@ -301,7 +308,7 @@ pub(super) fn draw(
     let Some(entities) = world.get_resource::<EntityShadowFrame>() else {
         return;
     };
-    let (Some(draw_bind), Some(skin_bind)) = (&entities.draw_bind, &entities.skin_bind) else {
+    let Some(draw_bind) = &entities.draw_bind else {
         return;
     };
     let diagnostics = render_context.diagnostic_recorder();
@@ -342,16 +349,14 @@ pub(super) fn draw(
                 continue;
             };
             pass.set_render_pipeline(pipeline);
-            pass.set_bind_group(
-                1,
-                if cmd.skinned { skin_bind } else { draw_bind },
-                &[cmd.offset],
-            );
+            pass.set_bind_group(1, draw_bind, &[]);
             if let Some(cut) = &cmd.cutout {
                 pass.set_bind_group(2, cut, &[]);
             }
             pass.set_vertex_buffer(0, vslice.buffer.slice(..));
-            // The part's view mask is its one instance (`entity_shadow.wesl`, `MULTIVIEW`).
+            // The part's one instance packs its slot and its view mask (`entity_shadow.wesl`,
+            // `MULTIVIEW`, [`instance_of`]).
+            let instance = instance_of(cmd.slot, views);
             match &mesh.buffer_info {
                 bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } => {
                     let Some(islice) = allocator.mesh_index_slice(&cmd.mesh) else {
@@ -362,11 +367,11 @@ pub(super) fn draw(
                     pass.draw_indexed(
                         islice.range.clone(),
                         i32::try_from(vslice.range.start).unwrap_or(0),
-                        views..views + 1,
+                        instance..instance + 1,
                     );
                 }
                 bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => {
-                    pass.draw(vslice.range.clone(), views..views + 1);
+                    pass.draw(vslice.range.clone(), instance..instance + 1);
                 }
             }
         }
@@ -427,6 +432,19 @@ mod tests {
         assert!(src.contains(&row));
         for &mask in &MASKS {
             assert!(span_of(mask) as usize <= MAX_CASCADES);
+        }
+    }
+
+    /// The instance packs the slot above the mask's bits, and the shader unpacks it the same way.
+    #[test]
+    fn the_instance_packs_slot_and_mask_as_the_shader_reads_them() {
+        let src = include_str!("../../../shaders/modern/entity_shadow.wesl");
+        let mask_bits = (1u32 << MAX_CASCADES) - 1;
+        assert!(src.contains(&format!("parts[v.instance >> {MAX_CASCADES}u]")));
+        assert!(src.contains(&format!("v.instance & {mask_bits}u")));
+        for &mask in &MASKS {
+            let i = instance_of(677, mask);
+            assert_eq!((i >> MAX_CASCADES, i & mask_bits), (677, mask));
         }
     }
 }

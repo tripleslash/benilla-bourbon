@@ -184,18 +184,24 @@ impl AtlasSlot {
 #[derive(Resource, Default)]
 struct CasterViewBuffer(DynamicUniformBuffer<CasterView>);
 
-#[derive(Clone, Copy, ShaderType)]
+/// One entity part's row of the caster table, `entity_shadow.wesl`'s `parts` (std430: the matrix,
+/// the rig slot, padding to the 16-byte stride).
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
 struct EntityDraw {
-    world_from_local: Mat4,
+    world_from_local: [f32; 16],
     rig_slot: u32,
+    _pad: [u32; 3],
 }
 
 /// Entity caster pipelines by (mesh vertex layout, skinned, cutout, fixture clip).
 #[derive(Resource)]
 struct EntityShadowPipelines {
     view_layout: BindGroupLayoutDescriptor,
+    /// Group 1 of every caster pipeline: the caster table and the shared light buffer (the
+    /// skinned variant reads its rig regions; the others bind it unread), so one bind group serves
+    /// a whole pass.
     draw_layout: BindGroupLayoutDescriptor,
-    skin_layout: BindGroupLayoutDescriptor,
     cut_layout: BindGroupLayoutDescriptor,
     shader: Handle<Shader>,
     by_key: StrideMap<(MeshVertexBufferLayoutRef, bool, bool, bool), CachedRenderPipelineId>,
@@ -259,14 +265,7 @@ impl EntityShadowPipelines {
         if multiview {
             defs.push("MULTIVIEW".into());
         }
-        let mut layout = vec![
-            view_layout,
-            if skinned {
-                self.skin_layout.clone()
-            } else {
-                self.draw_layout.clone()
-            },
-        ];
+        let mut layout = vec![view_layout, self.draw_layout.clone()];
         if skinned {
             defs.push("SKINNED".into());
         }
@@ -318,8 +317,15 @@ impl EntityShadowPipelines {
     }
 }
 
-#[derive(Resource, Default)]
-struct EntityDrawBuffer(DynamicUniformBuffer<EntityDraw>);
+/// The caster table: one [`EntityDraw`] per entry of [`EntityShadowFrame::draws`], at its slot.
+#[derive(Resource)]
+struct EntityDrawBuffer(RawBufferVec<EntityDraw>);
+
+impl Default for EntityDrawBuffer {
+    fn default() -> Self {
+        Self(RawBufferVec::new(BufferUsages::STORAGE))
+    }
+}
 
 /// Cutout texture bind groups, rebuilt when the image's view changes.
 #[derive(Resource, Default)]
@@ -331,7 +337,10 @@ struct EntityDrawCmd {
     /// fork: [`Self::pipeline`]'s `FIXTURE_CLIP` twin, queued only for a part that holds a shadowed
     /// light ([`holds`]): the lamp atlas draws a lamp's own model with it.
     fixture_pipeline: Option<CachedRenderPipelineId>,
-    offset: u32,
+    /// fork (perf): its row of the caster table and its index in [`EntityShadowFrame::draws`]; a
+    /// draw passes it as `first_instance`, and a run of consecutive slots of one mesh, pipeline
+    /// and cutout draws as one instanced draw ([`draw_caster_runs`]).
+    slot: u32,
     skinned: bool,
     cutout: Option<BindGroup>,
     center: Vec3,
@@ -353,9 +362,9 @@ struct EntityDrawCmd {
 
 #[derive(Resource, Default)]
 struct EntityShadowFrame {
+    /// In slot order: sorted by pipeline, mesh and cutout, so repeats of one mesh sit together.
     draws: Vec<EntityDrawCmd>,
     draw_bind: Option<BindGroup>,
-    skin_bind: Option<BindGroup>,
 }
 
 /// Terrain caster pipelines, one per vertex stride (position is always attribute 0 at offset 0).
@@ -617,17 +626,10 @@ fn init_shadow_pipelines(
         view_layout: view_layout.clone(),
         draw_layout: BindGroupLayoutDescriptor::new(
             "modern_shadow_entity_draw",
-            &BindGroupLayoutEntries::single(
-                ShaderStages::VERTEX,
-                uniform_buffer::<EntityDraw>(true),
-            ),
-        ),
-        skin_layout: BindGroupLayoutDescriptor::new(
-            "modern_shadow_entity_skin",
             &BindGroupLayoutEntries::sequential(
                 ShaderStages::VERTEX,
                 (
-                    uniform_buffer::<EntityDraw>(true),
+                    storage_buffer_read_only_sized(false, None),
                     storage_buffer_read_only_sized(false, None),
                 ),
             ),
@@ -1091,7 +1093,6 @@ fn prepare_entity_shadows(
 ) {
     frame.draws.clear();
     frame.draw_bind = None;
-    frame.skin_bind = None;
     let (Some(casters), Some(light), Some(mut pipes)) = (casters, light, pipes) else {
         return;
     };
@@ -1102,6 +1103,7 @@ fn prepare_entity_shadows(
     #[cfg(not(target_arch = "wasm32"))]
     let mv_wanted = multiview::wanted(caps.as_deref(), cascades.map_or(0, |c| c.count));
     buffer.0.clear();
+    let mut rows: Vec<EntityDraw> = Vec::with_capacity(casters.parts.len());
     for part in &casters.parts {
         let Some(mesh) = meshes.get(part.mesh) else {
             continue;
@@ -1164,15 +1166,16 @@ fn prepare_entity_shadows(
             }
             _ => None,
         };
-        let offset = buffer.0.push(&EntityDraw {
-            world_from_local: part.world_from_local,
+        rows.push(EntityDraw {
+            world_from_local: part.world_from_local.to_cols_array(),
             rig_slot: part.rig_slot.unwrap_or(0),
+            _pad: [0; 3],
         });
         frame.draws.push(EntityDrawCmd {
             mesh: part.mesh,
             pipeline,
             fixture_pipeline,
-            offset,
+            slot: rows.len() as u32 - 1,
             skinned,
             cutout: cutout_bind,
             center: part.center,
@@ -1194,23 +1197,109 @@ fn prepare_entity_shadows(
             casters.parts.iter().filter_map(|p| p.cutout).collect();
         cut_binds.0.retain(|id, _| live.contains(id));
     }
+    // fork (perf): slot order groups each mesh's repeats, so a pass draws them as one instanced
+    // draw. Depth-only into `GreaterEqual`: the order of parts changes no texel.
+    frame.draws.sort_by_key(caster_key);
+    for (slot, cmd) in frame.draws.iter_mut().enumerate() {
+        buffer.0.push(rows[cmd.slot as usize]);
+        cmd.slot = slot as u32;
+    }
     buffer.0.write_buffer(&device, &queue);
     let Some(binding) = buffer.0.binding() else {
         frame.draws.clear();
         return;
     };
     let draw_layout = pipeline_cache.get_bind_group_layout(&pipes.draw_layout);
-    let skin_layout = pipeline_cache.get_bind_group_layout(&pipes.skin_layout);
     frame.draw_bind = Some(device.create_bind_group(
         "modern_shadow_entity_draw",
         &draw_layout,
-        &BindGroupEntries::single(binding.clone()),
-    ));
-    frame.skin_bind = Some(device.create_bind_group(
-        "modern_shadow_entity_skin",
-        &skin_layout,
         &BindGroupEntries::sequential((binding, light.0.as_entire_binding())),
     ));
+}
+
+/// fork (perf): a caster's sort key — its pipeline, mesh and cutout texture, so the parts one
+/// instanced draw can take sit next to each other. A hash groups; [`draw_caster_runs`] compares.
+fn caster_key(d: &EntityDrawCmd) -> (CachedRenderPipelineId, u64, Option<BindGroupId>) {
+    use std::hash::BuildHasher;
+    let mesh = bevy::platform::hash::FixedHasher.hash_one(d.mesh);
+    (d.pipeline, mesh, d.cutout.as_ref().map(BindGroup::id))
+}
+
+/// fork (perf): draw `casters` (slot order, each with its pipeline) as runs: consecutive slots of
+/// one pipeline, mesh and cutout are one instanced draw over their slots (`first_instance` the
+/// first, `entity_shadow.wesl` reading `parts[instance_index]`). Group 1 is `bind` for the whole
+/// pass; group 0 is the caller's. Whether anything was drawn.
+fn draw_caster_runs<'w>(
+    pass: &mut bevy::render::render_phase::TrackedRenderPass<'w>,
+    bind: &'w BindGroup,
+    casters: impl IntoIterator<Item = (&'w EntityDrawCmd, &'w RenderPipeline)>,
+    meshes: &'w RenderAssets<RenderMesh>,
+    allocator: &'w MeshAllocator,
+) -> bool {
+    let mut drew = false;
+    let mut run: Option<(&'w EntityDrawCmd, &'w RenderPipeline, u32)> = None;
+    for (cmd, pipeline) in casters {
+        if let Some((head, head_pipe, n)) = &mut run {
+            let joins = head.slot + *n == cmd.slot
+                && head_pipe.id() == pipeline.id()
+                && head.mesh == cmd.mesh
+                && head.cutout.as_ref().map(BindGroup::id)
+                    == cmd.cutout.as_ref().map(BindGroup::id);
+            if joins {
+                *n += 1;
+                continue;
+            }
+            drew |= draw_caster_run(pass, bind, head, head_pipe, *n, meshes, allocator);
+        }
+        run = Some((cmd, pipeline, 1));
+    }
+    if let Some((head, head_pipe, n)) = run {
+        drew |= draw_caster_run(pass, bind, head, head_pipe, n, meshes, allocator);
+    }
+    drew
+}
+
+/// One run of [`draw_caster_runs`]: `n` instances of `head`'s mesh from `head`'s slot.
+fn draw_caster_run<'w>(
+    pass: &mut bevy::render::render_phase::TrackedRenderPass<'w>,
+    bind: &'w BindGroup,
+    head: &'w EntityDrawCmd,
+    pipeline: &'w RenderPipeline,
+    n: u32,
+    meshes: &'w RenderAssets<RenderMesh>,
+    allocator: &'w MeshAllocator,
+) -> bool {
+    let Some(mesh) = meshes.get(head.mesh) else {
+        return false;
+    };
+    let Some(vslice) = allocator.mesh_vertex_slice(&head.mesh) else {
+        return false;
+    };
+    let instances = head.slot..head.slot + n;
+    pass.set_render_pipeline(pipeline);
+    pass.set_bind_group(1, bind, &[]);
+    if let Some(cut) = &head.cutout {
+        pass.set_bind_group(2, cut, &[]);
+    }
+    pass.set_vertex_buffer(0, vslice.buffer.slice(..));
+    match &mesh.buffer_info {
+        bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } => {
+            let Some(islice) = allocator.mesh_index_slice(&head.mesh) else {
+                return false;
+            };
+            pass.set_index_buffer(islice.buffer.slice(..), *index_format);
+            crate::static_gx::count_draw(1);
+            pass.draw_indexed(
+                islice.range.clone(),
+                i32::try_from(vslice.range.start).unwrap_or(0),
+                instances,
+            );
+        }
+        bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => {
+            pass.draw(vslice.range.clone(), instances);
+        }
+    }
+    true
 }
 
 pub(crate) fn gx_shadow_pass(
@@ -1552,8 +1641,7 @@ pub(crate) fn gx_shadow_pass(
             let Some(entities) = world.get_resource::<EntityShadowFrame>() else {
                 return;
             };
-            let (Some(draw_bind), Some(skin_bind)) = (&entities.draw_bind, &entities.skin_bind)
-            else {
+            let Some(draw_bind) = &entities.draw_bind else {
                 return;
             };
             if entities.draws.is_empty() {
@@ -1583,6 +1671,7 @@ pub(crate) fn gx_shadow_pass(
             // fork: P8b — and WHERE: the tiles the issued casters' footprints touch in this layer,
             // which is all next frame's restore puts back.
             let mut wrote = [0u32; RESTORE_TILES];
+            let mut runs = Vec::with_capacity(entities.draws.len());
             for (j, cmd) in entities.draws.iter().enumerate() {
                 if !cmd.sun || outside_box(&entity_cull, cmd.center, Vec3::splat(cmd.radius)) {
                     continue;
@@ -1600,45 +1689,11 @@ pub(crate) fn gx_shadow_pass(
                     drew = true;
                     continue;
                 }
-                let Some(pipeline) = pipeline_cache.get_render_pipeline(cmd.pipeline) else {
-                    continue;
-                };
-                let Some(mesh) = meshes.get(cmd.mesh) else {
-                    continue;
-                };
-                let Some(vslice) = allocator.mesh_vertex_slice(&cmd.mesh) else {
-                    continue;
-                };
-                pass.set_render_pipeline(pipeline);
-                pass.set_bind_group(
-                    1,
-                    if cmd.skinned { skin_bind } else { draw_bind },
-                    &[cmd.offset],
-                );
-                if let Some(cut) = &cmd.cutout {
-                    pass.set_bind_group(2, cut, &[]);
-                }
-                pass.set_vertex_buffer(0, vslice.buffer.slice(..));
-                match &mesh.buffer_info {
-                    bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } => {
-                        let Some(islice) = allocator.mesh_index_slice(&cmd.mesh) else {
-                            continue;
-                        };
-                        pass.set_index_buffer(islice.buffer.slice(..), *index_format);
-                        crate::static_gx::count_draw(1);
-                        pass.draw_indexed(
-                            islice.range.clone(),
-                            i32::try_from(vslice.range.start).unwrap_or(0),
-                            0..1,
-                        );
-                        drew = true;
-                    }
-                    bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => {
-                        pass.draw(vslice.range.clone(), 0..1);
-                        drew = true;
-                    }
+                if let Some(pipeline) = pipeline_cache.get_render_pipeline(cmd.pipeline) {
+                    runs.push((cmd, pipeline));
                 }
             }
+            drew |= draw_caster_runs(&mut pass, draw_bind, runs, meshes, allocator);
             span.end(&mut pass);
             if drew {
                 frame.layer_dirty[i].store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1782,7 +1837,7 @@ fn draw_local_atlas(
         .dynamic_casters
         .then(|| world.get_resource::<EntityShadowFrame>())
         .flatten()
-        .filter(|e| e.draw_bind.is_some() && e.skin_bind.is_some());
+        .filter(|e| e.draw_bind.is_some());
     let mut atlas = frame
         .atlas
         .lock()
@@ -2154,7 +2209,7 @@ fn draw_atlas_entities(
     meshes: &RenderAssets<RenderMesh>,
     allocator: &MeshAllocator,
 ) {
-    let (Some(draw_bind), Some(skin_bind)) = (&entities.draw_bind, &entities.skin_bind) else {
+    let Some(draw_bind) = &entities.draw_bind else {
         return;
     };
     let diagnostics = render_context.diagnostic_recorder();
@@ -2191,8 +2246,8 @@ fn draw_atlas_entities(
             let Some(&offset) = frame.local_offsets.get(t) else {
                 continue;
             };
-            let mut set_up = false;
-            for cmd in list {
+            let mut runs = Vec::with_capacity(list.len());
+            for &cmd in list {
                 if !face_sees(face, light.pos, cmd.center, cmd.radius) {
                     continue;
                 }
@@ -2202,49 +2257,16 @@ fn draw_atlas_entities(
                 } else {
                     Some(cmd.pipeline)
                 };
-                let Some(pipeline) = id.and_then(|id| pipeline_cache.get_render_pipeline(id))
-                else {
-                    continue;
-                };
-                let Some(mesh) = meshes.get(cmd.mesh) else {
-                    continue;
-                };
-                let Some(vslice) = allocator.mesh_vertex_slice(&cmd.mesh) else {
-                    continue;
-                };
-                if !set_up {
-                    set_atlas_tile(&mut pass, slot, face, tile);
-                    pass.set_bind_group(0, view_bind, &[offset]);
-                    set_up = true;
-                }
-                pass.set_render_pipeline(pipeline);
-                pass.set_bind_group(
-                    1,
-                    if cmd.skinned { skin_bind } else { draw_bind },
-                    &[cmd.offset],
-                );
-                if let Some(cut) = &cmd.cutout {
-                    pass.set_bind_group(2, cut, &[]);
-                }
-                pass.set_vertex_buffer(0, vslice.buffer.slice(..));
-                match &mesh.buffer_info {
-                    bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } => {
-                        let Some(islice) = allocator.mesh_index_slice(&cmd.mesh) else {
-                            continue;
-                        };
-                        pass.set_index_buffer(islice.buffer.slice(..), *index_format);
-                        crate::static_gx::count_draw(1);
-                        pass.draw_indexed(
-                            islice.range.clone(),
-                            i32::try_from(vslice.range.start).unwrap_or(0),
-                            0..1,
-                        );
-                    }
-                    bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => {
-                        pass.draw(vslice.range.clone(), 0..1);
-                    }
+                if let Some(pipeline) = id.and_then(|id| pipeline_cache.get_render_pipeline(id)) {
+                    runs.push((cmd, pipeline));
                 }
             }
+            if runs.is_empty() {
+                continue;
+            }
+            set_atlas_tile(&mut pass, slot, face, tile);
+            pass.set_bind_group(0, view_bind, &[offset]);
+            draw_caster_runs(&mut pass, draw_bind, runs, meshes, allocator);
         }
     }
     span.end(&mut pass);
