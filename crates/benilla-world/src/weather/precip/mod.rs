@@ -75,6 +75,9 @@ const POOL: usize = pool_bound(WeatherKind::Snow);
 // `weatherDensity` table (`0x67b870`: 0.1, 0.33, 0.66, 1.0 for settings 0 to 3).
 /// Rain population `P`: fixed-function `0x80ffa8` = 6500, shader `0x80ffac` = 35000.
 const RAIN_P: f32 = if SHADER_LEG { 35000.0 } else { 6500.0 };
+/// Deviation: rain's drop rate is 0.66 of the reference's, because the maintainer asked for a
+/// less crowded downpour with each streak and splash reading more; 1.0 is byte-faithful.
+const RAIN_DENSITY_SCALE: f32 = 0.66;
 /// Snow population `P`: fixed-function `0x80ffdc` = 1300, shader `0x80ffe0` = 14000.
 const SNOW_P: f32 = if SHADER_LEG { 14000.0 } else { 1300.0 };
 /// Deviation: the drop rate is scaled to a 30 fps client, the frame rate the reference's look
@@ -111,7 +114,9 @@ const RAIN_SPREAD_BIAS: f32 = f32::from_bits(0x3d56_7750); // 0x80ffc0 ≈ 0.052
 const RAIN_FALL_SCALE: f32 = 0.6;
 /// The streak triangle: base `head ∓ 0.05·right` (`0x80ff78`), apex `head + tilt·(2·antiVel̂)`
 /// (`0x80ff74`), fixed world sizes, not scaled by speed; no vertex colour.
-const STREAK_HALF_W: f32 = 0.05;
+/// Deviation: the half-width is 0.07, not the reference's 0.05 (`0x80ff78`), because the thinned
+/// rain ([`RAIN_DENSITY_SCALE`]) wants each streak to read more.
+const STREAK_HALF_W: f32 = 0.07;
 /// Deviation: the tail is 1.5 yd, not the reference's 2 (`0x80ff74`), because the slower fall
 /// ([`RAIN_FALL_SCALE`]) wants a shorter, softer streak.
 const STREAK_TAIL: f32 = 1.5;
@@ -120,10 +125,10 @@ const STREAK_TAIL: f32 = 1.5;
 pub(crate) const RAIN_FOG_START: f32 = 70.0;
 pub(crate) const RAIN_FOG_END: f32 = 75.0;
 /// Patter triangle half-edges: `view_right/12` and `view_up/6` (`0x80e004`, `0x803568`).
-/// Deviation: both are 1.5× the reference's, `/8` and `/4`, because the maintainer asked for a
-/// splash that reads on the floor.
-const PATTER_RIGHT: f32 = 1.5 / 12.0;
-const PATTER_UP: f32 = 1.5 / 6.0;
+/// Deviation: both are 2× the reference's, `/6` and `/3`, because the maintainer asked for a
+/// splash that reads on the floor, and more so under the thinned rain ([`RAIN_DENSITY_SCALE`]).
+const PATTER_RIGHT: f32 = 2.0 / 12.0;
+const PATTER_UP: f32 = 2.0 / 6.0;
 /// Spawn-box horizontal half-extents, from the ctor args (`0x67be40`): rain 130×130
 /// (`0x43020000`), snow 90×90 (`0x42b40000`).
 const RAIN_HALF_XY: f32 = 65.0;

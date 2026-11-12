@@ -131,8 +131,8 @@ mod tests {
         assert_eq!(
             PATTER_SHAPE,
             EffectShape::Patter {
-                right: 1.5 / 12.0,
-                up: 1.5 / 6.0,
+                right: 2.0 / 12.0,
+                up: 2.0 / 6.0,
                 life: 0.25,
             }
         );
@@ -208,7 +208,7 @@ mod tests {
             assert_eq!(
                 streak_shape(tilt, near),
                 EffectShape::Streak {
-                    half_w: 0.05,
+                    half_w: 0.07,
                     tail: 1.5,
                     near,
                     tilt,

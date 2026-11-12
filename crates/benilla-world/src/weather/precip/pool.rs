@@ -523,8 +523,13 @@ pub(super) fn run_kind(
 
     // ===== record =====
     // The emit gate (`0x6754a0`, `0x8015b8` = 1.0): a frame records only when its quota is over
-    // 1, so below ~60 drops/s nothing spawns. `REF_FPS_GAIN` is this path's one deviation.
-    let rate = weather.density_gain() * p * density * REF_FPS_GAIN;
+    // 1, so below ~60 drops/s nothing spawns. `REF_FPS_GAIN` and rain's `RAIN_DENSITY_SCALE` are
+    // this path's deviations.
+    let thin = match kind {
+        WeatherKind::Rain => RAIN_DENSITY_SCALE,
+        _ => 1.0,
+    };
+    let rate = weather.density_gain() * p * density * REF_FPS_GAIN * thin;
     let quota = rate * dt.min(DT_CAP);
     if quota > 1.0 {
         let close_age = p / PACKET_CAP as f32;
