@@ -1,6 +1,6 @@
 -- Widget methods a ClassicAPI client adds to 1.12's, which its Lua addon and pfUI call. A flag
 -- this engine does not draw (clipping, alpha gradients, masks) is kept, so its getter answers.
-local tables = ...
+local tables, tileEngine = ...
 -- Each table takes a method only where it has none: a native one stays.
 local function adding(target)
   return setmetatable({}, {
@@ -249,12 +249,57 @@ function texture:SetDesaturation(amount)
 end
 texture.GetDesaturation = getter("desaturation", 0)
 texture.SetMask = setter("mask")
--- Tiling repeats the image at its own size, which needs the image's pixel size at the draw; the
--- flags are kept for their getters and the texture stretches as 1.12's does.
-function texture:SetHorizTile(tiling) flags(self).horizTile = tiling and true or false end
+-- Tiling repeats the image at its own size, one image pixel to one unit of the texture's size:
+-- its file loads repeating, and the per-frame pass below sets the tiled axis's coordinates to the
+-- repeat count as the size changes. Turning an axis off sets its coordinates back to 0 and 1.
+local tiled = setmetatable({}, {__mode = "k"})
+local function coords(self)
+  local ulx, uly, llx, lly, urx, ury = self:GetTexCoord()
+  return ulx or 0, urx or 1, uly or 0, lly or 1
+end
+local function setTile(self, axis, tiling)
+  local own = flags(self)
+  local was = own[axis]
+  own[axis] = tiling and true or false
+  if own.horizTile or own.vertTile then tiled[self] = true else tiled[self] = nil end
+  if was and not own[axis] then
+    local left, right, top, bottom = coords(self)
+    if axis == "horizTile" then left, right = 0, 1 else top, bottom = 0, 1 end
+    self:SetTexCoord(left, right, top, bottom)
+  end
+end
+function texture:SetHorizTile(tiling) setTile(self, "horizTile", tiling) end
 texture.GetHorizTile = getter("horizTile", false)
-function texture:SetVertTile(tiling) flags(self).vertTile = tiling and true or false end
+function texture:SetVertTile(tiling) setTile(self, "vertTile", tiling) end
 texture.GetVertTile = getter("vertTile", false)
+local function span(low, high, size)
+  if low and high then return high - low end
+  return size
+end
+local function tilePass()
+  for tex in pairs(tiled) do
+    -- A texture that shows an atlas does not tile.
+    if tex:IsVisible() and not (tex.GetAtlas and tex:GetAtlas()) then
+      local iw, ih = tileEngine.prepare(tex)
+      if iw then
+        local own = flags(tex)
+        local left, right, top, bottom = coords(tex)
+        local nl, nr, nt, nb = left, right, top, bottom
+        if own.horizTile then
+          local w = span(tex:GetLeft(), tex:GetRight(), tex:GetWidth())
+          if w and w > 0 then nl, nr = 0, w / iw end
+        end
+        if own.vertTile then
+          local h = span(tex:GetBottom(), tex:GetTop(), tex:GetHeight())
+          if h and h > 0 then nt, nb = 0, h / ih end
+        end
+        if nl ~= left or nr ~= right or nt ~= top or nb ~= bottom then
+          tex:SetTexCoord(nl, nr, nt, nb)
+        end
+      end
+    end
+  end
+end
 function texture:AddMaskTexture(mask)
   local own = flags(self)
   own.masks = own.masks or {}
@@ -362,3 +407,5 @@ function smf:SetScrollOffset(offset)
   self:ScrollToBottom()
   self:ScrollByAmount(offset)
 end
+
+return tilePass

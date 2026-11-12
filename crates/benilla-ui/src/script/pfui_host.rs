@@ -27,6 +27,7 @@ pub mod professions;
 pub mod quests;
 mod sizes;
 pub mod social;
+pub mod tiling;
 pub(crate) mod tooltip_subjects;
 pub mod totems;
 pub mod units;
@@ -372,6 +373,7 @@ pub fn install(lua: &Lua) -> mlua::Result<()> {
     engine::install(lua)?;
     durations::install(lua)?;
     sizes::install(lua)?;
+    tiling::install(lua)?;
     xml::install(lua)?;
     message_history::install(lua)?;
     editbox_caret::install(lua)?;

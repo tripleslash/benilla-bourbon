@@ -1295,3 +1295,43 @@ fn not_interruptible_follows_known_interrupts_and_the_casters_immunities() {
         "UNIT_SPELLCAST_NOT_INTERRUPTIBLE:target,UNIT_SPELLCAST_INTERRUPTIBLE:target"
     );
 }
+
+/// ClassicAPI's tiling: a tiled axis repeats the image at its own size, so its coordinates are
+/// the texture's size over the image's, following the size; the file loads repeating; turning
+/// the axis off gives back 0 and 1.
+#[test]
+fn a_tiled_texture_repeats_its_image_at_its_own_size() {
+    let mut script = extended();
+    script.set_texture_size_probe(Box::new(|_| Some((32, 16))));
+    script
+        .run(
+            r#"
+      local f = CreateFrame("Frame")
+      f:SetWidth(100) f:SetHeight(20)
+      f:SetPoint("TOPLEFT", UIParent or WorldFrame, "TOPLEFT", 0, 0)
+      t = f:CreateTexture(nil, "OVERLAY")
+      t:SetTexture("Interface\\AddOns\\pfUI\\img\\stripes")
+      t:SetAllPoints(f)
+      t:SetHorizTile(true)
+      assert(t:GetHorizTile() and not t:GetVertTile())
+      frame = f
+    "#,
+        )
+        .unwrap();
+    script.tick(0.01);
+    let coords = |script: &mut UiScript| {
+        script
+            .eval::<String>(
+                r#"local a = { t:GetTexCoord() } return string.format("%.4g %.4g %.4g %.4g", a[1], a[5], a[2], a[4])"#,
+            )
+            .unwrap()
+    };
+    assert_eq!(coords(&mut script), "0 3.125 0 1");
+    script
+        .run("frame:SetWidth(64) t:SetVertTile(true)")
+        .unwrap();
+    script.tick(0.01);
+    assert_eq!(coords(&mut script), "0 2 0 1.25");
+    script.run("t:SetHorizTile(false)").unwrap();
+    assert_eq!(coords(&mut script), "0 1 0 1.25");
+}

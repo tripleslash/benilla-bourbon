@@ -365,9 +365,15 @@ pub fn install(script: &UiScript) -> mlua::Result<()> {
     ] {
         tables.set(key, lua.named_registry_value::<mlua::Table>(registry)?)?;
     }
-    lua.load(include_str!("modern_widgets.lua"))
+    let tile_pass = lua
+        .load(include_str!("modern_widgets.lua"))
         .set_name("@benilla-pfui/modern_widgets.lua")
-        .call::<()>(tables.clone())?;
+        .call::<mlua::Function>((
+            tables.clone(),
+            lua.named_registry_value::<mlua::Table>(
+                benilla_ui::script::pfui_host::tiling::TILE_ENGINE,
+            )?,
+        ))?;
     lua.load(include_str!("animations.lua"))
         .set_name("@benilla-pfui/animations.lua")
         .call::<()>(tables.clone())?;
@@ -387,7 +393,9 @@ pub fn install(script: &UiScript) -> mlua::Result<()> {
         benilla_ui::script::pfui_host::TIMER_PASS,
         lua.create_function(move |_, ()| {
             let timers = timer_pass.call::<()>(());
-            duration_pass.call::<()>(()).and(timers)
+            let durations = duration_pass.call::<()>(());
+            // Tiled textures follow the sizes the fills above just set.
+            tile_pass.call::<()>(()).and(durations).and(timers)
         })?,
     )?;
     swing_range::install(lua)?;
