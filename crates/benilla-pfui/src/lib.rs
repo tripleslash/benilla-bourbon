@@ -260,10 +260,27 @@ pub fn install(script: &UiScript) -> mlua::Result<()> {
                 .map_or_else(|| lua.create_table(), Ok)
         })?,
     )?;
+    // `fire(event, ...)`: plain values ride the held-raise path; a table payload is dispatched
+    // with its Lua values.
     engine.set(
         "fire",
-        lua.create_function(|lua, event: String| {
-            benilla_ui::script::pfui_host::fire_pfui_event(lua, &event, Vec::new());
+        lua.create_function(|lua, (event, args): (String, mlua::Variadic<Value>)| {
+            use benilla_ui::script::{pfui_host, ScriptValue};
+            if args.iter().any(|v| matches!(v, Value::Table(_))) {
+                pfui_host::fire_pfui_values(lua, &event, args.into_iter().collect());
+                return Ok(());
+            }
+            let args = args
+                .into_iter()
+                .map(|v| match v {
+                    Value::Boolean(b) => ScriptValue::Bool(b),
+                    Value::Integer(i) => ScriptValue::Int(i),
+                    Value::Number(n) => ScriptValue::Number(n),
+                    Value::String(s) => ScriptValue::Str(s.to_string_lossy()),
+                    _ => ScriptValue::Nil,
+                })
+                .collect();
+            pfui_host::fire_pfui_event(lua, &event, args);
             Ok(())
         })?,
     )?;
@@ -433,6 +450,9 @@ pub fn install(script: &UiScript) -> mlua::Result<()> {
         .call::<()>(lua.named_registry_value::<mlua::Table>("benilla.pfui.equipment_bridge")?)?;
     lua.load(include_str!("engine_tail.lua"))
         .set_name("@benilla-pfui/engine_tail.lua")
+        .call::<()>(engine.clone())?;
+    lua.load(include_str!("events.lua"))
+        .set_name("@benilla-pfui/events.lua")
         .call::<()>(engine)?;
     mirror(lua)?;
     lua.set_named_registry_value(INSTALLED, true)

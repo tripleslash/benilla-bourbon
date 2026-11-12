@@ -81,6 +81,44 @@ pub fn fire_pfui_event(lua: &Lua, event: &str, args: Vec<super::ScriptValue>) {
     });
 }
 
+/// A raise whose payload a [`super::ScriptValue`] cannot carry (`ACTION_USABLE_CHANGED`'s list of
+/// tables), dispatched as [`super::tick::fire_event_into`] dispatches: each registered frame in
+/// order, the successor read before its handler runs, `event` set around the walk. The layer
+/// raises these from its own per-frame passes, inside the tick, with the host lent.
+pub fn fire_pfui_values(lua: &Lua, event: &str, values: Vec<Value>) {
+    super::origin::within(super::origin::Origin::Tick, || {
+        let model_mut = || lua.app_data_mut::<super::Model>().expect("model");
+        let mut at = model_mut()
+            .event_to_frames
+            .get(event)
+            .and_then(|l| l.first().copied());
+        if at.is_none() {
+            return;
+        }
+        let globals = lua.globals();
+        let saved = globals.get::<Value>("event").ok();
+        if let Ok(name) = lua.create_string(event) {
+            let _ = globals.set("event", name);
+        }
+        while let Some(h) = at {
+            let mut model = model_mut();
+            let next = model.event_to_frames.get(event).and_then(|l| {
+                let pos = l.iter().position(|&x| x == h)?;
+                l.get(pos + 1).copied()
+            });
+            let id = model.frame_id(h);
+            drop(model);
+            if let Err(e) = super::event::fire_widget_handler(lua, id, "OnEvent", values.clone()) {
+                model_mut().record_lua_error(&e);
+            }
+            at = next;
+        }
+        if let Some(saved) = saved {
+            let _ = globals.set("event", saved);
+        }
+    });
+}
+
 /// Run `dispatch` now with a host lent, else hold it for [`raise_held`] as
 /// [`fire_pfui_event`] holds a raise: a dispatch whose handlers read a state it sets around its
 /// raises (the combat log's current event) keeps it around them.

@@ -488,6 +488,23 @@ pub fn creature_id(lua: &Lua, value: Value) -> mlua::Result<Option<u32>> {
 }
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
+    // ClassicAPI's `UnitInRange(unit)`: within 40 yards of the player, and whether a position
+    // check ran; a token with no unit, the player or a unit with no reach answers false, false.
+    lua.globals().set(
+        "UnitInRange",
+        lua.create_function(|lua, unit: String| {
+            let Some(guid) = guid(lua, &unit)? else {
+                return Ok((false, false));
+            };
+            let model = lua.app_data_ref::<Model>().expect("model");
+            if guid == model.unit_guids.player {
+                return Ok((false, false));
+            }
+            Ok(crate::script::inspect::reach_of(lua, &model, guid)
+                .filter(|reach| reach.dist_sq.is_finite())
+                .map_or((false, false), |reach| (reach.dist_sq <= 40.0 * 40.0, true)))
+        })?,
+    )?;
     // The inverse of GetSpellName(slot, bookType); the player's book answers before the pet's.
     lua.globals().set(
         "FindSpellBookSlotByID",

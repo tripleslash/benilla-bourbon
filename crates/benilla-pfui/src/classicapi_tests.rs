@@ -1081,3 +1081,71 @@ fn baselib_additions_follow_the_reference() {
         )
         .unwrap();
 }
+
+/// ClassicAPI 1.20's derived events: an enabled slot's range fires on enable and on change, a
+/// usable change carries its list of slots, and a reactive spell glows each rank in the book.
+#[test]
+fn derived_events_fire_on_change_with_their_payloads() {
+    let mut script = extended();
+    script
+        .run(
+            r#"
+      UnitGUID = function(u) if u == "player" then return "0x1" end end
+      ranges, usables, glows = {}, {}, {}
+      rangeAnswer = 1
+      IsActionInRange = function(slot) return rangeAnswer end
+      HasAction = function(slot) return slot == 5 end
+      usableAnswer = 1
+      IsUsableAction = function(slot) return usableAnswer, nil end
+      GetSpellName = function(i) if i <= 2 then return "Overpower" end end
+      GetSpellInfo = function(i, book)
+        if book == "spell" then return "Overpower", nil, nil, nil, nil, nil, nil, nil, nil, 7383 + i end
+      end
+      C_Spell = C_Spell or {}
+      C_Spell.IsSpellUsable = function() return spellUsable end
+      local f = CreateFrame("Frame")
+      for _, e in ipairs({ "ACTION_RANGE_CHECK_UPDATE", "ACTION_USABLE_CHANGED",
+          "SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", "SPELL_ACTIVATION_OVERLAY_GLOW_HIDE" }) do f:RegisterEvent(e) end
+      f:SetScript("OnEvent", function()
+        if event == "ACTION_RANGE_CHECK_UPDATE" then table.insert(ranges, { arg1, arg2, arg3 })
+        elseif event == "ACTION_USABLE_CHANGED" then table.insert(usables, arg1)
+        else table.insert(glows, { event, arg1, IsSpellOverlayed(arg1) }) end
+      end)
+      C_ActionBar.EnableActionRangeCheck(5, true)
+    "#,
+        )
+        .unwrap();
+    script.tick(0.01);
+    script.tick(0.01);
+    script.run("rangeAnswer = 0").unwrap();
+    script.tick(0.01);
+    script.run("rangeAnswer = nil").unwrap();
+    script.tick(0.01);
+    script.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    script.run("usableAnswer = nil").unwrap();
+    script.fire_event("ACTIONBAR_UPDATE_USABLE", vec![]);
+    script.fire_event(
+        "COMBAT_TEXT_UPDATE",
+        vec![
+            ScriptValue::Str("SPELL_ACTIVE".into()),
+            ScriptValue::Str("Overpower".into()),
+        ],
+    );
+    script.run("spellUsable = false").unwrap();
+    script.fire_event("SPELL_UPDATE_USABLE", vec![]);
+    script
+        .run(
+            r#"
+      assert(table.getn(ranges) == 3, table.getn(ranges))
+      assert(ranges[1][1] == 5 and ranges[1][2] == true and ranges[1][3] == true, "on enable")
+      assert(ranges[2][2] == false and ranges[2][3] == true, "out of range")
+      assert(ranges[3][3] == false, "no range check")
+      assert(table.getn(usables) == 1 and usables[1][1].slot == 5 and usables[1][1].usable == false)
+      assert(table.getn(glows) == 4, table.getn(glows))
+      assert(glows[1][1] == "SPELL_ACTIVATION_OVERLAY_GLOW_SHOW" and glows[1][2] == 7384 and glows[1][3])
+      assert(glows[2][2] == 7385 and glows[4][1] == "SPELL_ACTIVATION_OVERLAY_GLOW_HIDE" and not glows[4][3])
+      assert(not IsSpellOverlayed(7384) and C_SpellActivationOverlay.IsSpellOverlayed == IsSpellOverlayed)
+    "#,
+        )
+        .unwrap();
+}
