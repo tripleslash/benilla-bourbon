@@ -247,7 +247,7 @@
 - `WOW_CULLDUMP` — benilla-world/src/wmo_portal/mod.rs
 - `WOW_CULL_TRACE` — benilla-world/src/exterior_cull.rs
 - `WOW_CURSOR_TRACE` — benilla-app/src/cursor.rs
-- `WOW_DATA` — benilla-app/src/local_state.rs, benilla-app/src/no_install.rs, benilla-formats/src/install.rs, benilla-formats/tests/project_folder.rs, benilla-formats/tests/wow_data_env.rs, benilla-formats/tests/wow_data_none.rs, benilla-mpq/src/lib.rs
+- `WOW_DATA` — benilla-app/src/local_state.rs, benilla-app/src/no_install.rs, benilla-formats/src/install.rs, benilla-formats/tests/project_folder.rs, benilla-formats/tests/wow_data_env.rs, benilla-formats/tests/wow_data_none.rs, benilla-mpq/src/lib.rs, benilla-world/src/worldview.rs
 - `WOW_DEMO_BOTTOM_BARS` — benilla-app/src/ui_script/mod.rs
 - `WOW_DEPTH` — benilla-app/src/capture/depth_probe.rs, benilla-app/src/dev.rs, benilla-world/src/bgwin.rs
 - `WOW_DEPTH_AFTER` — benilla-app/src/capture/depth_probe.rs
@@ -456,6 +456,7 @@
 - `WOW_NO_TWIST` — benilla-app/src/creature_anim/twist.rs
 - `WOW_OCEAN_DEPTH_DIV` — benilla-formats/src/liquid.rs
 - `WOW_OFFLOAD` — benilla-app/src/lib.rs
+- `WOW_PACK_FILL` — benilla-world/src/worldview.rs
 - `WOW_PANEL` — benilla-world/src/dev_state.rs
 - `WOW_PARTICLE_CENSUS` — benilla-app/src/capture/probes/particle_census.rs, benilla-app/src/dev.rs, benilla-world/src/bgwin.rs
 - `WOW_PARTICLE_DEPTHDUMP` — benilla-world/src/particles/depthdump.rs
@@ -486,7 +487,7 @@
 - `WOW_PORTRAIT_TEST` — benilla-app/src/portrait/mod.rs, benilla-app/src/portrait/test_bake.rs, benilla-world/src/bgwin.rs
 - `WOW_PORTRAIT_TEST_SKIN` — benilla-app/src/portrait/test_bake.rs
 - `WOW_PRECIP_PROFILE` — benilla-app/src/lib.rs, benilla-world/src/weather/precip/mod.rs
-- `WOW_PRESENT` — benilla-app/src/video.rs
+- `WOW_PRESENT` — benilla-app/src/video.rs, benilla-world/src/worldview.rs
 - `WOW_PROBE` — benilla-app/src/dev.rs, benilla-app/src/lib.rs, benilla-world/src/bgwin.rs
 - `WOW_PROBE_AUCTION` — benilla-app/src/dev.rs
 - `WOW_PROBE_BANK` — benilla-app/src/dev.rs
@@ -637,6 +638,7 @@
 - `WOW_UNIT_VISUALS` — benilla-app/src/capture/probes/visual_census.rs, benilla-app/src/dev.rs
 - `WOW_UNIT_VISUALS_RADIUS` — benilla-app/src/capture/probes/visual_census.rs
 - `WOW_UPLOAD_BUDGET` — benilla-world/src/world_plugins.rs
+- `WOW_UPSCALER` — benilla-world/src/worldview/fsr_view.rs
 - `WOW_USER` — benilla-app/src/glue_session/login.rs, benilla-app/src/net.rs, benilla-app/src/run_mode.rs, benilla-protocol/examples/login_refusal_probe.rs, benilla-protocol/examples/park_probe.rs
 - `WOW_VISTA_AT` — benilla-app/src/capture/mod.rs
 - `WOW_VISTA_FACE` — benilla-app/src/capture/mod.rs
