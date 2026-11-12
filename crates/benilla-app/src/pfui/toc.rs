@@ -84,6 +84,11 @@ pub(crate) fn locale(script: &benilla_ui::script::UiScript) -> String {
         .unwrap_or_else(|_| "enUS".to_string())
 }
 
+/// Whether a game-type list names this client: `vanilla` always, `turtle` on a Turtle client.
+fn game_type(has: &dyn Fn(&str) -> bool) -> bool {
+    has("vanilla") || (cfg!(feature = "pfui-turtle") && has("turtle"))
+}
+
 /// A file line of `addon`'s TOC as it loads here: `None` when a condition drops it (or the
 /// ClassicAPI addon's skip list does), else the path with its variables expanded. Every condition
 /// on a line must pass; an unknown one drops it.
@@ -101,7 +106,9 @@ pub(crate) fn file_line(addon: &str, line: &str, locale: &str) -> Option<String>
             w if w.eq_ignore_ascii_case("Family") => path.push_str("Classic"),
             w if w.eq_ignore_ascii_case("Game") => path.push_str("Vanilla"),
             w if w.eq_ignore_ascii_case("TextLocale") => path.push_str(locale),
-            w if w.eq_ignore_ascii_case("AllowLoadGameType") && has("vanilla") => {}
+            // ClassicAPI's game types: `vanilla` matches every client, `turtle` a Turtle one.
+            w if w.eq_ignore_ascii_case("AllowLoadGameType") && game_type(&has) => {}
+            w if w.eq_ignore_ascii_case("ExcludeLoadGameType") && !game_type(&has) => {}
             w if w.eq_ignore_ascii_case("AllowLoadTextLocale") && has(locale) => {}
             w if w.eq_ignore_ascii_case("AllowLoad") && has("game") => {}
             _ => return None,
@@ -132,6 +139,20 @@ mod tests {
         );
         assert_eq!(line("Loc\\enUS.lua [AllowLoadTextLocale enUS]"), None);
         assert_eq!(line("Glue.lua [AllowLoad glue]"), None);
+        assert_eq!(line("All.lua [ExcludeLoadGameType vanilla]"), None);
+        assert_eq!(
+            line("Retail.lua [ExcludeLoadGameType mainline]").as_deref(),
+            Some("Retail.lua")
+        );
+        let turtle = cfg!(feature = "pfui-turtle");
+        assert_eq!(
+            line("Search.xml [ExcludeLoadGameType turtle]").is_none(),
+            turtle
+        );
+        assert_eq!(
+            line("Turtle.lua [AllowLoadGameType turtle]").is_some(),
+            turtle
+        );
         assert_eq!(line("Odd.lua [SomethingElse]"), None);
         assert_eq!(
             line("[Family]\\[Game]\\Init.lua").as_deref(),
