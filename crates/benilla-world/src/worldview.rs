@@ -141,10 +141,22 @@ pub fn run_with(build: BuildId, extra: impl FnOnce(&mut App)) -> AppExit {
                 UVec2::new(1600, 900)
             })
             .into(),
-        present_mode: if std::env::var("WOW_NOVSYNC").as_deref() == Ok("1") {
-            bevy::window::PresentMode::AutoNoVsync
-        } else {
-            bevy::window::PresentMode::default()
+        // `WOW_PRESENT=fifo|mailbox|immediate` names the mode outright (DLSS-G on Vulkan has no
+        // vsync, DLSS-G guide 22.5, so its present mode is worth comparing); else `WOW_NOVSYNC=1`
+        // is `AutoNoVsync`, and the default `Fifo`.
+        present_mode: match std::env::var("WOW_PRESENT")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "fifo" => bevy::window::PresentMode::Fifo,
+            "mailbox" => bevy::window::PresentMode::Mailbox,
+            "immediate" => bevy::window::PresentMode::Immediate,
+            _ if std::env::var("WOW_NOVSYNC").as_deref() == Ok("1") => {
+                bevy::window::PresentMode::AutoNoVsync
+            }
+            _ => bevy::window::PresentMode::default(),
         },
         // As in the client: an instrumented run opens unfocused, below normal windows.
         focused: !background,

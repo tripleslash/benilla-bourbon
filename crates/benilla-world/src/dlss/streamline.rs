@@ -22,7 +22,8 @@
 //! in the render world the common constants, the tags (depth, motion vectors, the HUD-less world)
 //! and DLSS-G's options, on while [`super::DlssFrameGeneration`] holds, `numFramesToGenerate` from
 //! [`super::DlssgFrames`]. Reflex's mode follows [`super::Reflex`], forced on while DLSS-G runs
-//! (DLSS-G guide 8.0).
+//! (DLSS-G guide 8.0). While DLSS-G is asked for, `DLSSG_STATE` logs `slDLSSGGetState`'s status
+//! and presented-frame count every two seconds.
 //!
 //! The structs below restate Streamline's public headers (`third_party/nvidia-dlss/streamline/
 //! include/sl*.h`, MIT, NVIDIA 2022–2023) field for field; the layouts are what
@@ -1010,6 +1011,61 @@ pub fn latency_report() -> Option<(f32, f32, usize)> {
     ))
 }
 
+/// `DLSSGStatus`'s failure bits by name (`sl_dlss_g.h`).
+const DLSSG_FAILURES: [(u32, &str); 6] = [
+    (1 << 0, "ResolutionTooLow"),
+    (1 << 1, "ReflexNotDetectedAtRuntime"),
+    (1 << 2, "HDRFormatNotSupported"),
+    (1 << 3, "CommonConstantsInvalid"),
+    (1 << 4, "GetCurrentBackBufferIndexNotCalled"),
+    (1 << 5, "Reserved5"),
+];
+
+/// `Last`, every two seconds of real time while DLSS-G is asked for: Streamline's own verdict,
+/// `DLSSG_STATE result=<r> status=<names|ok> presented=<n>/s generate=<k> max=<m> min_dim=<d>
+/// vsync_support=<b>`. `presented` is `numFramesActuallyPresented` over the window, generated and
+/// rendered frames together, so at `generate=k` it reads (k + 1) × the rendered rate when frame
+/// generation works (DLSS-G guide 17.0: a status other than ok disables it).
+fn log_dlssg_state(
+    time: Res<Time<bevy::time::Real>>,
+    fg: Option<Res<DlssFrameGeneration>>,
+    mut acc: Local<f32>,
+) {
+    let Some((_, get_state)) = FEATURES.get().and_then(|f| f.dlssg) else {
+        return;
+    };
+    if !fg.is_some_and(|f| f.0) {
+        *acc = 0.0;
+        return;
+    }
+    *acc += time.delta_secs();
+    if *acc < 2.0 {
+        return;
+    }
+    let window = std::mem::take(&mut *acc);
+    let mut state = DlssgState::new();
+    let viewport = ViewportHandle::zero();
+    let result = unsafe { get_state(&viewport, &mut state, ptr::null()) };
+    let failures: Vec<&str> = DLSSG_FAILURES
+        .iter()
+        .filter(|(bit, _)| state.status & bit != 0)
+        .map(|(_, name)| *name)
+        .collect();
+    info!(
+        "DLSSG_STATE result={result} status={} presented={:.1}/s generate={} max={} min_dim={} vsync_support={}",
+        if failures.is_empty() {
+            "ok".to_string()
+        } else {
+            failures.join("|")
+        },
+        state.num_frames_actually_presented as f32 / window,
+        DLSSG_FRAMES.load(Ordering::Acquire),
+        state.num_frames_to_generate_max,
+        state.min_width_or_height,
+        state.b_is_vsync_support_available == eTrue
+    );
+}
+
 /// Whether Streamline's Reflex runs on this device.
 pub fn reflex_running() -> bool {
     FEATURES.get().is_some() && REFLEX_MODE.load(Ordering::Acquire) != eReflexOff
@@ -1381,7 +1437,7 @@ pub(super) fn build(app: &mut App) {
     app.init_resource::<SlFrame>()
         .add_plugins(ExtractResourcePlugin::<SlFrame>::default())
         .add_systems(First, simulation_start)
-        .add_systems(Last, simulation_end);
+        .add_systems(Last, (simulation_end, log_dlssg_state));
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
     };

@@ -6,7 +6,10 @@
 //! FFXGlow combine, the shape of the client's player-UI camera (`benilla-app`'s
 //! `world_backdrop.rs`). So the upscaler and frame generation run here with no login. `WOW_FSR=0`
 //! keeps the scale and drops FSR, the bilinear stretch the client had before it, for comparison.
-//! With neither knob set, the viewer keeps its swapchain path unchanged.
+//! `WOW_UPSCALER=dlss` puts DLSS in the slot as the client's `upscaler = dlss` does: Super
+//! Resolution where NGX runs, DLSS frame generation at the multiplier where Streamline's DLSS-G
+//! runs (`DLSSG_STATE` reports it), FSR for whichever is missing. With neither knob set, the viewer
+//! keeps its swapchain path unchanged.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::{CameraOutputMode, ImageRenderTarget, RenderTarget};
@@ -16,7 +19,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, T
 use bevy::window::PrimaryWindow;
 
 use crate::ffx_glow::FfxBackdrop;
-use crate::fsr::{FrameGeneration, FsrView, PresentsHeldFrames};
+use crate::fsr::{FgBlocked, FrameGeneration, FsrView, PresentsHeldFrames, UpscalerKind};
 use crate::view::WorldCamera;
 
 /// The mode's two knobs.
@@ -28,6 +31,8 @@ struct FsrViewConfig {
     multiplier: u32,
     /// `WOW_FSR=0`: the bilinear stretch alone.
     no_fsr: bool,
+    /// `WOW_UPSCALER=dlss`: DLSS in the slot, FSR where it does not run.
+    dlss: bool,
 }
 
 impl FsrViewConfig {
@@ -49,13 +54,29 @@ impl FsrViewConfig {
         }
         let scale = scale.unwrap_or(1.0).clamp(0.25, 1.0);
         let no_fsr = crate::launch_env::live_var("WOW_FSR").is_some_and(|v| v.trim() == "0");
+        let dlss = crate::launch_env::live_var("WOW_UPSCALER")
+            .is_some_and(|v| crate::dlss::Upscaler::from_cvar(&v) == crate::dlss::Upscaler::Dlss);
         Some(Self {
             // Frame generation caps the scale at 1:1, as the client does.
             scale,
             frame_generation: frame_generation && !no_fsr,
             multiplier,
             no_fsr,
+            dlss: dlss && !no_fsr,
         })
+    }
+
+    /// What runs in the slot here, as the client's `resolve_upscaler`: the upscaler, and frame
+    /// generation by DLSS-G (true) or FSR (false) while it is asked for.
+    fn slot(self, support: crate::dlss::DlssSupport) -> (UpscalerKind, bool) {
+        let sr = self.dlss && support.super_resolution && !crate::dlss::refused();
+        let dlss_fg = self.dlss && self.frame_generation && support.frame_generation;
+        let kind = if sr {
+            UpscalerKind::Dlss
+        } else {
+            UpscalerKind::Fsr
+        };
+        (kind, dlss_fg)
     }
 
     /// FSR runs below 1:1, and at 1:1 under frame generation.
@@ -139,11 +160,14 @@ fn track(
     mut images: ResMut<Assets<Image>>,
     carrier: Option<ResMut<Carrier>>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    support: Res<crate::dlss::DlssSupport>,
     mut cameras: Query<
-        (Entity, &mut Camera, &mut RenderTarget, Option<&FsrView>),
+        (Entity, &mut Camera, &mut RenderTarget, Option<&mut FsrView>),
         With<WorldCamera>,
     >,
 ) {
+    let (kind, dlss_fg) = config.slot(*support);
+    let fsr_fg = config.frame_generation && !dlss_fg;
     let Ok(window) = windows.single() else {
         return;
     };
@@ -170,7 +194,7 @@ fn track(
         }
     };
     let factor = window.resolution.scale_factor() * size.x as f32 / px.x as f32;
-    for (entity, mut camera, mut target, fsr) in &mut cameras {
+    for (entity, mut camera, mut target, mut fsr) in &mut cameras {
         // No upscaling blit into the size-carrier: the backdrop's ground reads the main texture,
         // as the client's world camera does (`benilla-app`'s `player/setup.rs`).
         if !matches!(camera.output_mode, CameraOutputMode::Skip) {
@@ -182,7 +206,7 @@ fn track(
                 scale_factor: factor,
             });
         }
-        let fresh = fsr.is_none_or(|f| f.display != px);
+        let fresh = fsr.as_ref().is_none_or(|f| f.display != px);
         if !config.fsr() {
             if rebuilt.is_some() {
                 // The bilinear stretch's own bias (`world_backdrop.rs::mip_bias`).
@@ -191,13 +215,67 @@ fn track(
                     .insert(MipBias(config.scale.log2().min(0.0)));
             }
         } else if fresh {
-            let epoch = fsr.map_or(0, |f| f.epoch.wrapping_add(1));
+            let epoch = fsr.as_ref().map_or(0, |f| f.epoch.wrapping_add(1));
             commands.entity(entity).insert((
-                FsrView::new(px, epoch, config.frame_generation),
+                FsrView::new(px, epoch, fsr_fg).with_upscaler(kind),
                 // FSR's texture LOD bias: one level sharper than the render scale owes.
                 MipBias(config.scale.log2() - 1.0),
             ));
+        } else if let Some(view) = fsr.as_mut() {
+            // NGX may refuse its feature after the first frames: the slot falls back in place.
+            if view.upscaler != kind || view.frame_generation != fsr_fg {
+                view.upscaler = kind;
+                view.frame_generation = fsr_fg;
+            }
         }
+    }
+}
+
+/// fork: dlss (FORK.md) — DLSS-G's switches from the slot, as the client's `sync_fsr_view`
+/// and `sync_frame_generation_extras` set them: [`crate::dlss::DlssFrameGeneration`], FSR's
+/// cadence blocked under it, and [`crate::dlss::DlssgFrames`] from the multiplier the card
+/// reaches. One line when the resolution moves.
+fn sync_dlss_frame_generation(
+    config: Res<FsrViewConfig>,
+    support: Res<crate::dlss::DlssSupport>,
+    views: Query<(), (With<WorldCamera>, With<FsrView>)>,
+    mut dlss_fg: ResMut<crate::dlss::DlssFrameGeneration>,
+    mut blocked: ResMut<FgBlocked>,
+    mut frames: ResMut<crate::dlss::DlssgFrames>,
+    mut last: Local<Option<(UpscalerKind, bool, u32)>>,
+) {
+    let (kind, dlss_fg_wanted) = config.slot(*support);
+    let on = dlss_fg_wanted && !views.is_empty();
+    let multiplier = if on {
+        config.multiplier.min(support.frame_generation_max.max(2))
+    } else if config.frame_generation {
+        crate::fsr::cadence::FgMultiplier::FSR_MAX
+    } else {
+        1
+    };
+    if dlss_fg.0 != on {
+        dlss_fg.0 = on;
+    }
+    if blocked.0 != on {
+        blocked.0 = on;
+    }
+    let want = crate::dlss::DlssgFrames(multiplier.saturating_sub(1).max(1));
+    if *frames != want {
+        *frames = want;
+    }
+    if *last != Some((kind, on, multiplier)) {
+        *last = Some((kind, on, multiplier));
+        info!(
+            "worldview: upscaler {kind:?}, frame generation {} {multiplier}x (asked {}x)",
+            if on {
+                "DLSS"
+            } else if config.frame_generation {
+                "FSR"
+            } else {
+                "off,"
+            },
+            config.multiplier
+        );
     }
 }
 
@@ -249,6 +327,9 @@ pub(super) fn plugin(app: &mut App) {
     };
     app.insert_resource(config)
         .add_systems(Startup, spawn_backdrop.after(super::spawn_view_camera))
-        .add_systems(Update, (track, sync_reflex))
+        .add_systems(
+            Update,
+            (track, sync_dlss_frame_generation.after(track), sync_reflex),
+        )
         .add_systems(Last, log_frames);
 }

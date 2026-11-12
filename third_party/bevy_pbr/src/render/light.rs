@@ -442,6 +442,7 @@ pub fn extract_lights(
         &mut RenderShadowMapVisibleEntities,
     )>,
     mut all_lights_found: Local<EntityHashSet>,
+    mut lights_seen: Local<EntityHashSet>,
     mut rect_light_missing_luts_warning_emitted: Local<bool>,
     system_change_tick: SystemChangeTick,
 ) {
@@ -935,14 +936,26 @@ pub fn extract_lights(
         ));
     }
 
+    // benilla: the queries above see only lights that changed this frame, so a light is cleared
+    // only when it was seen and lost its shadows; an unchanged one keeps its tables
+    // (`third_party/bevy_pbr/BENILLA.md`, the sixth delta).
+    lights_seen.clear();
+    lights_seen.extend(point_lights.iter().map(|light| light.1));
+    lights_seen.extend(spot_lights.iter().map(|light| light.1));
+    lights_seen.extend(directional_lights.iter().map(|light| light.1));
+    lights_seen.extend(rect_lights.iter().map(|light| light.1));
+
     // Clear out any shadow maps that correspond to lights that have become
     // invisible or have their shadow mapping turned off.
-    for (render_entity, _, _) in existing_render_shadow_map_visible_entities
-        .iter()
-        .filter(|(render_entity, _, _)| !all_lights_found.contains(render_entity))
+    for (render_entity, _, _) in
+        existing_render_shadow_map_visible_entities
+            .iter()
+            .filter(|(render_entity, _, _)| {
+                lights_seen.contains(render_entity) && !all_lights_found.contains(render_entity)
+            })
     {
         let Ok(mut entity_commands) = commands.get_entity(render_entity) else {
-            return;
+            continue;
         };
         entity_commands.remove::<(
             RenderExtractedShadowMapVisibleEntities,

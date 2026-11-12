@@ -83,6 +83,16 @@ view layout, so on such a device every layout carries the two extra stages; no s
 stages are legal only with the feature enabled, which `WgpuSettingsPriority::Functionality`
 requests wherever the adapter has it.
 
+## The sixth delta: an unchanged light keeps its shadow visible entities
+
+`src/render/light.rs`, `extract_lights`. Upstream's four light queries are `Changed`-filtered, yet
+its closing loop strips `RenderShadowMapVisibleEntities` from every light not found in this run.
+A shadow-casting light that changed nothing for one extract (a still sun, a main schedule the web
+frame-generation hold skipped) keeps `ExtractedDirectionalLight` and its views but loses the table,
+and the next shadow queue panics: `Failed to get directional light visible entities:
+QueryDoesNotMatch`. The hunk collects the lights the queries saw (`lights_seen`) and clears only
+those seen and not found; its `return` on a missing entity becomes `continue`.
+
 ## Verifying against upstream
 
 ```sh
@@ -93,7 +103,8 @@ diff -r third_party/bevy_pbr /tmp/upstream/bevy_pbr-0.20.1
 That must print exactly a `diff` for `src/render/mesh_preprocess.wesl` (the `occlusion_exempt`
 binding and the condition it joins, five lines in, one changed), one for `src/prepass/mod.rs`
 (two parameters, the view's colour cache lookup and the readiness check), one for
-`src/render/light.rs` (the `RecordDiagnostics` import and the span around the shadow phase), one
+`src/render/light.rs` (the `RecordDiagnostics` import and the span around the shadow phase; `lights_seen` in
+`extract_lights`), one
 for `src/material.rs` (the `DrawMaterial` row, `MaterialExtraBindGroup` and
 `SetMaterialExtraBindGroup`), one for `src/render/mesh_view_bindings.rs` (`view_stages`: the
 field, its value in `init_mesh_pipeline_view_layouts`, the view uniform's visibility),
