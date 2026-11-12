@@ -29,8 +29,8 @@ occlusion test needs to hear, so the hunk makes the test say so: an exempt mesh 
 either phase (never deferred to the late phase, never dropped there). Nothing else in the shader
 changes; every other mesh is tested as upstream tests it.
 
-benilla's world camera turns this pass on by default on native (`benilla-world`
-`entity_cull.rs`; `$WOW_ENTITY_GPU_CULL=0` turns it off); no other camera has `OcclusionCulling`.
+benilla's world camera turns this pass on with `$WOW_ENTITY_GPU_CULL=1` (`benilla-world`
+`entity_cull.rs`, off by default); no other camera has `OcclusionCulling`.
 
 ## The second delta: no prepass depth before the colour pipeline is ready
 
