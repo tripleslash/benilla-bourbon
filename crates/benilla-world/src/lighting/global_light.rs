@@ -1090,6 +1090,37 @@ fn upload_light(
     queue.write_buffer(&buffer.0, 0, bytemuck::bytes_of(&data.0));
 }
 
+/// fork: perf — how many of the table's first lights `fog_composite.wesl`'s per-pixel halo scans at
+/// most (`froxelfog::HALO_LIGHTS`, keep in sync).
+pub(crate) const HALO_LIGHTS: usize = 32;
+
+/// fork: perf — how far from its light a per-pixel halo can reach (yd): `fog_composite.wesl`'s
+/// `HALO_REACH` e-folding lengths of the longest halo, `froxelfog::POINT_HALO_YD` (a room's
+/// `ROOM_POINT_HALO_YD` is shorter, and the haze only shortens either). Keep in sync.
+pub(crate) const HALO_REACH_YD: f32 = 3.0 * 3.0;
+
+/// fork: perf — render world: the spheres (centre, radius in yd) outside which this frame's
+/// per-pixel lamp halos add exactly nothing, from the packed table the halo pass reads: every one
+/// of its first [`HALO_LIGHTS`] lights whose class is a flame's (`froxelfog::lamp_air_share`), at
+/// [`HALO_REACH_YD`] or its range if shorter. A superset of the shader's own test (`is_halo_light`
+/// also caps the count at the tier's point lights, and `point_halos` skips a light whose room share
+/// is 0), so a pixel outside every sphere is one whose halo sum is 0. `None` before the first pack.
+pub(crate) fn halo_spheres(world: &World) -> Option<Vec<(Vec3, f32)>> {
+    let data = world.get_resource::<WowLightData>()?;
+    let count = (data.0.rows[20][0].max(0.0) as usize)
+        .min(HALO_LIGHTS)
+        .min(MAX_POINT_LIGHTS);
+    let spheres = (0..count)
+        .filter_map(|i| {
+            let [x, y, z, range] = data.0.points[2 * i];
+            let class = data.0.points[2 * i + 1][3];
+            (class.fract() <= 0.125 && range > 0.0)
+                .then(|| (Vec3::new(x, y, z), range.min(HALO_REACH_YD)))
+        })
+        .collect();
+    Some(spheres)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

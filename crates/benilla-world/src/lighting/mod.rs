@@ -22,11 +22,14 @@ pub use env_frame::{
 };
 pub(crate) use flicker::is_warm;
 pub use flicker::{flame_flicker, FlameFlicker, FlameKind};
+pub(crate) use global_light::halo_spheres;
 pub use global_light::{
     new_shared_light_buffer, Glowless, LightGroup, LightGroups, LightOwner, LightRank, LightRooms,
     NightGlow, PlacedLight, SharedLightBuffer, SpellFxLight, WindowPane, WorldPointLight,
     LIGHT_GROUP_RADIUS, MAX_POINT_LIGHTS, MODERN_PACK_RADIUS,
 };
+#[cfg(test)]
+pub(crate) use global_light::{HALO_LIGHTS, HALO_REACH_YD};
 pub use lava_light::{LavaLight, LavaLightGain};
 pub use prop_probes::{PropProbeSlot, PropProbes, MAX_PROP_PROBES};
 // The std430 layout stays in the crate: off-world producers state values through `LightBlob`,

@@ -129,14 +129,15 @@ const POINT_FORWARD: f32 = 0.3;
 // the camera with a grey glow. At the flame it scatters `POINT_HALO_GAIN` times its far-field share,
 // so a torch or a brazier stands in a visible glow (the Forever Orgrimmar night shot's lamps). At
 // 4.0 the halo read far brighter than the lamp it stands around, 2.5 vanished in clear air; 3.0
-// keeps 0.75 of it.
-const POINT_HALO_YD: f32 = 4.0;
+// keeps 0.75 of it. 3 yd, three quarters of the first cut's 4 (the director's call): a lamp's glow
+// stays at the lamp.
+const POINT_HALO_YD: f32 = 3.0;
 const POINT_FAR_SHARE: f32 = 0.35;
 const POINT_HALO_GAIN: f32 = 3.0;
 // fork: inside a building a light keeps nothing past its halo and its halo shrinks to
 // `ROOM_POINT_HALO_YD` at `ROOM_POINT_HALO_GAIN`: an inn's dozen candles each filling their range
-// put a grey veil on the whole common room.
-const ROOM_POINT_HALO_YD: f32 = 1.5;
+// put a grey veil on the whole common room. Three quarters of the first cut's 1.5, as the open air's.
+const ROOM_POINT_HALO_YD: f32 = 1.125;
 const ROOM_POINT_HALO_GAIN: f32 = 1.5;
 
 // fork: **a lamp stands in its own air.** A light's halo excess also scatters in a small pocket of
@@ -176,7 +177,7 @@ fn lamp_air(f: FroxelFog, class_w: f32) -> f32 {
 
 // fork: **the halo is integrated per pixel.** A lamp among the table's first `halo_lights` (the table
 // is packed nearest-to-camera first) scatters only its far share into the froxels, and the halo pass
-// adds its halo along each pixel's own ray: a 4 yd halo is two or three froxel slices deep at street
+// adds its halo along each pixel's own ray: a 3 yd halo is two or three froxel slices deep at street
 // range, and its lamp air a yard, so in the volume it smeared into a faint blob or vanished. Window
 // lights stay in the froxels (`is_halo_light`) with no halo at all (`has_halo`): they take no lamp
 // air, and a city's panes would otherwise take the slots of the lamps past them.

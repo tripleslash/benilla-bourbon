@@ -19,7 +19,8 @@ use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery
 use bevy::render::storage::GpuShaderBuffer;
 use bevy::render::texture::GpuImage;
 use bevy::render::view::{
-    Msaa, ViewDepthStencilTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
+    ExtractedView, Msaa, ViewDepthStencilTexture, ViewTarget, ViewUniform, ViewUniformOffset,
+    ViewUniforms,
 };
 use bevy::render::{Render, RenderStartup, RenderSystems};
 use bevy::shader::ShaderDefVal;
@@ -617,6 +618,7 @@ type FogPassQuery = (
     &'static ViewUniformOffset,
     &'static Msaa,
     &'static ModernFogView,
+    &'static ExtractedView,
 );
 
 pub(crate) fn fog_composite_pass(
@@ -652,7 +654,7 @@ enum FogPass {
 fn run_fog_pass(
     which: FogPass,
     render_context: &mut RenderContext,
-    (view_target, depth, view_offset, msaa, _fog_view): QueryItem<'_, '_, FogPassQuery>,
+    (view_target, depth, view_offset, msaa, _fog_view, extracted): QueryItem<'_, '_, FogPassQuery>,
     world: &World,
 ) {
     if !world
@@ -675,6 +677,27 @@ fn run_fog_pass(
     {
         return;
     }
+    // fork: perf — the halos only where a halo light's reach covers the screen (`halo_scissor`):
+    // the pass is skipped with none, and scissored to their union otherwise.
+    let size = view_target.main_texture().size();
+    let scissor = match which {
+        FogPass::Composite => None,
+        FogPass::Halo => {
+            let spheres = crate::lighting::halo_spheres(world).unwrap_or_default();
+            let clip_from_world = extracted.clip_from_world.unwrap_or_else(|| {
+                extracted.clip_from_view * Mat4::from(extracted.world_from_view.affine().inverse())
+            });
+            match halo_scissor(
+                &spheres,
+                clip_from_world,
+                UVec2::new(size.width, size.height),
+            ) {
+                HaloCover::None => return,
+                HaloCover::Rect(r) => Some(r),
+                HaloCover::Full => None,
+            }
+        }
+    };
     let pipes = world.resource::<FroxelPipelines>();
     let Some((layout, composite, halo)) = pipes.composites.get(&msaa.samples()) else {
         return;
@@ -732,8 +755,66 @@ fn run_fog_pass(
     let span = diagnostics.pass_span(&mut pass, label);
     pass.set_pipeline(pipeline);
     pass.set_bind_group(0, &bind, &[view_offset.offset]);
+    if let Some([x, y, w, h]) = scissor {
+        pass.set_scissor_rect(x, y, w, h);
+    }
     pass.draw(0..3, 0..1);
     span.end(&mut pass);
+}
+
+/// What of the target the lamp halos can light ([`halo_scissor`]).
+#[derive(Debug, PartialEq)]
+enum HaloCover {
+    /// No halo light: every pixel's halo sum is 0.
+    None,
+    /// Only `[x, y, width, height]` in target pixels.
+    Rect([u32; 4]),
+    /// A reach sphere crosses the eye's plane, so its picture is unbounded: the whole target.
+    Full,
+}
+
+/// Pixels the scissor keeps past a sphere's projected box: the view's sub-pixel jitter, and the
+/// pixel centre `fs_halo` reads its ray through.
+const HALO_SCISSOR_MARGIN: f32 = 2.0;
+
+/// fork: perf — the union of the halo lights' reach spheres on screen. A pixel's halo is non-zero
+/// only where its ray passes within a light's reach in front of the eye (`point_halos`), so inside
+/// the sphere's projection; that lies in the projected hull of the sphere's bounding box, which is
+/// the box of its eight projected corners while every corner is in front of the eye. With a corner
+/// at or behind it, the whole target.
+fn halo_scissor(spheres: &[(Vec3, f32)], clip_from_world: Mat4, size: UVec2) -> HaloCover {
+    if spheres.is_empty() || size.x == 0 || size.y == 0 {
+        return HaloCover::None;
+    }
+    let (mut lo, mut hi) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+    for &(c, r) in spheres {
+        for i in 0..8 {
+            let corner = c + Vec3::new(
+                if i & 1 == 0 { -r } else { r },
+                if i & 2 == 0 { -r } else { r },
+                if i & 4 == 0 { -r } else { r },
+            );
+            let clip = clip_from_world * corner.extend(1.0);
+            if clip.w <= 1e-3 {
+                return HaloCover::Full;
+            }
+            let ndc = clip.truncate().truncate() / clip.w;
+            // NDC y up, target rows down.
+            let px = Vec2::new(
+                (ndc.x * 0.5 + 0.5) * size.x as f32,
+                (0.5 - ndc.y * 0.5) * size.y as f32,
+            );
+            lo = lo.min(px);
+            hi = hi.max(px);
+        }
+    }
+    let lo = (lo - HALO_SCISSOR_MARGIN).floor().max(Vec2::ZERO);
+    let hi = (hi + HALO_SCISSOR_MARGIN).ceil().min(size.as_vec2());
+    if hi.x <= lo.x || hi.y <= lo.y {
+        return HaloCover::None;
+    }
+    let (x, y) = (lo.x as u32, lo.y as u32);
+    HaloCover::Rect([x, y, hi.x as u32 - x, hi.y as u32 - y])
 }
 
 pub(super) fn build(render_app: &mut SubApp) {
@@ -788,6 +869,74 @@ pub(super) fn build(render_app: &mut SubApp) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A camera at the origin looking down -Z, 90 degrees across, on a 1000-pixel square.
+    fn camera() -> (Mat4, UVec2) {
+        let proj = Mat4::perspective_infinite_reverse_rh(std::f32::consts::FRAC_PI_2, 1.0, 0.1);
+        (proj, UVec2::new(1000, 1000))
+    }
+
+    #[test]
+    fn no_halo_light_skips_the_pass() {
+        let (m, size) = camera();
+        assert_eq!(halo_scissor(&[], m, size), HaloCover::None);
+    }
+
+    #[test]
+    fn a_lamp_ahead_scissors_to_its_reach() {
+        let (m, size) = camera();
+        // 9 yd of reach 100 yd ahead: about 9 % of the half-width each side of the centre.
+        let HaloCover::Rect([x, y, w, h]) =
+            halo_scissor(&[(Vec3::new(0.0, 0.0, -100.0), 9.0)], m, size)
+        else {
+            panic!("a lamp in front of the eye is a rectangle");
+        };
+        assert!(x < 500 && x > 400 && y < 500 && y > 400, "{x} {y}");
+        assert!(w < 120 && h < 120 && w > 80 && h > 80, "{w} {h}");
+    }
+
+    #[test]
+    fn a_reach_around_the_eye_is_the_whole_target() {
+        let (m, size) = camera();
+        assert_eq!(
+            halo_scissor(&[(Vec3::new(0.0, 0.0, -2.0), 9.0)], m, size),
+            HaloCover::Full
+        );
+    }
+
+    #[test]
+    fn a_lamp_off_screen_lights_nothing() {
+        let (m, size) = camera();
+        assert_eq!(
+            halo_scissor(&[(Vec3::new(500.0, 0.0, -100.0), 9.0)], m, size),
+            HaloCover::None
+        );
+    }
+
+    /// The halo reach the scissor bounds is the shaders' own: `HALO_REACH` e-folding lengths of
+    /// `POINT_HALO_YD`, over at most `HALO_LIGHTS` lights.
+    #[test]
+    fn the_halo_reach_matches_the_shaders() {
+        fn value(src: &str, name: &str) -> f32 {
+            let line = src
+                .lines()
+                .find(|l| l.trim_start().starts_with(&format!("const {name}:")))
+                .unwrap_or_else(|| panic!("no const {name}"));
+            let v = line.split('=').nth(1).unwrap().trim().trim_end_matches(';');
+            v.trim_end_matches('u').parse().unwrap()
+        }
+        let fog = include_str!("../../shaders/modern/froxelfog.wesl");
+        let composite = include_str!("../../shaders/modern/fog_composite.wesl");
+        let halo_yd = value(fog, "POINT_HALO_YD").max(value(fog, "ROOM_POINT_HALO_YD"));
+        assert_eq!(
+            value(composite, "HALO_REACH") * halo_yd,
+            crate::lighting::HALO_REACH_YD
+        );
+        assert_eq!(
+            value(fog, "HALO_LIGHTS") as usize,
+            crate::lighting::HALO_LIGHTS
+        );
+    }
 
     #[test]
     fn the_noise_tiles_and_spans_its_range() {

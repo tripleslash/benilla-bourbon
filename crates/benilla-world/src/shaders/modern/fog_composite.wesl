@@ -41,6 +41,10 @@ const HALO_REACH: f32 = 3.0;
 // Taps along the ray. The substitution `t = tp + H tan(theta)` absorbs the kernel's inverse-square
 // peak, so eight even steps in theta hold the integral within a few percent at any miss distance.
 const HALO_TAPS: u32 = 8u;
+// fork: perf — `HALO_REACH` e-folding lengths of the longest halo (`froxelfog::POINT_HALO_YD`; a
+// room's is shorter, and the haze only shortens either): no halo reaches past it. The halo pass's
+// scissor bounds the same reach (`lighting::HALO_REACH_YD`).
+const MAX_HALO_REACH: f32 = HALO_REACH * froxelfog::POINT_HALO_YD;
 
 // fork: **the halo along this pixel's own ray.** For each halo light (`froxelfog::is_halo_light`),
 // the halo share the froxels leave out (`froxel_scatter.wesl`'s `point_in_scatter`):
@@ -62,6 +66,17 @@ fn point_halos(f: froxelfog::FroxelFog, eye: vec3<f32>, ray: vec3<f32>, seg: f32
         let to_light = pos_range.xyz - eye;
         let tp = dot(to_light, ray);
         let miss2 = max(dot(to_light, to_light) - tp * tp, 0.0);
+        // fork: perf — the longest reach any halo can have (`MAX_HALO_REACH`) first: a ray that
+        // passes no nearer, or meets that sphere only behind the eye or past the surface, gets
+        // nothing from the exact test below either, and skips the air and room lookups it needs.
+        let reach_max = min(MAX_HALO_REACH, pos_range.w);
+        if (miss2 >= reach_max * reach_max) {
+            continue;
+        }
+        let span_max = sqrt(reach_max * reach_max - miss2);
+        if (min(tp + span_max, seg) <= max(tp - span_max, 0.0)) {
+            continue;
+        }
         let room = froxelfog::room_weight(f, pos_range.xyz);
         let share = froxelfog::indoor_air_share(rgb_class.w, room);
         if (share <= 0.0) {
