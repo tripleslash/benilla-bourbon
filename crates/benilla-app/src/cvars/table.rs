@@ -625,17 +625,16 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // `0x882654`): the Lua state's limit in KB, shown in MB by the glue AddOns screen
     // (`GetScriptMemory 0x46da10`, `SetScriptMemory 0x46da50`) and watched each frame in the
     // world (`0x495599`), [`crate::ui_memory`].
-    if cfg!(target_arch = "wasm32") {
-        deviates(
-            "scriptMemory",
-            "0",
-            "49152",
-            "The page enforces no script memory limit, whatever is set (`ui_memory`: it cannot \
-             quit), so its AddOns screen shows 0, no limit; native keeps 49152.",
-        )
-    } else {
-        same("scriptMemory", "49152")
-    },
+    // fork: 0, no limit, on every platform: pfUI and its companions outgrow 48 MB, and the
+    // reference's remedy past the limit is the quit.
+    deviates(
+        "scriptMemory",
+        "0",
+        "49152",
+        "No script memory limit by default: pfUI and its companions outgrow 48 MB, where the \
+         reference quits; the page also enforces none whatever is set (`ui_memory`: it cannot \
+         quit), so its AddOns screen shows 0, no limit.",
+    ),
     // `widescreen` (`0x63a74f`: name `0x837050`, "1", flags 0, record `[0xc4ec08]`): off, the
     // resolution list is the four fixed sizes (`0x48bcac`, [`crate::video`]) and the glue's and
     // the interface's aspect is 4/3 (`0x46ab40`, `0x4901e0`; `crate::ui_script::glue`,
