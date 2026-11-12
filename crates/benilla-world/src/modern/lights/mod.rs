@@ -281,28 +281,25 @@ pub const EMISSIVE_GRID: LightTier = LightTier {
     shadow_fade_yd: 0.0,
 };
 
-/// The plan's cluster tier table, read as world cells. Low keeps P3's ≤3-nearest per-pixel path:
-/// with no probe GI and no volumetrics there is nothing for a richer selection to sit beside.
+/// The plan's cluster tier table, read as world cells. No shipped tier keeps P3's ≤3-nearest
+/// per-pixel path any more ([`LightTier::OFF`], `$WOW_MODERN_LIGHTS=0`'s).
 pub fn light_tier(quality: LightingQuality) -> LightTier {
     match quality {
-        LightingQuality::Low => LightTier::OFF,
-        LightingQuality::Medium => LightTier {
+        // fork: perf — the tiers below Ultra moved down one (the maintainer's call, 2026-11-12):
+        // Low is the old Medium's grid, and Medium the old High's without its four soft cubes (no
+        // tier below Cinematic shadows a local light).
+        LightingQuality::Low => LightTier {
             on: true,
             dims: UVec3::new(32, 16, 32),
             cell: 8.0,
             shadowed: 0,
             ..LightTier::OFF
         },
-        // fork: four soft cubes — the contact-hardening filter at eight taps — built once over the
-        // static world, with the characters and creatures right beside a lamp drawn over them.
-        LightingQuality::High => LightTier {
+        LightingQuality::Medium => LightTier {
             on: true,
             dims: UVec3::new(48, 24, 48),
             cell: 6.0,
-            shadowed: 4,
-            taps: 8,
-            shade: 0.9,
-            dynamic_casters: true,
+            shadowed: 0,
             ..LightTier::OFF
         },
         // fork: P8b — Cinematic's lights without a single cube shadow: every lamp, lit window and
@@ -310,7 +307,8 @@ pub fn light_tier(quality: LightingQuality) -> LightTier {
         // P6's six hard-shadowed slots are gone from this row — the user's call: Ultra is "the
         // lighting part" of Cinematic, and the atlas layer, its static cache and its cube renders
         // go with the shadows.
-        LightingQuality::Ultra => EMISSIVE_GRID,
+        // fork: perf — High is Ultra's row (`LightingQuality::High`).
+        LightingQuality::High | LightingQuality::Ultra => EMISSIVE_GRID,
         // fork: the emissive grid plus a dozen cube shadows that look like a lamp's. The render is
         // what used to cost: every face is now drawn ONCE, when the lamp and the static world around
         // it have settled (cached per slot; a settled street pays nothing a frame), and the moving
@@ -1217,8 +1215,15 @@ mod tests {
             assert!(t.taps <= 12, "{q:?}: the shader's MAX_TAPS is 12");
             assert!((0.0..=1.0).contains(&t.shade), "{q:?}");
         }
-        assert!(!light_tier(LightingQuality::Low).on);
-        assert_eq!(light_tier(LightingQuality::Medium).shadowed, 0);
+        // Every shipped tier has the grid; only Cinematic shadows a local light.
+        for q in LightingQuality::ALL {
+            assert!(light_tier(q).on, "{q:?}");
+            assert_eq!(
+                light_tier(q).shadowed > 0,
+                q == LightingQuality::Cinematic,
+                "{q:?}"
+            );
+        }
         assert_eq!(PER_ATLAS_LAYER as u32 * 6, ATLAS_TILES * ATLAS_TILES);
     }
 
@@ -1249,18 +1254,12 @@ mod tests {
         for q in [
             LightingQuality::Low,
             LightingQuality::Medium,
+            LightingQuality::High,
             LightingQuality::Ultra,
         ] {
             assert_eq!(light_tier(q).shadowed, 0, "{q:?} shadows no local light");
             assert_eq!(crate::modern::shadow::local_shadow_layers(q), 0, "{q:?}");
         }
-        let high = light_tier(LightingQuality::High);
-        assert_eq!((high.shadowed, high.taps), (4, 8), "High: four soft cubes");
-        assert!(!high.aggressive_cull);
-        assert_eq!(
-            crate::modern::shadow::local_shadow_layers(LightingQuality::High),
-            if cfg!(target_arch = "wasm32") { 0 } else { 1 },
-        );
         let cine = light_tier(LightingQuality::Cinematic);
         assert_eq!((cine.shadowed, cine.taps), (MAX_SHADOWED, 12));
         assert!(
@@ -1281,6 +1280,65 @@ mod tests {
         assert_eq!(
             LightingQuality::Ultra.lights_emissive_sources(),
             LightingQuality::Cinematic.lights_emissive_sources()
+        );
+    }
+
+    /// High is Ultra's frame: every tier table gives the two the same row.
+    #[test]
+    fn high_is_ultras_frame() {
+        let (h, u) = (LightingQuality::High, LightingQuality::Ultra);
+        let (lh, lu) = (light_tier(h), light_tier(u));
+        assert_eq!(
+            (
+                lh.dims,
+                lh.cell,
+                lh.far_dims,
+                lh.far_step,
+                lh.shadowed,
+                lh.taps
+            ),
+            (
+                lu.dims,
+                lu.cell,
+                lu.far_dims,
+                lu.far_step,
+                lu.shadowed,
+                lu.taps
+            )
+        );
+        assert_eq!(h.lights_emissive_sources(), u.lights_emissive_sources());
+        assert_eq!(
+            crate::modern::shadow::cascade_splits(h),
+            crate::modern::shadow::cascade_splits(u)
+        );
+        let (gh, gu) = (crate::modern::gi::gi_tier(h), crate::modern::gi::gi_tier(u));
+        assert_eq!(
+            (
+                gh.dims,
+                gh.cascades,
+                gh.spacing,
+                gh.rays,
+                gh.period,
+                gh.voxel,
+                gh.reach
+            ),
+            (
+                gu.dims,
+                gu.cascades,
+                gu.spacing,
+                gu.rays,
+                gu.period,
+                gu.voxel,
+                gu.reach
+            )
+        );
+        let (fh, fu) = (
+            crate::modern::volumetrics::froxel_tier(h),
+            crate::modern::volumetrics::froxel_tier(u),
+        );
+        assert_eq!(
+            (fh.grid, fh.range, fh.point_lights),
+            (fu.grid, fu.range, fu.point_lights)
         );
     }
 
@@ -1314,34 +1372,30 @@ mod tests {
     #[test]
     fn each_tiers_grid_reach_is_the_one_it_is_supposed_to_have() {
         let reach = |q| light_tier(q).reach();
-        assert_eq!(
-            reach(LightingQuality::Low),
-            Vec3::new(0.5, 0.5, 0.5),
-            "no grid"
-        );
+        assert_eq!(reach(LightingQuality::Low), Vec3::new(128.0, 64.0, 128.0));
         assert_eq!(
             reach(LightingQuality::Medium),
-            Vec3::new(128.0, 64.0, 128.0)
+            Vec3::new(144.0, 72.0, 144.0)
         );
-        assert_eq!(reach(LightingQuality::High), Vec3::new(144.0, 72.0, 144.0));
+        assert_eq!(reach(LightingQuality::High), Vec3::new(60.0, 30.0, 60.0));
         assert_eq!(reach(LightingQuality::Ultra), Vec3::new(60.0, 30.0, 60.0));
         assert_eq!(
             reach(LightingQuality::Cinematic),
             Vec3::new(60.0, 30.0, 60.0)
         );
         // …and past that, the emissive tiers' far level: 18 yd cells to ±324/±144.
-        for q in [LightingQuality::Ultra, LightingQuality::Cinematic] {
+        for q in [
+            LightingQuality::High,
+            LightingQuality::Ultra,
+            LightingQuality::Cinematic,
+        ] {
             assert_eq!(
                 light_tier(q).far_reach(),
                 Vec3::new(324.0, 144.0, 324.0),
                 "{q:?}"
             );
         }
-        for q in [
-            LightingQuality::Low,
-            LightingQuality::Medium,
-            LightingQuality::High,
-        ] {
+        for q in [LightingQuality::Low, LightingQuality::Medium] {
             assert_eq!(
                 light_tier(q).far_reach(),
                 Vec3::ZERO,
@@ -1417,8 +1471,8 @@ mod tests {
         assert_eq!(shadow_distance_weight(&cine, SHADOW_RADIUS), 0.0);
         let mid = shadow_distance_weight(&cine, SHADOW_RADIUS - cine.shadow_fade_yd * 0.5);
         assert!(mid > 0.0 && mid < 1.0, "{mid}");
-        let high = light_tier(LightingQuality::High);
-        assert_eq!(shadow_distance_weight(&high, SHADOW_RADIUS - 1.0), 1.0);
+        let medium = light_tier(LightingQuality::Medium);
+        assert_eq!(shadow_distance_weight(&medium, SHADOW_RADIUS - 1.0), 1.0);
     }
 
     /// A face drawn into part of its tile is drawn into whole texels, and a tier that draws the
@@ -1427,7 +1481,7 @@ mod tests {
     fn a_face_is_drawn_into_whole_texels_of_its_tile() {
         let size = crate::modern::shadow::SHADOW_MAP_SIZE;
         let tile = size / ATLAS_TILES;
-        assert_eq!(face_px(&light_tier(LightingQuality::High), size), tile);
+        assert_eq!(face_px(&light_tier(LightingQuality::Ultra), size), tile);
         assert_eq!(face_px(&light_tier(LightingQuality::Cinematic), size), tile);
         let half = face_px(
             &LightTier {
@@ -2082,7 +2136,7 @@ mod tests {
 
     #[test]
     fn the_grid_follows_the_camera_by_whole_cells() {
-        let tier = light_tier(LightingQuality::Medium);
+        let tier = light_tier(LightingQuality::Low);
         let base = grid_base(&tier, Vec3::new(100.0, 20.0, -40.0));
         assert_eq!(base, IVec3::new(12 - 16, 2 - 8, -5 - 16));
         let moved = grid_base(&tier, Vec3::new(104.0, 20.0, -40.0));

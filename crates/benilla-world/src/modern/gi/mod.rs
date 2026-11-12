@@ -144,9 +144,10 @@ impl GiTier {
 
 pub fn gi_tier(quality: LightingQuality) -> GiTier {
     match quality {
-        // Low keeps P3's sky-occlusion map as its only ambient term: no voxels, no probes.
-        LightingQuality::Low => GiTier::OFF,
-        LightingQuality::Medium => GiTier {
+        // fork: perf — the tiers below Ultra moved down one (the maintainer's call, 2026-11-12):
+        // Low is the old Medium's row and Medium the old High's; the old Low (sky occlusion alone,
+        // no voxels, no probes) is no longer shipped.
+        LightingQuality::Low => GiTier {
             on: true,
             dims: UVec3::new(24, 12, 24),
             cascades: 3,
@@ -161,7 +162,7 @@ pub fn gi_tier(quality: LightingQuality) -> GiTier {
             interior: false,
             chebyshev: false,
         },
-        LightingQuality::High => GiTier {
+        LightingQuality::Medium => GiTier {
             on: true,
             dims: UVec3::new(32, 16, 32),
             cascades: 3,
@@ -176,7 +177,8 @@ pub fn gi_tier(quality: LightingQuality) -> GiTier {
             interior: false,
             chebyshev: true,
         },
-        LightingQuality::Ultra => GiTier {
+        // fork: perf — High is Ultra's frame (`LightingQuality::High`).
+        LightingQuality::High | LightingQuality::Ultra => GiTier {
             on: true,
             dims: UVec3::new(32, 16, 32),
             cascades: 4,
@@ -735,7 +737,10 @@ mod tests {
                 assert!(!t.period.is_multiple_of(7), "{q:?}: period {}", t.period);
             }
         }
-        assert!(!gi_tier(LightingQuality::Low).on);
+        // Every shipped tier has probe GI (the old Low's sky occlusion alone is no longer shipped).
+        for q in LightingQuality::ALL {
+            assert!(gi_tier(q).on, "{q:?}");
+        }
     }
 
     /// The CPU twin of `gi_trace.wesl`'s ray set and SH projection — the numbers the calibration
@@ -791,7 +796,7 @@ mod tests {
 
     #[test]
     fn a_probe_grid_follows_the_camera_by_whole_probes() {
-        let tier = gi_tier(LightingQuality::Medium);
+        let tier = gi_tier(LightingQuality::Low);
         let base = probe_base(&tier, 0, Vec3::new(100.0, 20.0, -40.0));
         // The camera sits in the middle cell of its cascade.
         assert_eq!(base, IVec3::new(25 - 12, 5 - 6, -10 - 12));

@@ -72,14 +72,11 @@ pub fn local_shadow_layers(quality: LightingQuality) -> usize {
     match quality {
         // fork: P8b — Ultra shadows no local light (it is Cinematic's lighting without them), so it
         // allocates no atlas layer either, natively or in the browser.
-        LightingQuality::Low | LightingQuality::Medium | LightingQuality::Ultra => 0,
-        LightingQuality::High => {
-            if cfg!(target_arch = "wasm32") {
-                0
-            } else {
-                1
-            }
-        }
+        // fork: perf — High is Ultra's frame (`LightingQuality::High`), with no atlas layer either.
+        LightingQuality::Low
+        | LightingQuality::Medium
+        | LightingQuality::High
+        | LightingQuality::Ultra => 0,
         LightingQuality::Cinematic => MAX_LOCAL_SHADOW_LAYERS,
     }
 }
@@ -186,10 +183,11 @@ pub fn cascade_splits(quality: LightingQuality) -> &'static [f32] {
     // the scene's contrast) ended in a band that walked ahead of the camera. Past it the sky map
     // (`sunshadow::far_sun_visibility`) takes over.
     match quality {
-        LightingQuality::Low => &[15.0, 60.0],
-        LightingQuality::Medium => &[16.0, 60.0, 200.0, 500.0],
-        LightingQuality::High => &[16.0, 55.0, 200.0, 600.0],
-        LightingQuality::Ultra => &[20.0, 70.0, 250.0, 800.0],
+        // fork: perf — the tiers below Ultra moved down one (the maintainer's call, 2026-11-12).
+        LightingQuality::Low => &[16.0, 60.0, 200.0, 500.0],
+        LightingQuality::Medium => &[16.0, 55.0, 200.0, 600.0],
+        // fork: perf — High is Ultra's frame (`LightingQuality::High`).
+        LightingQuality::High | LightingQuality::Ultra => &[20.0, 70.0, 250.0, 800.0],
         // fork: P8 — the sun is Ultra's. Cinematic buys local lights, not a sixth cascade: the
         // array's depth is what a new cascade would cost, and P8 spends that depth on the cube
         // atlas instead (`local_shadow_layers`).

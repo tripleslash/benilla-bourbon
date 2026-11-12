@@ -97,6 +97,11 @@ impl LightingModel {
 pub enum LightingQuality {
     Low = 0,
     Medium = 1,
+    /// fork: perf — Ultra's frame, every table alike (the maintainer's call, 2026-11-12): High's
+    /// own row, four soft cube shadows over smaller grids, cost more than Ultra's shadowless one.
+    /// The tiers below moved down with it: Medium is the old High's row without its cubes, Low the
+    /// old Medium's, and the old Low (no light grid, no probe GI, analytic fog) is no longer
+    /// shipped.
     High = 2,
     /// fork: P8b — lights from things that only glowed, as Cinematic does (every lamp that ships no
     /// light, every lit window, every glowing weapon), on the two-level light grid that lets them
@@ -142,9 +147,9 @@ impl LightingQuality {
     /// that ships with no M2 light, a lit window — rather than only from the lights the reference
     /// commits? One predicate, read by the table packer, the shadow-slot ranking and the light grid
     /// alike, so they can never disagree about what a frame contains (`modern::lights::emissive`).
-    /// Ultra and up since P8b; Cinematic alone before it.
+    /// High and up (High is Ultra's frame); Ultra and up since P8b; Cinematic alone before it.
     pub fn lights_emissive_sources(self) -> bool {
-        self >= Self::Ultra
+        self >= Self::High
     }
 
     pub fn as_cvar(self) -> u8 {
@@ -728,6 +733,7 @@ mod tests {
         // from exactly the sources the reference commits.
         assert!(LightingQuality::Cinematic.lights_emissive_sources());
         assert!(LightingQuality::Ultra.lights_emissive_sources());
-        assert!(!LightingQuality::High.lights_emissive_sources());
+        assert!(LightingQuality::High.lights_emissive_sources());
+        assert!(!LightingQuality::Medium.lights_emissive_sources());
     }
 }

@@ -12,8 +12,9 @@
 //!   on the water mirror, which looks the volume up through the main camera's projection.
 //! - Transparent lanes (blended models, water, particles) sample the same volume themselves.
 //!
-//! The Low tier runs no compute: the composite and the transparents take the analytic height fog,
-//! and the composite adds 16-tap screen-space shafts.
+//! [`FogMode::Analytic`] runs no compute: the composite and the transparents take the analytic
+//! height fog, and the composite adds 16-tap screen-space shafts. No shipped tier uses it since the
+//! tiers moved down one (fork: perf, 2026-11-12); the old Low's row was it.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::Projection;
@@ -118,9 +119,9 @@ const HAZY_SHARE: f32 = 0.15;
 pub enum FogMode {
     #[default]
     Off,
-    /// Analytic height fog with screen-space shafts (Low).
+    /// Analytic height fog with screen-space shafts (the old Low's; no shipped tier now).
     Analytic,
-    /// The froxel volume (Medium and up).
+    /// The froxel volume (every shipped tier).
     Froxel,
 }
 
@@ -186,11 +187,13 @@ pub fn rt_froxel_capable() -> bool {
 
 pub fn froxel_tier(quality: LightingQuality) -> FroxelTier {
     let (mode, grid, range, point_lights, cloud_shadow, shafts) = match quality {
-        LightingQuality::Low => (FogMode::Analytic, UVec3::ONE, 200.0, 0, 0.0, 0.9),
         // No cloud shadows on any tier: the cloud layer is a dome that travels with the camera, so its
         // shadows slid over the ground with the player — dark patches drifting ahead of every step.
-        LightingQuality::Medium => (FogMode::Froxel, UVec3::new(96, 54, 48), 350.0, 8, 0.0, 0.0),
-        LightingQuality::High => (
+        // fork: perf — the tiers below Ultra moved down one (the maintainer's call, 2026-11-12): Low
+        // is the old Medium's volume and Medium the old High's; the old Low's analytic fog with
+        // screen-space shafts is no longer shipped.
+        LightingQuality::Low => (FogMode::Froxel, UVec3::new(96, 54, 48), 350.0, 8, 0.0, 0.0),
+        LightingQuality::Medium => (
             FogMode::Froxel,
             UVec3::new(160, 90, 64),
             450.0,
@@ -201,7 +204,8 @@ pub fn froxel_tier(quality: LightingQuality) -> FroxelTier {
         // fork: P8b — the point-light count is only the fallback walk's now (`?modern_lights=0`): with
         // the light grid live a froxel reads the lights of its own cell (`froxel_scatter.wesl`).
         // Ultra lights from glowing things as Cinematic does, so it takes Cinematic's count.
-        LightingQuality::Ultra => (
+        // fork: perf — High is Ultra's frame (`LightingQuality::High`).
+        LightingQuality::High | LightingQuality::Ultra => (
             FogMode::Froxel,
             UVec3::new(192, 108, 96),
             600.0,
@@ -1097,15 +1101,19 @@ mod tests {
     }
 
     #[test]
-    fn tiers_fit_the_allocation_and_low_runs_no_compute() {
+    fn tiers_fit_the_allocation_and_every_tier_is_froxels() {
         for q in LightingQuality::ALL {
             let t = froxel_tier(q);
             assert!(t.grid.cmple(VOLUME_ALLOC).all(), "{q:?}");
+            assert_eq!(t.mode, FogMode::Froxel, "{q:?}");
         }
-        assert_eq!(froxel_tier(LightingQuality::Low).mode, FogMode::Analytic);
+        assert_eq!(
+            froxel_tier(LightingQuality::Low).grid,
+            UVec3::new(96, 54, 48)
+        );
         assert_eq!(
             froxel_tier(LightingQuality::Medium).grid,
-            UVec3::new(96, 54, 48)
+            UVec3::new(160, 90, 64)
         );
     }
 
