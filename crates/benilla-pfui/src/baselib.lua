@@ -30,13 +30,62 @@ function SetErrorCallstackHeight(height)
   if height ~= nil and type(height) ~= "number" then error("Usage: SetErrorCallstackHeight([height])", 2) end
   setHeight = height
 end
--- The locals of a level need the VM's own frames, which this client does not read: inside a
--- handler the text is empty, at other times there is none, as ClassicAPI's outside a handler.
-function debuglocals()
-  if inHandler then return "" end
+-- `debuglocals([level [, skipFunctionsAndUserdata]])`: a level's locals, then its upvalues, one
+-- `name = value` line each, while an error handler runs. A string is quoted, a function names
+-- where it is defined, a table names its frame (or `<table>`) and lists its fields one space in,
+-- their own tables unopened. The text stops at 4095 bytes.
+local frameVariables, functionSource = ...
+local function collect(...) return arg end
+local function defined(f)
+  local source, line = functionSource(f)
+  if source then return "<function> defined " .. source .. ":" .. tostring(line or 0) end
+  return "<function> defined =[C]"
 end
--- A coroutine's stack is not read here: its text is empty. Otherwise the native's, one level
--- further out, so this wrapper is not a level of its own.
+local function tableName(t)
+  if type(rawget(t, 0)) == "userdata" and type(t.GetName) == "function" then
+    local ok, name = pcall(t.GetName, t)
+    if ok and type(name) == "string" then return name end
+  end
+  return "<table>"
+end
+local function shown(value, skip)
+  local kind = type(value)
+  return not (skip and (kind == "function" or kind == "userdata"))
+end
+local function describe(value)
+  local kind = type(value)
+  if kind == "string" then return "\"" .. value .. "\"" end
+  if kind == "function" then return defined(value) end
+  if kind == "table" then return tableName(value) end
+  if kind == "userdata" then return "<userdata>" end
+  return tostring(value)
+end
+function debuglocals(level, skip)
+  if not inHandler then return end
+  if level ~= nil and type(level) ~= "number" then error("Usage: debuglocals([level [, skipFunctionsAndUserdata]])", 2) end
+  local values = collect(frameVariables((level or 1) + 1))
+  if not values[1] then return "" end
+  local lines = {}
+  for i = 1, values[1] + values[2] do
+    local name, value = values[1 + 2 * i], values[2 + 2 * i]
+    if string.sub(name, 1, 1) ~= "(" and shown(value, skip) then
+      if type(value) == "table" then
+        table.insert(lines, name .. " = " .. tableName(value) .. " {")
+        for key, field in next, value do
+          if shown(field, skip) then table.insert(lines, " " .. tostring(key) .. " = " .. describe(field)) end
+        end
+        table.insert(lines, "}")
+      else
+        table.insert(lines, name .. " = " .. describe(value))
+      end
+    end
+  end
+  local text = table.concat(lines, "\n")
+  if string.len(text) > 4095 then text = string.sub(text, 1, 4095) end
+  return text
+end
+-- This client's VM has no coroutines (1.12 opens none), so a thread never arrives; the native's
+-- text, one level further out, so this wrapper is not a level of its own.
 local nativeStack = debugstack
 function debugstack(first, ...)
   if type(first) == "thread" then return "" end

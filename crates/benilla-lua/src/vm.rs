@@ -6,7 +6,7 @@ use std::rc::Rc;
 use crate::heap::{FuncObj, Heap, LuaFunc, NativeFn, UpvalObj, UserObj};
 use crate::number::str2d;
 use crate::pools::Block;
-use crate::proto::{Arith, Cmp, Op, Proto, Reg, Rk, RK_CONST};
+use crate::proto::{Arith, Bytes, Cmp, Op, Proto, Reg, Rk, RK_CONST};
 use crate::value::{FuncRef, StrRef, TableRef, Value, V};
 
 /// An error in flight: the error object, which `pcall` answers.
@@ -2193,6 +2193,58 @@ impl Vm {
             }
         }
         None
+    }
+
+    /// The named locals active at level `level` (counted as [`Vm::frame_info`] counts) and its
+    /// function's upvalues, each in declaration order, as `lua_getlocal` and `lua_getupvalue`
+    /// read them. `None` for no such level, a native's and a tail call's.
+    #[allow(clippy::type_complexity)]
+    pub fn frame_variables(
+        &self,
+        level: usize,
+    ) -> Option<(Vec<(Bytes, Value)>, Vec<(Bytes, Value)>)> {
+        let mut lv = level as i64;
+        let mut i = self.frames.len();
+        let index = loop {
+            if i == 0 {
+                return None;
+            }
+            i -= 1;
+            if lv == 0 {
+                break i;
+            }
+            lv -= 1;
+            if !self.frames[i].proto.is_null() {
+                lv -= self.frames[i].tailcalls as i64;
+            }
+            if lv < 0 {
+                return None;
+            }
+        };
+        let f = &self.frames[index];
+        // SAFETY: a live frame's code is alive (see `Frame::proto`).
+        let p = unsafe { f.proto.as_ref() }?;
+        let pc = f.pc().saturating_sub(1) as u32;
+        let locals = p
+            .locvars
+            .iter()
+            .filter(|l| l.startpc <= pc && pc < l.endpc)
+            .map(|l| {
+                let slot = f.base as usize + l.reg as usize;
+                (
+                    l.name.clone(),
+                    self.stack.get(slot).copied().unwrap_or(Value::Nil),
+                )
+            })
+            .collect();
+        let upvalues = (0..p.upval_names.len())
+            .map(|k| {
+                // SAFETY: the frame's upvalue list holds one handle per upvalue of its code.
+                let u = unsafe { *f.upvals.add(k) };
+                (p.upval_names[k].clone(), self.read_upvalue(u))
+            })
+            .collect();
+        Some((locals, upvalues))
     }
 
     fn describe(&self, i: usize) -> FrameInfo {

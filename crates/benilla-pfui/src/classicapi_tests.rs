@@ -1034,13 +1034,20 @@ fn baselib_additions_follow_the_reference() {
         seen = message
         local height = GetErrorCallstackHeight()
         stackFromError = debugstack(GetCallstackHeight() - height + 1, 1, 0)
-        locals = debuglocals(1)
+        -- The error level of an `error` call is that native, which has no locals; its caller's
+        -- are one further out.
+        atError = debuglocals(GetCallstackHeight() - height + 1)
+        locals = debuglocals(GetCallstackHeight() - height + 2)
+        skipped = debuglocals(GetCallstackHeight() - height + 2, true)
       end
       seterrorhandler(handler)
       assert(geterrorhandler() == handler)
       local f = CreateFrame("Frame")
       f:RegisterEvent("PLAYER_ALIVE")
-      f:SetScript("OnEvent", function() local function failing() error("boom") end failing() end)
+      f:SetScript("OnEvent", function()
+        local function failing() local hp, who, row = 42, "Kel", { size = 3 } local cb = function() end error("boom") end
+        failing()
+      end)
     "#,
         )
         .unwrap();
@@ -1060,7 +1067,18 @@ fn baselib_additions_follow_the_reference() {
     script
         .run(
             r#"
-      assert(locals == "" and debuglocals() == nil and GetErrorCallstackHeight() == nil)
+      assert(atError == "", atError)
+      assert(string.find(locals, 'hp = 42\nwho = "Kel"\nrow = <table> {\n size = 3\n}', 1, true), locals)
+      assert(string.find(locals, 'cb = <function> defined [string "(chunk)"]:', 1, true), locals)
+      assert(not string.find(skipped, "cb =", 1, true) and string.find(skipped, "hp = 42", 1, true), skipped)
+      assert(debuglocals() == nil and GetErrorCallstackHeight() == nil)
+      local proxy = newproxy(true)
+      assert(type(proxy) == "userdata" and type(getmetatable(proxy)) == "table")
+      getmetatable(proxy).__index = function(_, k) return k .. "!" end
+      local twin = newproxy(proxy)
+      assert(getmetatable(twin) == getmetatable(proxy) and twin.x == "x!")
+      assert(getmetatable(newproxy()) == nil and getmetatable(newproxy(false)) == nil)
+      assert(not pcall(newproxy, {}) and not pcall(newproxy, newproxy()))
       SetErrorCallstackHeight(4); assert(GetErrorCallstackHeight() == 4); SetErrorCallstackHeight(nil)
       local a, b, c, d, e = scrub(1, "a", true, {}, print)
       assert(a == 1 and b == "a" and c == true and d == nil and e == nil)
