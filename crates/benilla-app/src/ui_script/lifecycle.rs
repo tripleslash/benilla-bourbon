@@ -738,6 +738,11 @@ fn entry_load_slice(world: &mut World) {
                 // one-shot path's does.
                 script.push_sound_suppression();
                 script.set_instruction_budget(addons::LOAD_INSTRUCTION_BUDGET);
+                // pfUI's extension before the first file, as the one-shot core load installs it.
+                #[cfg(feature = "pfui")]
+                let _ = crate::script_calls::lent_by_world(world, &mut script, |script| {
+                    super::manifest::prepare_pfui(script)
+                });
                 let (files, core_rows) =
                     super::manifest::ingame_entries(&script, super::manifest::layer_enabled());
                 let mut pending = world.resource_mut::<PendingEntryUiLoad>();

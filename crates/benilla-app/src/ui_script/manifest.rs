@@ -243,15 +243,8 @@ pub(super) fn load_core(script: &UiScript) -> Vec<String> {
 /// carried in the client binary, which benilla does not ship, and a modified interface file is
 /// loaded rather than refused.
 fn load_core_with(script: &UiScript, layer: bool) -> Vec<String> {
-    // pfUI's data (its DBC catalogs, icons, maps) installs before the core; a failure there is
-    // reported and the stock interface still loads, since the release builds always carry pfUI.
     #[cfg(feature = "pfui")]
-    let pfui_failure = crate::pfui::prepare(script).err().map(|error| {
-        let e = format!("pfUI data: {error}");
-        error!("ui_script: {e}");
-        script.report_load_failure(&e);
-        e
-    });
+    let pfui_failure = prepare_pfui(script);
     let Some(core) = core(layer) else {
         let mut failures = vec![report_missing_core(script)];
         failures.extend(load_core_bindings(script));
@@ -265,6 +258,20 @@ fn load_core_with(script: &UiScript, layer: bool) -> Vec<String> {
     #[cfg(feature = "pfui")]
     failures.extend(pfui_failure);
     failures
+}
+
+/// pfUI's extension and data (its ClassicAPI surface and Lua 5.1 dialect, DBC catalogs, icons,
+/// maps), installed before the core's first file by both the one-shot load and the sliced entry
+/// load (`lifecycle`). A failure is reported and the stock interface still loads, since the
+/// release builds always carry pfUI.
+#[cfg(feature = "pfui")]
+pub(super) fn prepare_pfui(script: &UiScript) -> Option<String> {
+    crate::pfui::prepare(script).err().map(|error| {
+        let e = format!("pfUI data: {error}");
+        error!("ui_script: {e}");
+        script.report_load_failure(&e);
+        e
+    })
 }
 
 /// The core's close after its last row, shared with the sliced entry load (`lifecycle`): the
