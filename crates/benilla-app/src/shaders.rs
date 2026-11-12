@@ -613,6 +613,15 @@ mod tests {
                     let hlsl = hlsl_entry(&module, &info, entry).unwrap_or_else(|e| {
                         panic!("{what} {defs:?}: `{entry}` does not translate to HLSL: {e:?}")
                     });
+                    // DXC compiles the wrapper naga writes around a task or mesh body: the group
+                    // index it passes must be declared, and declared once (a second `SV_GroupIndex`
+                    // input beside the input struct's is an overlapping semantic).
+                    let problem = wrapper_group_index(&hlsl, entry);
+                    assert!(
+                        problem.is_none(),
+                        "{what} {defs:?}: `{entry}`'s HLSL wrapper: {}",
+                        problem.unwrap_or_default()
+                    );
                     if *entry == "meshlet_task" {
                         assert!(
                             hlsl.contains("_NagaConstants.other"),
@@ -623,6 +632,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// What is wrong with the group index of `entry`'s HLSL wrapper (`void {entry}(…) { … }`), the
+    /// function DXC compiles as the entry point: a `local_invocation_index` its body uses that its
+    /// signature does not declare, or more than one `SV_GroupIndex` across its signature and the
+    /// input struct it takes. `None` when neither.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "macos")))]
+    fn wrapper_group_index(hlsl: &str, entry: &str) -> Option<String> {
+        let head = format!("void {entry}(");
+        let at = hlsl.find(&head)?;
+        let rest = &hlsl[at..];
+        let sig_end = rest.find('{').unwrap_or(rest.len());
+        let (sig, body) = rest.split_at(sig_end);
+        let body = &body[..body
+            .find(
+                "
+}",
+            )
+            .unwrap_or(body.len())];
+        // The input struct, where the signature opens with one: its type is the first word.
+        let first = sig[head.len()..].split_whitespace().next().unwrap_or("");
+        let in_struct = hlsl
+            .find(&format!("struct {first} {{"))
+            .map(|s| &hlsl[s..s + hlsl[s..].find("};").unwrap_or(0)])
+            .unwrap_or("");
+        let declared =
+            sig.matches("SV_GroupIndex").count() + in_struct.matches("SV_GroupIndex").count();
+        if declared > 1 {
+            return Some(format!("{declared} `SV_GroupIndex` inputs: {sig}"));
+        }
+        for word in body.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+            if word.starts_with("local_invocation_index") && !sig.contains(word) {
+                return Some(format!("`{word}` is used but not declared: {sig}"));
+            }
+        }
+        None
     }
 
     /// One entry point of `module` as wgpu-hal's DX12 backend asks naga for it: Shader Model 6.7

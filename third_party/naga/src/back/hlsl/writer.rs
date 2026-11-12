@@ -126,6 +126,9 @@ pub(super) struct NestedEntryPointArgs {
     pub user_args: Vec<String>,
     pub task_payload: Option<String>,
     pub local_invocation_index: String,
+    /// BENILLA: whether `local_invocation_index` is an argument of its own, which the outer
+    /// wrapper declares and passes; else it names one the inputs already carry.
+    pub local_invocation_index_is_arg: bool,
 }
 
 /// BENILLA: `@builtin(draw_index)`. HLSL has no semantic for it: like the subgroup built-ins it is
@@ -1764,6 +1767,7 @@ impl<'a, W: fmt::Write> super::Writer<'a, W> {
 
         let needs_local_invocation_index_name = need_workgroup_variables_initialization || nested;
         let mut local_invocation_index_name = None;
+        let mut local_invocation_index_is_arg = false;
         // For nested entry points, collect arg names as we write them so that
         // write_nested_function_outer can pass the exact same names to the call site.
         let mut nested_wgsl_args: Vec<String> = Vec::new();
@@ -1800,6 +1804,12 @@ impl<'a, W: fmt::Write> super::Writer<'a, W> {
                     write!(self.out, "{} {}", ep_input.ty_name, ep_input.arg_name)?;
                     separator();
                     nested_wgsl_args.push(ep_input.arg_name.clone());
+                    // BENILLA: the struct's own group index, where it holds one: a second
+                    // `SV_GroupIndex` argument beside it is an overlapping semantic to DXC.
+                    if let Some(ref member) = ep_input.local_invocation_index_name {
+                        local_invocation_index_name =
+                            Some(format!("{}.{member}", ep_input.arg_name));
+                    }
                 } else {
                     let stage = ep.stage;
                     for (index, arg) in func.arguments.iter().enumerate() {
@@ -1844,6 +1854,7 @@ impl<'a, W: fmt::Write> super::Writer<'a, W> {
                     write!(self.out, "{}uint {name}", separator())?;
                     write!(self.out, " : SV_GroupIndex")?;
                     local_invocation_index_name = Some(name);
+                    local_invocation_index_is_arg = true;
                 }
             }
         }
@@ -1957,6 +1968,7 @@ impl<'a, W: fmt::Write> super::Writer<'a, W> {
                     task_payload: nested_task_payload_name,
                     // guaranteed to be set for nested functions (task/mesh shaders)
                     local_invocation_index: local_invocation_index_name.unwrap(),
+                    local_invocation_index_is_arg,
                 },
             )?;
         }
