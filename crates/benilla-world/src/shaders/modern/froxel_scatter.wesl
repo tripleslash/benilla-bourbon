@@ -43,6 +43,18 @@ fn shaft_phase(phase: f32) -> f32 {
     return mix(phase, 1.0, SHAFT_ISOTROPIC);
 }
 
+// fork: **the banks thin at the eye.** The first slices are a fraction of a yard deep and jittered
+// every frame, and a camera standing in a bank (the sea fog, the ground banks) saw them swim and band
+// across the whole screen. A bank is clear at the eye and whole `NEAR_CLEAR_YD.y` out (planar yd), so
+// it begins a few yards off and is seen, not stood in. The zone's thin air and a room's own keep
+// their density: neither is dense enough to swim, and a small room's air lies mostly within it.
+const NEAR_CLEAR_YD: vec2<f32> = vec2<f32>(0.5, 10.0);
+
+// The share of the medium kept at planar depth `d`.
+fn near_clear(d: f32) -> f32 {
+    return smoothstep(NEAR_CLEAR_YD.x, NEAR_CLEAR_YD.y, d);
+}
+
 // fork: **ground fog.** Overnight (and by day in the dark zones) the air near the ground gathers into
 // banks (`fog.night`): one thin, unbroken layer on the terrain under each froxel, lit as the haze is.
 // It starts at the camera's feet, and what stands above it stays crisp; the air's drifting noise
@@ -85,7 +97,10 @@ fn terrain_under(f: froxelfog::FroxelFog, p: vec3<f32>) -> vec2<f32> {
 // the same every frame.
 fn ground_banks(f: froxelfog::FroxelFog, a: vec3<f32>, b: vec3<f32>, terrain: vec2<f32>, billow: f32) -> f32 {
     let c = 0.5 * (a + b);
-    let core = f.night.x * mix(1.0, 2.0 * billow, BANK_BILLOW);
+    // The zone look's billow share pulls the noise toward its mean (`medium.z`): the bank keeps its
+    // mean density and swell, in softer mounds.
+    let billow_k = mix(0.5, billow, f.medium.z);
+    let core = f.night.x * mix(1.0, 2.0 * billow_k, BANK_BILLOW);
     if (core <= 0.0) {
         return 0.0;
     }
@@ -98,7 +113,8 @@ fn ground_banks(f: froxelfog::FroxelFog, a: vec3<f32>, b: vec3<f32>, terrain: ve
         return 0.0;
     }
     let ground = select(f.night.y, terrain.x, live);
-    let inv_falloff = BANK_INV_FALLOFF / mix(BANK_SWELL.x, BANK_SWELL.y, billow);
+    // The zone look's height share (`night.z`) scales the layer's falloff.
+    let inv_falloff = BANK_INV_FALLOFF / (mix(BANK_SWELL.x, BANK_SWELL.y, billow_k) * f.night.z);
     let ka = min(max(a.y - ground, 0.0) * inv_falloff, 24.0);
     let kb = min(max(b.y - ground, 0.0) * inv_falloff, 24.0);
     var layer = exp(-0.5 * (ka + kb));
@@ -120,8 +136,7 @@ fn ground_banks(f: froxelfog::FroxelFog, a: vec3<f32>, b: vec3<f32>, terrain: ve
 const SEA_LEVEL: f32 = 0.0;
 // How deep under the surface the bank still reaches (yd): the sea floor seen past the water's drawn reach.
 const SEA_DEPTH: f32 = 64.0;
-// The bank's mean top (yd of e-folding above the sea), and the depth band that is the shore.
-const SEA_HEIGHT: f32 = 16.0;
+// The depth band that is the shore.
 const SEA_SHORE: vec2<f32> = vec2<f32>(1.5, 10.0);
 // The swell's feature size (yd). The billows are the froxel's own drifting noise (`NOISE_SCALE`,
 // 48 yd), already sampled for the fog's wisps: a third tap per froxel over the whole sea cost
@@ -135,19 +150,7 @@ const SEA_DRIFT: vec3<f32> = vec3<f32>(8.0, 0.0, 3.0);
 // just under the surface and the height past which the tallest bank has thinned to nothing.
 fn sea_reaches(f: froxelfog::FroxelFog, p: vec3<f32>) -> bool {
     let above = p.y - SEA_LEVEL;
-    return f.night.w > 0.0 && f.ground.x > 0.5 && above <= SEA_HEIGHT * 10.0 && above >= -SEA_DEPTH;
-}
-
-// fork: **the key does not reach under the sea.** The sea fog keeps its density under the surface
-// (`sea_fog`), and lit by the key's forward lobe there the air under the water glowed toward the sun
-// and the water showed the glare through it. Under the surface, over a sea bed (or open ocean), the air
-// takes the ambient alone, fully a yard down. 0 above the water or in a zone without sea fog.
-fn under_sea(f: froxelfog::FroxelFog, p: vec3<f32>) -> f32 {
-    let depth = SEA_LEVEL - p.y;
-    if (depth <= 0.0 || !sea_reaches(f, p) || terrain_under(f, p).x >= SEA_LEVEL) {
-        return 0.0;
-    }
-    return smoothstep(0.0, 1.0, depth);
+    return f.night.w > 0.0 && f.ground.x > 0.5 && above <= froxelfog::SEA_TOP * 1.5 && above >= -SEA_DEPTH;
 }
 
 // How far around a froxel the shore is judged (yd): well wider than a rock standing out of the sea, so
@@ -179,13 +182,16 @@ fn sea_fog(f: froxelfog::FroxelFog, p: vec3<f32>, billow: f32) -> f32 {
     }
     let drift = SEA_DRIFT * (f.camera.w / 3600.0);
     let swell = textureSampleLevel(noise_tex, repeat_samp, vec3<f32>(p.x, 0.0, p.z) / SEA_SCALE + drift + vec3<f32>(0.61, 0.29, 0.17), 0.0).r;
-    let top = SEA_HEIGHT * mix(0.3, 2.2, smoothstep(0.25, 0.75, swell));
-    let body = smoothstep(0.3, 0.6, billow + 0.25 * (swell - 0.5));
+    // The top swells and sinks a little about its mean (`froxelfog::SEA_TOP`), which the tail takes.
+    let top = froxelfog::SEA_TOP * mix(0.7, 1.3, smoothstep(0.25, 0.75, swell));
+    // fork: the billows fade over a wide band of the noise about the same middle, so a bank thins
+    // into its gaps instead of standing in hard-edged mounds (was 0.3 to 0.6).
+    let body = smoothstep(0.1, 0.8, billow + 0.25 * (swell - 0.5));
     // Under the surface the bank keeps its surface density, as the tail's does (`froxelfog::sea_tail`):
     // what lies below the water is seen through it. Cut two yards under, the sea floor and a rock's
     // foot stood dark and clear under its fogged top past the water's drawn reach, a flat-topped
     // shadow floating in the bank.
-    let height = exp(-max(above, 0.0) / top);
+    let height = froxelfog::sea_profile(above, top);
     return core * shore * height * body;
 }
 
@@ -339,9 +345,11 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     if (f.ground.x > 0.5 && f.night.x > 0.0) {
         terrain = terrain_under(f, 0.5 * (slab_a + slab_b));
     }
-    // fork: the ground banks and the sea fog (outside rooms: a building's air is its own).
-    let sigma_bank = ground_banks(f, slab_a, slab_b, terrain, noise) * (1.0 - room);
-    let sigma_sea = sea_fog(f, p, noise) * (1.0 - room);
+    // fork: the ground banks and the sea fog (outside rooms: a building's air is its own), thinning
+    // toward the eye (`near_clear`).
+    let clear = near_clear(d);
+    let sigma_bank = ground_banks(f, slab_a, slab_b, terrain, noise) * (1.0 - room) * clear;
+    let sigma_sea = sea_fog(f, p, noise) * (1.0 - room) * clear;
     let sigma = sigma_fog + sigma_haze + sigma_night + sigma_bank + sigma_sea;
     // fork: the lamps scatter off the clear-weather air (`froxelfog::halo_fog`), so rain does not
     // swell their glow; the storm's own medium still dims it on the way to the eye.
@@ -372,14 +380,13 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     // frame, the other the next frame and in each neighbour (a checkerboard turned every frame):
     // the volume's blur and its history average them as they averaged the pair, at half the rays.
     // No ray where nothing of the key reaches the froxel anyway.
-    let key = cloud * (1.0 - under_sea(f, p));
     var sun_vis = 0.0;
-    if (key > 0.0) {
+    if (cloud > 0.0) {
         let side = select(-1.0, 1.0, ((id.x + id.y + id.z + u32(f.phase.w)) & 1u) == 1u);
-        sun_vis = key * rtshadow::sun_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p + along * side, d, f.sun_dir.xyz);
+        sun_vis = cloud * rtshadow::sun_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p + along * side, d, f.sun_dir.xyz);
     }
 } @else {
-    let sun_vis = 0.5 * cloud * (1.0 - under_sea(f, p)) * (
+    let sun_vis = 0.5 * cloud * (
         sunshadow::sun_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p - along, d)
             + sunshadow::sun_visibility_fast(shadow_map, shadow_samp, modern_block.cascades, p + along, d)
     );
@@ -403,10 +410,11 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let phase = froxelfog::dual_phase(f, mu);
     // Single scattering: every part of the air scatters its albedo of the ambient that reaches it and
-    // of the key through its phase and the key's shadow, the open air and the sea fog alike.
-    let lum_sea = f.ambient.rgb * sky_term + f.ambient_open.rgb + f.sun.rgb * (phase * sun_vis);
+    // of the key through its phase and the key's shadow; the sea fog through its softened lobe.
+    let lum_ambient = f.ambient.rgb * sky_term + f.ambient_open.rgb;
+    let lum_sea = lum_ambient + f.sun.rgb * (froxelfog::sea_phase(phase) * sun_vis);
     let lum_fog = mix(
-        lum_sea,
+        lum_ambient + f.sun.rgb * (phase * sun_vis),
         f.room_ambient.rgb * sky_term + f.room_open.rgb + f.room_sun.rgb * (phase * sun_vis),
         room,
     );

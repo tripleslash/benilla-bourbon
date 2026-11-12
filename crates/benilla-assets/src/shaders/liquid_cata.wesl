@@ -496,13 +496,6 @@ const LANE_WORD_WMO: u32 = 4194304u;
 const LANE_WORD_INTERIOR: u32 = 8388608u;
 const LANE_WORD_HAS_VC: u32 = 134217728u;
 
-// The reflected colour in the reflection's lane (gamma, as the mirror read), and what share of it
-// already carries its fog (a hit, fogged here as the mirror fogs it; the sky handed in does not).
-struct LaneReflection {
-    rgb: vec3<f32>,
-    fogged: f32,
-}
-
 // A reflected hit lit as the water mirror's render lights it, in the authored value space: the
 // mirror takes none of the modern lanes (`sunshadow::mirror_view`: no probe field, sky map or light
 // grid), so this is `static_gx.wesl`'s `modern_gx_rgb` with `modern_lite`. A WMO surface: the texel
@@ -557,14 +550,14 @@ fn lane_shade(hit: rtreflect::ReflectHit, to_sun: vec3<f32>) -> vec3<f32> {
 // own position from this frame's fog volume as the fog composite fogs the mirror's pixels
 // (`froxelfog::fog_at`, the main view's volume at the world point), and handed back gamma, as the
 // water reads the mirror (`modern_in`).
-fn lane_sample(origin: vec3<f32>, dir: vec3<f32>, sky: vec3<f32>, to_sun: vec3<f32>, reach: f32) -> LaneReflection {
+fn lane_sample(origin: vec3<f32>, dir: vec3<f32>, sky: vec3<f32>, to_sun: vec3<f32>, reach: f32) -> vec3<f32> {
     let hit = rtreflect::trace(origin, dir, 0.0, reach, to_sun);
     if (hit.kind == 0u) {
-        return LaneReflection(sky, 0.0);
+        return sky;
     }
     let lit = colorspace::srgb_to_linear(lane_shade(hit, to_sun));
     let fog = froxelfog::fog_at(modern_fog_volume, scene_samp, modern_block.fog, hit.position);
-    return LaneReflection(colorspace::linear_to_srgb(lit * fog.a + fog.rgb), 1.0);
+    return colorspace::linear_to_srgb(lit * fog.a + fog.rgb);
 }
 
 // The rays a rough pixel spreads over its lobe: a Gaussian sampled at four radii
@@ -577,11 +570,11 @@ const LANE_GOLDEN_ANGLE: f32 = 2.39996323;
 // else `LANE_ROUGH_RAYS` rays over the lobe around it, averaged in the mirror read's value space as
 // the mirror's mips average it, the pattern turned per pixel (`px`) so neighbours fill each other's
 // gaps. Each ray folds back above the surface as the wave's own does.
-fn lane_reflection(surface: vec3<f32>, dir: vec3<f32>, sky: vec3<f32>, lobe: vec2<f32>, sharp: bool, px: vec2<f32>) -> LaneReflection {
+fn lane_reflection(surface: vec3<f32>, dir: vec3<f32>, sky: vec3<f32>, lobe: vec2<f32>, sharp: bool, px: vec2<f32>) -> vec3<f32> {
     // The row is loaded before a component is picked.
     let lanes = modern_block.light_spare[12];
     if (lanes.y < 0.5) {
-        return LaneReflection(sky, 0.0);
+        return sky;
     }
     let origin = surface + vec3<f32>(0.0, LANE_LIFT_YD, 0.0);
     let to_sun = -normalize(wow_light.light_sun.xyz);
@@ -596,7 +589,6 @@ fn lane_reflection(surface: vec3<f32>, dir: vec3<f32>, sky: vec3<f32>, lobe: vec
     // Interleaved gradient noise: the pattern's turn at this pixel.
     let turn = 6.2831853 * fract(52.9829189 * fract(dot(px, vec2<f32>(0.06711056, 0.00583715))));
     var rgb = vec3<f32>(0.0);
-    var fogged = 0.0;
     for (var i = 0u; i < LANE_ROUGH_RAYS; i = i + 1u) {
         let u = (f32(i) + 0.5) / f32(LANE_ROUGH_RAYS);
         let r = sqrt(-2.0 * log(1.0 - u));
@@ -604,11 +596,10 @@ fn lane_reflection(surface: vec3<f32>, dir: vec3<f32>, sky: vec3<f32>, lobe: vec
         let off = r * vec2<f32>(cos(a) * lobe.x, sin(a) * lobe.y);
         let ray = fold_above(normalize(dir + up * off.x + side * off.y));
         let s = lane_sample(origin, ray, sky, to_sun, reach);
-        rgb = rgb + s.rgb;
-        fogged = fogged + s.fogged;
+        rgb = rgb + s;
     }
     let n = f32(LANE_ROUGH_RAYS);
-    return LaneReflection(rgb / n, fogged / n);
+    return rgb / n;
 }
 }
 
@@ -1348,9 +1339,9 @@ fn caustic_net(entry: vec2<f32>, path: f32, t: f32, foot: f32) -> f32 {
 }
 
 /// fork: the clear water's output, linear: all of it (`rgb`), and the share of it that already
-/// carries its own fog (`fogged`) — the bed seen through the water and the world in the reflection,
-/// each fogged where it was drawn. A modern frame's surface fog then falls on the rest alone ("fog
-/// once"): the body's own light and the sky.
+/// carries its own fog (`fogged`) — the bed seen through the water, fogged where it was drawn. A
+/// modern frame's surface fog then falls on the rest alone ("fog once"): the body's own light and
+/// the reflection.
 struct ClearWater {
     rgb: vec3<f32>,
     fogged: vec3<f32>,
@@ -1359,12 +1350,10 @@ struct ClearWater {
     fog_share: vec3<f32>,
 }
 
-/// What [`modern_water`] reads beyond the surface's own frame: the reflection, how much of it is
-/// already fogged, the calm surface's roughness tensor and lost slope, the bed's caustic gain, the
+/// What [`modern_water`] reads beyond the surface's own frame: the reflection, the calm surface's roughness tensor and lost slope, the bed's caustic gain, the
 /// crest shading, the sun's direction and reach, and the swatch's opacity at the authored depth.
 struct ClearInputs {
     refl: vec3<f32>,
-    refl_fogged: f32,
     rough: vec3<f32>,
     lost: vec3<f32>,
     caustic: f32,
@@ -1454,13 +1443,14 @@ fn modern_water(
     let a = clamp(w.look_a.w, 0.0, 1.0);
     var out: ClearWater;
     out.rgb = (1.0 - fres) * (seen_bed + body) + fres * ((1.0 - a) * x.refl + a * scatter);
-    out.fogged = (1.0 - fres) * seen_bed + fres * (1.0 - a) * x.refl * clamp(x.refl_fogged, 0.0, 1.0);
+    // fork: **the reflection is fogged at the surface.** The mirror's world and the screen's hit carry
+    // the fog of the straight line from the eye to what they show, which runs over the sea bank where
+    // the light that reaches the eye dips through it to the water: counted as fogged, distant water
+    // stood clearer than a pier at its side. The surface fog falls on the whole reflection, the leg
+    // to the water and the air past it; only the bed seen through the water was fogged on its own path.
+    out.fogged = (1.0 - fres) * seen_bed;
     let bed_gain = clamp(tint * x.caustic * trans, vec3<f32>(0.0), vec3<f32>(1.0));
-    out.fog_share = clamp(
-        (1.0 - fres) * bed_gain + vec3<f32>(fres * (1.0 - a) * clamp(x.refl_fogged, 0.0, 1.0)),
-        vec3<f32>(0.0),
-        vec3<f32>(1.0),
-    );
+    out.fog_share = clamp((1.0 - fres) * bed_gain, vec3<f32>(0.0), vec3<f32>(1.0));
     return out;
 }
 
@@ -2029,7 +2019,6 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         // mirror read looks along — from the eye through the point that read projects, mirrored —
         // about this surface's own height, so the experimental tier's plane term is left out.
         var lane_on = 0.0;
-        var lane_fogged = 0.0;
         if (w.anim.x > 0.5) {
             var seen = mirror_point;
             if (experimental) {
@@ -2044,9 +2033,8 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
             let lane_per_rad = view.viewport.w * 0.5 * view.clip_from_view[1][1];
             let lane_sharp = max(lobe.x, lobe.y) * lane_h * lane_per_rad < 0.5;
             let lane = lane_reflection(in.world_position.xyz, lane_dir, base, lobe, lane_sharp, in.clip_position.xy);
-            base = lane.rgb;
+            base = lane;
             lane_on = 1.0;
-            lane_fogged = lane.fogged;
         }
 }
         // `ADDR R3.xyz, R3, -R5` / `MADR R3.xyz, R1.w, R3, R5` — the mirror is the BASE and the
@@ -2070,15 +2058,6 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
             // `modern_water`'s tinted bed at its lively Fresnel instead of the two steps below.
             var x: ClearInputs;
             x.refl = colorspace::srgb_to_linear(reflected);
-            // The mirror's world and the screen's hit were fogged where they were drawn; the dome
-            // under them was not.
-@if(RT_REFLECT) {
-            // fork: G — of the lane's base, its march's screen reads were fogged where drawn; a ray's
-            // hit and the sky were not.
-            x.refl_fogged = 1.0 - (1.0 - max(mirror_valid * w.path.z, lane_fogged)) * (1.0 - ssr_share);
-} @else {
-            x.refl_fogged = 1.0 - (1.0 - mirror_valid * w.path.z) * (1.0 - ssr_share);
-}
             x.rough = rough_s;
             x.lost = lost_s;
             x.caustic = caustic;
@@ -2097,8 +2076,8 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
             let here_raw = textureSampleLevel(scene_color, scene_samp, uv, 0.0).rgb;
             let here = select(colorspace::srgb_to_linear(here_raw), here_raw, modern);
             let total = mix(here, mix(clear.rgb, colorspace::srgb_to_linear(cata), k), shore_cover);
-            // fork: fog once — on a modern frame what already carries its fog (the bed, the
-            // reflected world, the bank at the waterline) leaves here linear and goes round the
+            // fork: fog once — on a modern frame what already carries its fog (the bed, the bank at
+            // the waterline) leaves here linear and goes round the
             // wrapper's surface fog; the rest is fogged at the surface as before.
             if (modern) {
                 modern_prefogged = mix(here, (1.0 - k) * clear.fogged, shore_cover);
@@ -2205,8 +2184,8 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         // took the haze twice and drew every distant shoreline as a line brighter than the fog.
         rgb = rgb * fog.a + fog.rgb * (vec3<f32>(1.0) - modern_prefog_share);
     }
-    // fork: fog once — what already carried its fog when it was drawn (the experimental tier's bed and
-    // reflected world, `fragment_classic`) joins after the surface's fog, not under it.
+    // fork: fog once — what already carried its fog when it was drawn (the experimental tier's bed,
+    // `fragment_classic`) joins after the surface's fog, not under it.
     rgb = rgb + modern_prefogged;
     return vec4<f32>(rgb, c.a);
 }

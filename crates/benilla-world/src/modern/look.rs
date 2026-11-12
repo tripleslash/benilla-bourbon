@@ -88,6 +88,12 @@ pub struct ZoneLook {
     /// fork: how much of the night's ground banks a hazy zone lays: 0 only a hazy zone's share of
     /// them (`volumetrics::added_air`); 1 the whole night bank, dense fog lying on the ground.
     pub bank_moon: f32,
+    /// fork: the ground banks' height as a share of the default layer's (`froxel_scatter.wesl`'s
+    /// `ground_banks`): under 1 the bank hugs the ground. 1 = the default layer.
+    pub bank_height: f32,
+    /// fork: how much the ground banks billow, as a share of the default (`froxel_scatter.wesl`'s
+    /// `BANK_BILLOW` and `BANK_SWELL`): under 1 the bank lies smoother, in softer mounds. 1 = the default.
+    pub bank_billow: f32,
 }
 
 impl ZoneLook {
@@ -123,6 +129,8 @@ impl ZoneLook {
         moon_hue: 1.0,
         moon_key: 1.0,
         bank_moon: 0.0,
+        bank_height: 1.0,
+        bank_billow: 1.0,
     };
 
     /// fork: **the default look at noon**, which [`look_for_zone_at`] ramps [`Self::NEUTRAL`] into
@@ -198,6 +206,8 @@ impl ZoneLook {
             moon_hue: m(self.moon_hue, to.moon_hue),
             moon_key: m(self.moon_key, to.moon_key),
             bank_moon: m(self.bank_moon, to.bank_moon),
+            bank_height: m(self.bank_height, to.bank_height),
+            bank_billow: m(self.bank_billow, to.bank_billow),
         }
     }
 
@@ -223,6 +233,8 @@ impl ZoneLook {
             && d(self.moon_hue, other.moon_hue)
             && d(self.moon_key, other.moon_key)
             && d(self.bank_moon, other.bank_moon)
+            && d(self.bank_height, other.bank_height)
+            && d(self.bank_billow, other.bank_billow)
             && (0..3).all(|i| {
                 d(self.glow[i], other.glow[i])
                     && d(self.fog_tint[i], other.fog_tint[i])
@@ -362,12 +374,17 @@ impl ZoneLook {
         vignette: 0.32,
         key_tint: [1.0, 0.86, 0.8],
         // The volume's banks lying faintly over all the ground at every hour, into the sea fog, as the
-        // eerie looks' lie (approved in the viewer, `worldview_pose=6405.2,492.5,13.9,4310.7,-8.1`, 18:20).
-        ground_fog: 1.3,
-        night_banks: 1.3,
+        // eerie looks' lie (approved in the viewer, `worldview_pose=6405.2,492.5,13.9,4310.7,-8.1`, 18:20),
+        // softer, fainter and closer to the ground than theirs (asked: 1.3, at the default height
+        // and billow, stood as lumpy mounds over the shore).
+        ground_fog: 1.1,
+        night_banks: 1.1,
+        bank_height: 0.6,
+        bank_billow: 0.4,
         // The night's banks whole: ground fog, not the haze's share.
         bank_moon: 1.0,
-        sea_fog: 0.028,
+        // Whole to the bank's foot and thinning to its top (`froxelfog::sea_profile`).
+        sea_fog: 0.022,
         // The moon lights the haze from every side, not as a second sun.
         moon_glow: 0.1,
         // The salmon glow and warm key are the sun's: the moon lights in its own colour.
@@ -776,7 +793,7 @@ fn zone_of(catalog: &AreaTableCatalog, area: u32) -> u32 {
 }
 
 /// Dev tuning (`$WOW_MODERN_LOOK`, browser `?modern_look=`): comma-separated overrides of the active
-/// row, in field order — `key,fill,exposure,haze,forward,glow r,g,b,fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,contrast,saturation,vignette,toe,key_tint r,g,b,ground_fog,night_banks,room_reach,noon_key r,g,b,noon_mix,sea_fog,moon_glow,moon_hue,moon_key,bank_moon`. An empty or unparsable entry keeps the
+/// row, in field order — `key,fill,exposure,haze,forward,glow r,g,b,fog_reach,fog_tint r,g,b,fog_falloff,sky_tint r,g,b,contrast,saturation,vignette,toe,key_tint r,g,b,ground_fog,night_banks,room_reach,noon_key r,g,b,noon_mix,sea_fog,moon_glow,moon_hue,moon_key,bank_moon,bank_height,bank_billow`. An empty or unparsable entry keeps the
 /// zone's value.
 fn look_override() -> Vec<Option<f32>> {
     crate::launch_env::live_var("WOW_MODERN_LOOK")
@@ -826,6 +843,8 @@ fn apply_override(mut look: ZoneLook, o: &[Option<f32>]) -> ZoneLook {
     set(&mut look.moon_hue, 32);
     set(&mut look.moon_key, 33);
     set(&mut look.bank_moon, 34);
+    set(&mut look.bank_height, 35);
+    set(&mut look.bank_billow, 36);
     look
 }
 

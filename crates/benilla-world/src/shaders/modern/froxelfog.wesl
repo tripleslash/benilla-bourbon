@@ -26,7 +26,8 @@ struct FroxelFog {
     // x = fog extinction at the reference height (1/yd); y = 1 / height falloff (yd); z = reference
     // height (the regional ground); w free.
     media: vec4<f32>,
-    // x = shaft haze extinction (1/yd); y = noise amount; z free;
+    // x = shaft haze extinction (1/yd); y = noise amount; z = the ground banks' billow share (the zone
+    // look's `bank_billow`, `froxel_scatter::ground_banks`);
     // w = scatter history weight: 0 on a hard cut, negative on a quick turn (near froxels drop theirs).
     medium: vec4<f32>,
     // rgb = the air's ambient in-scatter from the sky above it: albedo x the dome's light (linear),
@@ -62,8 +63,8 @@ struct FroxelFog {
     // rgb = the room air's key in-scatter (its albedo x the key); w free.
     room_sun: vec4<f32>,
     // fork: the ground banks. x = the volume's banks' extinction at the ground (1/yd); y = the ground
-    // under the camera (world y); z free; w = the sea fog's extinction at sea level (1/yd, the zone
-    // look's `sea_fog`; `froxel_scatter::sea_fog`).
+    // under the camera (world y); z = their height share (the zone look's `bank_height`); w = the sea
+    // fog's extinction at sea level (1/yd, the zone look's `sea_fog`; `froxel_scatter::sea_fog`).
     night: vec4<f32>,
     // fork: the terrain heightfield the ground banks lie on (`probegi::GiClip`'s `hf_row_x`, `hf_row_y` and
     // `hf`: x = enabled, y = lowest height, z = span, w = texels), written in the render world.
@@ -450,14 +451,48 @@ fn seen_through(back: vec4<f32>, front: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(front.rgb + back.rgb * front.a, back.a * front.a);
 }
 
+// fork: **the sea bank keeps a quarter of the air's lobe.** A bank tens of yards thick is many optical
+// depths deep, and light scattered many times has lost most of the forward peak a thin haze keeps:
+// through the air's whole dual lobe the bank glowed white toward a low sun and dimmed away from it as
+// the view turned. It keeps enough of the lobe to follow the air around it, and is lit the same under
+// the surface as over it, so the water, whose froxels straddle the surface, takes the same bank as
+// the rocks standing out of it.
+const SEA_ISOTROPIC: f32 = 0.75;
+
+// The sea bank's phase from the air's (`dual_phase`): mostly isotropic. Both halves are normalized,
+// so the bank scatters exactly the light it takes.
+fn sea_phase(phase: f32) -> f32 {
+    return mix(phase, 1.0, SEA_ISOTROPIC);
+}
+
 // fork: **the sea fog past the froxel grid.** Inside the grid the sea fog is the scatter pass's
 // (`froxel_scatter.wesl`'s `sea_fog`); without this the bank stopped dead at the grid's far plane and the
 // sea and horizon beyond it stood in clear air, a hard line across the water. Past the plane it is the
-// same bank in the mean: exponential over sea level with the swell's mean top (`SEA_HEIGHT` 16 yd x
-// 1.25) and the billows' mean cover, lit as the tail's own air is, so the two converge into one
-// distance. Gated as the bank is: on in the zone and the heightfield live.
-const SEA_TAIL_TOP: f32 = 20.0;
+// same bank in the mean: its profile (`sea_profile`) at the swell's mean top and the billows' mean
+// cover, lit through the bank's own phase (`sea_phase`), so the two converge into one distance. Gated
+// as the bank is: on in the zone and the heightfield live.
 const SEA_TAIL_COVER: f32 = 0.6;
+
+// fork: **the sea bank stands tall and thins with height**, as WoW Forever's coast fog does: whole
+// from the sea up to its foot (`SEA_FOOT_SHARE` of its top), then thinning evenly to nothing at
+// `SEA_TOP` (yd, the swell's mean), so a rock or a pier stands with its foot deep in the bank and its
+// top coming clear. The foot keeps the water and a structure's waterline in one air.
+const SEA_TOP: f32 = 40.0;
+const SEA_FOOT_SHARE: f32 = 0.1;
+
+// The bank's density share `above` yd over the sea under a top of `top` yd (1 under the water).
+fn sea_profile(above: f32, top: f32) -> f32 {
+    let foot = SEA_FOOT_SHARE * top;
+    return clamp((top - max(above, 0.0)) / (top - foot), 0.0, 1.0);
+}
+
+// The integral of `sea_profile` from the sea up to `y` (yd, at least 0).
+fn sea_profile_integral(y: f32, top: f32) -> f32 {
+    let foot = SEA_FOOT_SHARE * top;
+    let fade = top - foot;
+    let u = clamp(y - foot, 0.0, fade);
+    return min(y, foot) + u - 0.5 * u * u / fade;
+}
 
 fn sea_tail(f: FroxelFog, p: vec3<f32>, t_start: f32) -> vec4<f32> {
     if (f.night.w <= 0.0 || f.ground.x < 0.5) {
@@ -469,27 +504,19 @@ fn sea_tail(f: FroxelFog, p: vec3<f32>, t_start: f32) -> vec4<f32> {
     if (len < 1e-3 || t >= 1.0) {
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
-    // The mean of exp(-height / top) along the segment, heights above the sea (the water carries its
-    // own fog below it, as dense as at the surface).
+    // The mean of the profile along the segment, heights above the sea (the water carries its own
+    // fog below it, as dense as at the surface).
     let a = max(f.camera.y + ray.y * t, 0.0);
     let b = max(p.y, 0.0);
     let dy = b - a;
-    var mean = exp(-0.5 * (a + b) / SEA_TAIL_TOP);
+    var mean = sea_profile(0.5 * (a + b), SEA_TOP);
     if (abs(dy) > 1e-2) {
-        mean = SEA_TAIL_TOP * (exp(-a / SEA_TAIL_TOP) - exp(-b / SEA_TAIL_TOP)) / dy;
+        mean = (sea_profile_integral(b, SEA_TOP) - sea_profile_integral(a, SEA_TOP)) / dy;
     }
     let tau = f.night.w * SEA_TAIL_COVER * len * (1.0 - t) * clamp(mean, 0.0, 1.0);
     let tr = exp(-tau);
-    let phase = dual_phase(f, dot(ray / len, f.sun_dir.xyz));
-    // The key lights only the stretch above the surface: under it the air takes the ambient alone, as
-    // in the volume (`froxel_scatter.wesl`'s `under_sea`).
-    let ya = f.camera.y + ray.y * t;
-    let yb = p.y;
-    var lit = select(0.0, 1.0, ya > 0.0 && yb > 0.0);
-    if ((ya > 0.0) != (yb > 0.0)) {
-        lit = max(ya, yb) / (abs(ya) + abs(yb));
-    }
-    let lum = f.ambient.rgb + f.ambient_open.rgb + f.sun.rgb * (phase * lit);
+    let phase = sea_phase(dual_phase(f, dot(ray / len, f.sun_dir.xyz)));
+    let lum = f.ambient.rgb + f.ambient_open.rgb + f.sun.rgb * phase;
     return vec4<f32>(lum * (1.0 - tr), tr);
 }
 

@@ -738,7 +738,8 @@ fn update_volume(
         medium: Vec4::new(
             media.haze,
             media.noise,
-            0.0,
+            // fork: the zone look's ground-bank billow share (`froxel_scatter.wesl`'s `ground_banks`).
+            look.0.bank_billow.max(0.0),
             // Negative on a quick turn: the shader drops only the near froxels' history.
             match (cut, turned) {
                 (true, _) => 0.0,
@@ -793,7 +794,8 @@ fn update_volume(
                 0.0
             },
             bank_ground,
-            0.0,
+            // fork: the zone look's ground-bank height share (`froxel_scatter.wesl`'s `ground_banks`).
+            look.0.bank_height.max(0.05),
             // fork: the zone look's sea fog (`froxel_scatter.wesl`'s `sea_fog`).
             if super::banks_enabled() {
                 look.0.sea_fog
