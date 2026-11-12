@@ -1890,6 +1890,8 @@ mod tests {
                 // fork: terrain chunk LOD switches at 500 yd, the far clip being 1000.
                 "lodDist",
                 "realmList",
+                // fork: 0, no limit, on every platform: pfUI and its companions outgrow 48 MB.
+                "scriptMemory",
                 "weatherDensity",
             ],
         );
