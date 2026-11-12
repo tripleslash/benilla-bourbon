@@ -942,6 +942,10 @@ pub(crate) struct Model {
     pub(crate) enchant_names: HashMap<u32, String>,
     /// Every spell the player knows, the set `0x60c740` tests for the active player.
     pub(crate) known_spells: HashSet<u32>,
+    /// The pfUI layer's ClassicAPI status bars: a bar texture's layout rect is its fill
+    /// ([`super::types::RegionData::fill_cut`]).
+    #[cfg(feature = "pfui")]
+    pub(crate) classicapi_fill_rects: bool,
     /// The player's level, class, race and skills, for a tooltip's red requirement lines.
     pub(crate) player_req: PlayerReqState,
     /// `Lock.dbc` by lock id, pushed whole at startup, and what the active player opens locks with
@@ -1672,6 +1676,8 @@ impl Model {
             random_properties: HashMap::new(),
             enchant_names: HashMap::new(),
             known_spells: HashSet::new(),
+            #[cfg(feature = "pfui")]
+            classicapi_fill_rects: false,
             item_stat_reads: HashSet::new(),
             player_req: PlayerReqState::default(),
             lock_rows: HashMap::new(),

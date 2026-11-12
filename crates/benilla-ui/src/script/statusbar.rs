@@ -52,6 +52,11 @@ fn install_bar_model(
     ) {
         return Err(mlua::Error::runtime(crate::script::object::ERR_WRONG_TYPE));
     }
+    #[cfg(feature = "pfui")]
+    let previous = match model.arena.frame(h).map(|f| &f.kind_state) {
+        Some(KindState::StatusBar(sb)) => sb.bar,
+        _ => None,
+    };
     let changed = install_into_slot(
         model,
         h,
@@ -75,6 +80,15 @@ fn install_bar_model(
             .entry(rh)
             .or_default()
             .tex_coord_modifies_rect = true;
+    }
+    // A texture that is no longer the bar lays out whole again.
+    #[cfg(feature = "pfui")]
+    if let Some(old) = previous.filter(|old| changed && Some(*old) != incoming) {
+        if let Some(data) = model.region_data.get_mut(&old) {
+            if data.fill_cut.take().is_some() {
+                model.invalidate_region(old, true);
+            }
+        }
     }
     Ok(())
 }
@@ -151,6 +165,14 @@ pub(super) fn update(model: &mut Model, h: crate::widget::FrameHandle) -> bool {
         return false;
     };
     model.region_data.entry(bar).or_default().tex_coords = Some(super::TexCoords::Rect(edges));
+    #[cfg(feature = "pfui")]
+    if model.classicapi_fill_rects {
+        let data = model.region_data.entry(bar).or_default();
+        if data.fill_cut != Some(edges) {
+            data.fill_cut = Some(edges);
+            model.invalidate_region(bar, true);
+        }
+    }
     true
 }
 

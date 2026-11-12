@@ -374,6 +374,10 @@ pub fn install(lua: &Lua) -> mlua::Result<()> {
     durations::install(lua)?;
     sizes::install(lua)?;
     tiling::install(lua)?;
+    // ClassicAPI's status bars: a bar texture lays out as its fill.
+    if let Some(mut model) = lua.app_data_mut::<crate::script::Model>() {
+        model.classicapi_fill_rects = true;
+    }
     xml::install(lua)?;
     message_history::install(lua)?;
     editbox_caret::install(lua)?;

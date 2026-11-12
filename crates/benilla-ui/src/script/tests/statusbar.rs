@@ -424,3 +424,29 @@ fn statusbar_nan_keeps_its_low_bound_and_always_stores() {
     )
     .unwrap();
 }
+
+/// 1.12 cuts a bar texture's drawn vertices to the fill and keeps its layout rect whole
+/// (`0x7704c0` and `0x770670` copy the rect out before `0x770570` cuts it), so a region anchored
+/// to the bar texture spans the whole bar whatever the value.
+#[test]
+fn a_region_anchored_to_the_bar_texture_keeps_the_whole_bar() {
+    let mut s = script();
+    s.run(
+        r#"
+        bar = CreateFrame("StatusBar")
+        bar:SetWidth(200) bar:SetHeight(20)
+        bar:SetPoint("BOTTOMLEFT", UIParent or WorldFrame, "BOTTOMLEFT", 100, 50)
+        bar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
+        bar:SetMinMaxValues(0, 100)
+        bar:SetValue(25)
+        over = bar:CreateTexture(nil, "OVERLAY")
+        over:SetAllPoints(bar:GetStatusBarTexture())
+    "#,
+    )
+    .unwrap();
+    s.tick(0.01);
+    let span: String = s
+        .eval(r#"return string.format("%.4g %.4g", over:GetLeft(), over:GetRight())"#)
+        .unwrap();
+    assert_eq!(span, "100 300");
+}

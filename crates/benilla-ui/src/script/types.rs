@@ -486,6 +486,12 @@ pub(crate) struct RegionData {
     /// flag scales the drawn rect by the coordinates' spans (`0x770570`, the extract's
     /// `modified_rect`).
     pub(crate) tex_coord_modifies_rect: bool,
+    /// ClassicAPI's status bar, with the pfUI layer on: a bar texture's fill coordinates, which
+    /// cut its layout rect to the filled part, so a region anchored to it follows the fill's edge
+    /// and an empty bar's texture spans 0 at the start edge. 1.12 cuts only the vertices it
+    /// draws (`0x7704c0`, `0x770670` copy the rect out first) and keeps the rect whole.
+    #[cfg(feature = "pfui")]
+    pub(crate) fill_cut: Option<[f32; 4]>,
     /// Rotation about the centre, radians counterclockwise; always 0: 1.12 has no Texture setter.
     pub(crate) rotation: f32,
     /// The font object this FontString follows (a FontString's `+0xd0`), a live link written only

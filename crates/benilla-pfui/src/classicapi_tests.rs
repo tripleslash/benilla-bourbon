@@ -1335,3 +1335,42 @@ fn a_tiled_texture_repeats_its_image_at_its_own_size() {
     script.run("t:SetHorizTile(false)").unwrap();
     assert_eq!(coords(&mut script), "0 1 0 1.25");
 }
+
+/// ClassicAPI's status bars: the bar texture lays out as the filled part, so a region anchored
+/// to `GetStatusBarTexture()` moves with the fill's edge, and an empty bar's texture spans 0 at
+/// the start edge; a vertical bar fills from the bottom.
+#[test]
+fn a_region_anchored_to_the_bar_texture_follows_the_fill() {
+    let mut script = extended();
+    script
+        .run(
+            r#"
+      bar = CreateFrame("StatusBar")
+      bar:SetWidth(200) bar:SetHeight(20)
+      bar:SetPoint("BOTTOMLEFT", UIParent or WorldFrame, "BOTTOMLEFT", 100, 50)
+      bar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
+      bar:SetMinMaxValues(0, 100)
+      bar:SetValue(25)
+      over = bar:CreateTexture(nil, "OVERLAY")
+      over:SetAllPoints(bar:GetStatusBarTexture())
+    "#,
+        )
+        .unwrap();
+    let span = |script: &mut UiScript| {
+        script.tick(0.01);
+        script
+            .eval::<String>(
+                r#"return string.format("%.4g %.4g %.4g %.4g", over:GetLeft(), over:GetRight(), over:GetBottom(), over:GetTop())"#,
+            )
+            .unwrap()
+    };
+    assert_eq!(span(&mut script), "100 150 50 70");
+    script.run("bar:SetValue(100)").unwrap();
+    assert_eq!(span(&mut script), "100 300 50 70");
+    script.run("bar:SetValue(0)").unwrap();
+    assert_eq!(span(&mut script), "100 100 50 70");
+    script
+        .run(r#"bar:SetOrientation("VERTICAL") bar:SetValue(50)"#)
+        .unwrap();
+    assert_eq!(span(&mut script), "100 300 50 60");
+}
