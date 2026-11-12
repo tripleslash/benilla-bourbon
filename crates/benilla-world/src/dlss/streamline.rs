@@ -1028,10 +1028,12 @@ const DLSSG_FAILURES: [(u32, &str); 6] = [
 ];
 
 /// `Last`, every two seconds of real time while DLSS-G is asked for: Streamline's own verdict,
-/// `DLSSG_STATE result=<r> status=<names|ok> presented=<n>/s generate=<k> max=<m> min_dim=<d>
-/// vsync_support=<b>`. `presented` is `numFramesActuallyPresented` over the window, generated and
-/// rendered frames together, so at `generate=k` it reads (k + 1) × the rendered rate when frame
-/// generation works (DLSS-G guide 17.0: a status other than ok disables it).
+/// `DLSSG_STATE result=<r> status=<names|ok> per_present=<n> generate=<k> max=<m> min_dim=<d>
+/// vsync_support=<b>`. `per_present` is `numFramesActuallyPresented`, which counts the frames the
+/// last present put on screen, the rendered one and its generated ones together (measured: 1 with
+/// every tag refused, 4 at 4x and 2 at 2x once tagging works, whatever the frame rate), so it reads
+/// `generate + 1` when frame generation works (DLSS-G guide 17.0: a status other than ok disables
+/// it).
 fn log_dlssg_state(
     time: Res<Time<bevy::time::Real>>,
     fg: Option<Res<DlssFrameGeneration>>,
@@ -1048,7 +1050,7 @@ fn log_dlssg_state(
     if *acc < 2.0 {
         return;
     }
-    let window = std::mem::take(&mut *acc);
+    *acc = 0.0;
     let mut state = DlssgState::new();
     let viewport = ViewportHandle::zero();
     let result = unsafe { get_state(&viewport, &mut state, ptr::null()) };
@@ -1058,13 +1060,13 @@ fn log_dlssg_state(
         .map(|(_, name)| *name)
         .collect();
     info!(
-        "DLSSG_STATE result={result} status={} presented={:.1}/s generate={} max={} min_dim={} vsync_support={}",
+        "DLSSG_STATE result={result} status={} per_present={} generate={} max={} min_dim={} vsync_support={}",
         if failures.is_empty() {
             "ok".to_string()
         } else {
             failures.join("|")
         },
-        state.num_frames_actually_presented as f32 / window,
+        state.num_frames_actually_presented,
         DLSSG_FRAMES.load(Ordering::Acquire),
         state.num_frames_to_generate_max,
         state.min_width_or_height,
