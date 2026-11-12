@@ -62,7 +62,8 @@ bevy_platform = { path = "third_party/bevy_platform" }
 # bevy_ecs 0.20.1, forked for the same reason and in the same shape: 13 threading gates in
 # `query/par_iter.rs` and `query/state.rs` that ask `target_arch == "wasm32"` when they mean
 # "has no threads", plus one logic change: a query's archetype update tests only the new archetypes
-# when they are fewer than its rarest component's set. Left alone: `ExecutorKind`'s wasm default, which stays SingleThreaded on
+# when they are fewer than its rarest component's set, and a non-dense query walks only the
+# archetypes that hold an entity. Left alone: `ExecutorKind`'s wasm default, which stays SingleThreaded on
 # purpose — decisions 1366/1437 measured the multi-threaded executor as a LOSS on this app
 # (~60% of Update systems are non-Send), and `benilla_app::run` sets the kinds explicitly
 # anyway. `third_party/bevy_ecs/BENILLA.md` has the list and the verifying diff.

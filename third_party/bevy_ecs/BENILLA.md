@@ -22,7 +22,7 @@ were *written* for parallelism would keep running serially on the thread that dr
 
 ## The delta, and the command that proves it
 
-**13 `#[cfg]` predicates, in two files, and one logic change (below).** Each predicate is one of
+**13 `#[cfg]` predicates, in two files, and two logic changes (below).** Each predicate is one of
 two mechanical rewrites:
 
 | upstream | fork |
@@ -45,6 +45,31 @@ as the no-required-components arm already does (`new_archetype` checks the match
 crowd on the threaded browser build (JS self-profiler, page thread): ~67% of the samples in frames
 of 100 ms or more sat in this walk, across dozens of queries, because every new archetype made each
 of ~3,400 systems' queries re-walk hundreds of archetypes.
+
+**A second logic change: a non-dense query walks only the archetypes that hold an entity**, in
+`src/archetype.rs`, `src/query/iter.rs`, `src/query/state.rs` and `src/query/par_iter.rs`, each
+site marked `PATCH(occupancy)`. Ported from Onixaz/benilla-wotlk `e2d07c0` (their #741, #540), made
+against 0.18.1; the hunks are theirs, unchanged. A streamed unit gains its components one insert at
+a time, so a session mints an archetype for every set of components a unit passes through, and Bevy
+frees none. A query that names a sparse-set component walks archetypes, not tables, and upstream
+steps through every matched archetype to ask whether it is empty: their count was ~700 archetypes at
+a fresh login and ~4,700 after fourteen teleports, ~100 of them holding an entity, which took
+`tag_self_player` from 6 µs to 32 µs a frame. The unit-only components became sparse sets here too
+(`b73445f54`), so this fork's per-unit queries take that walk.
+
+`Archetypes` gains `occupancy`, one bit per archetype, on while it holds an entity. Each `Archetype`
+keeps a pointer to its own bit (`OccupiedBit`) and writes it where its entity list goes from empty
+to not and back: `allocate`, `swap_remove` and `clear_entities`. The set is chunked and its chunks
+are boxed, never freed or moved, so the pointers stay good while `Archetypes` grows; the words are
+atomic. `Archetypes::occupied_among(matched)` walks the archetypes in both a query's
+`matched_archetypes` and the set, a word at a time, ascending. A non-dense query takes its
+archetypes from it where it walked `matched_storage_ids`: the cursor's `next`, `Iterator::fold`,
+`max_remaining` (the size hint), the parallel batcher in `par_fold_init_unchecked_manual`, and
+`QueryParIter::get_batch_size`. An empty archetype yielded nothing before, so the items are the
+same. Dense queries, which walk tables, are untouched, and so is 0.20's contiguous iteration
+(`QueryContiguousIter`, `contiguous_par_fold_init_unchecked_manual`), which is table-only.
+`benilla-world`'s `occupied_archetype_walk` test drives a sparse query through the iterator, the
+fold, the size hint and the parallel walk while archetypes empty, refill and clear.
 
 ## What is deliberately NOT forked
 
@@ -76,7 +101,8 @@ mkdir -p /tmp/upstream && curl -sL https://static.crates.io/crates/bevy_ecs/bevy
 diff -r third_party/bevy_ecs /tmp/upstream/bevy_ecs-0.20.1
 ```
 
-That must print exactly a `diff` for `src/query/par_iter.rs` and `src/query/state.rs`, plus
+That must print exactly a `diff` for `src/archetype.rs`, `src/query/iter.rs`,
+`src/query/par_iter.rs` and `src/query/state.rs`, plus
 `Only in <upstream>: .cargo_vcs_info.json`, `Cargo.lock`, `Cargo.toml.orig` — cargo's packaging
 metadata, dropped here the same way `third_party/kira` and `third_party/bevy_tasks` drop it, and
 `Only in third_party/bevy_ecs: BENILLA.md`. Anything else crept in.
