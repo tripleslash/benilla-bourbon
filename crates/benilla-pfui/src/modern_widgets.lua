@@ -249,6 +249,12 @@ function texture:SetDesaturation(amount)
 end
 texture.GetDesaturation = getter("desaturation", 0)
 texture.SetMask = setter("mask")
+-- Tiling repeats the image at its own size, which needs the image's pixel size at the draw; the
+-- flags are kept for their getters and the texture stretches as 1.12's does.
+function texture:SetHorizTile(tiling) flags(self).horizTile = tiling and true or false end
+texture.GetHorizTile = getter("horizTile", false)
+function texture:SetVertTile(tiling) flags(self).vertTile = tiling and true or false end
+texture.GetVertTile = getter("vertTile", false)
 function texture:AddMaskTexture(mask)
   local own = flags(self)
   own.masks = own.masks or {}
