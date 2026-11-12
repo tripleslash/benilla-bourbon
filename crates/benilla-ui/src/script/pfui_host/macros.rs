@@ -1,10 +1,12 @@
-//! `C_Macro.CreateMacro` and `C_Macro.EditMacro` through the stock verbs, which already take an
-//! icon by file name ([`super::icon_by_name`]), so the table, caps, ids and events stay theirs.
+//! `C_Macro.CreateMacro` and `C_Macro.EditMacro` through the stock verbs, which take an icon by
+//! file name inside [`with_named_icons`] on any VM, so the table, caps, ids and events stay theirs.
 //! The modern signatures differ in their arguments (`CreateMacro(name, icon, body, perCharacter)`
 //! has no `local` flag and an optional icon, `EditMacro` also names its macro by name) and in
 //! their failures, which answer nil: a full table, or a macro that is not there.
 
 use mlua::{Function, Lua, MultiValue, Value};
+
+use crate::script::macros::with_named_icons;
 
 /// An icon given as a path: its bare file name, which the stock verbs put under
 /// `Interface\Icons\`. A number, or anything else, goes through as given.
@@ -41,8 +43,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             a.push(Value::Nil);
             a.push(per_character);
             // The stock verb raises on a full table; the modern one answers nil.
-            Ok(create
-                .call::<MultiValue>(MultiValue::from_vec(a))
+            Ok(with_named_icons(|| create.call::<MultiValue>(MultiValue::from_vec(a)))
                 .unwrap_or_default())
         })?,
     )?;
@@ -60,7 +61,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(MultiValue::new());
             }
             a[2] = icon(lua, std::mem::replace(&mut a[2], Value::Nil))?;
-            edit.call::<MultiValue>(MultiValue::from_vec(a))
+            with_named_icons(|| edit.call::<MultiValue>(MultiValue::from_vec(a)))
         })?,
     )?;
     g.set("C_Macro", namespace)

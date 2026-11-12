@@ -894,15 +894,33 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 /// The icon a Turtle WoW VM reports for a macro without one.
 const TURTLE_NO_ICON: &str = "Interface\\Icons\\INV_Misc_QuestionMark";
 
+thread_local! {
+    /// fork: set while pfUI's `C_Macro` calls the stock verbs ([`with_named_icons`]).
+    static NAMED_ICONS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// fork: run `f` with the stock verbs taking an icon by texture name on any VM, as the modern
+/// `C_Macro.CreateMacro` and `EditMacro` name it (`script::pfui_host::macros`). A 1.12.1 VM's own
+/// `CreateMacro` and `EditMacro` keep the reference's number.
+#[cfg_attr(not(feature = "pfui"), allow(dead_code))]
+pub(crate) fn with_named_icons<T>(f: impl FnOnce() -> T) -> T {
+    let was = NAMED_ICONS.with(|n| n.replace(true));
+    let out = f();
+    NAMED_ICONS.with(|n| n.set(was));
+    out
+}
+
 /// fork: a Turtle WoW VM's icon given by texture name (its `MACRO_ICON_FILENAMES`), which is not
 /// a number: its path in the icons folder, as the macro file's icon token reads, and a name with
-/// a path separator taken whole. `None` on a 1.12.1 VM or for any other value.
+/// a path separator taken whole. `None` on a 1.12.1 VM, outside [`with_named_icons`], or for any
+/// other value.
 fn turtle_named_icon(lua: &Lua, v: &Value) -> Option<String> {
-    let turtle = lua
-        .app_data_ref::<crate::script::ModelCell>()
-        .expect("model app_data")
-        .flavor
-        == super::UiFlavor::Turtle;
+    let turtle = NAMED_ICONS.with(std::cell::Cell::get)
+        || lua
+            .app_data_ref::<crate::script::ModelCell>()
+            .expect("model app_data")
+            .flavor
+            == super::UiFlavor::Turtle;
     let Value::String(s) = v else {
         return None;
     };
