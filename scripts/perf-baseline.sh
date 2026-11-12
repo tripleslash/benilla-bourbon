@@ -22,7 +22,9 @@
 #
 # Env: EXE (the binary, default target/release/benilla-worldview.exe), PERF_OUT (default
 # target/perf-baseline), FRAMES (600), TIMEOUT (420 s), WOW_DATA (the TurtleWoW 1.18.1 install the
-# earlier tables used).
+# earlier tables used). Where that folder does not exist the viewer reads wow.example.com's packs,
+# cached in benilla-config/packs/; run it once with WOW_PACK_FILL=1 (the whole base container) so no
+# timed row waits on a download.
 set -u
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 

@@ -100,6 +100,22 @@ pub fn segment(segment: &str) -> Option<Result<Arc<NetPackStore>>> {
     store_at(&cache_root().join(segment))
 }
 
+/// Download every pack of the origin's container `segment` the cache lacks, now, on this thread;
+/// returns the packs fetched. A pack that fails is reported and passed, as the background fill
+/// passes it.
+pub fn fill_segment(segment_name: &str) -> Result<usize> {
+    let store = segment(segment_name)
+        .ok_or_else(|| anyhow::anyhow!("no data origin to read {segment_name} from"))??;
+    let mut fetched = 0;
+    while let Some(pack_id) = store.next_unfilled() {
+        if let Err(e) = store.fill(pack_id) {
+            eprintln!("benilla: fill of {segment_name} pack {pack_id}: {e}");
+        }
+        fetched += 1;
+    }
+    Ok(fetched)
+}
+
 /// How long nothing may have been fetched for a read or a warm before the background fill takes
 /// the line, so a burst's next request does not queue behind a fill download.
 const FILL_QUIET: std::time::Duration = std::time::Duration::from_secs(1);

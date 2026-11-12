@@ -51,6 +51,53 @@ const VIEW_OPEN_Z: f32 = 100.0;
 /// Near plane in yards: the `nearclip` CVar's default, since the viewer has no CVar table.
 const NEAR: f32 = crate::view::NEARCLIP_DEFAULT;
 
+/// fork: desktop — the site the viewer reads its game data from when nothing names an install,
+/// `benilla-desktop`'s own.
+#[cfg(not(target_arch = "wasm32"))]
+const DATA_ORIGIN: &str = "https://wow.example.com";
+
+/// fork: desktop — read the game data from [`DATA_ORIGIN`]'s packs, cached in
+/// `benilla-config/packs/` under the working folder (`$BENILLA_PACK_CACHE` names another), unless
+/// an install is asked for: `$WOW_DATA` naming a folder that exists, or `$BENILLA_DATA_URL=` set
+/// and empty. `$WOW_DATA=` set and empty is a run with no data at all, the no-install gate's.
+/// `$BENILLA_DATA_URL` names another site. `WOW_PACK_FILL=1` downloads the whole base container
+/// before the viewer opens, so a timed run reads no pack over the network.
+#[cfg(not(target_arch = "wasm32"))]
+fn remote_data() {
+    use benilla_formats::remote;
+    let wow_data = std::env::var_os("WOW_DATA");
+    let install_asked = wow_data
+        .as_ref()
+        .is_some_and(|d| d.is_empty() || std::path::Path::new(d).is_dir());
+    if std::env::var_os("BENILLA_DATA_URL").is_none() && install_asked {
+        return;
+    }
+    remote::set_origin(DATA_ORIGIN);
+    let Some(origin) = remote::origin() else {
+        return;
+    };
+    let cache = std::env::var_os("BENILLA_PACK_CACHE")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|d| d.join("benilla-config").join("packs"))
+        })
+        .unwrap_or_else(|| std::env::temp_dir().join("benilla-config").join("packs"));
+    remote::set_cache_root(cache.clone());
+    println!(
+        "data: game data from {origin}, cached in {}",
+        cache.display()
+    );
+    if crate::launch_env::var("WOW_PACK_FILL").as_deref() == Some("1") {
+        match remote::fill_segment(remote::DATA_SEGMENT) {
+            Ok(n) => println!("data: base container complete ({n} pack(s) fetched)"),
+            Err(e) => eprintln!("data: the base container could not be filled: {e:#}"),
+        }
+    }
+}
+
 /// Builds and runs the world viewer; `build` is the launcher shim's compile-time git stamp.
 pub fn run(build: BuildId) -> AppExit {
     run_with(build, |_| {})
@@ -91,6 +138,10 @@ pub fn run_with(build: BuildId, extra: impl FnOnce(&mut App)) -> AppExit {
     benilla_formats::set_hd_character_models(
         benilla_formats::layers::hd_models_env().unwrap_or(false),
     );
+
+    // fork: desktop — the site's packs before any chain opens, as `benilla-desktop` reads them.
+    #[cfg(not(target_arch = "wasm32"))]
+    remote_data();
 
     // The `mpq://` source must be registered before `AssetPlugin` (in `DefaultPlugins`) builds.
     match benilla_formats::wow_data() {
