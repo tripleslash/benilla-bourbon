@@ -25,7 +25,10 @@
 //! Northshire from 160 yd, `WOW_ASYNC_COMPUTE=0`): GPU +0.5 ms a frame (prepass, late
 //! preprocessing and bin unpacking over a 0.17 ms main-pass saving) and the render thread about
 //! +7 ms (wgpu submit tracking of the doubled opaque draws, the per-frame binned instance and
-//! indirect-metadata writes). Off, nothing here runs and no pipeline changes: the prepass twins
+//! indirect-metadata writes). Measured a net loss again in every pinned worldview scene on Vulkan
+//! (RTX 5080, `scripts/perf-baseline.sh`, 2880x1620, interleaved), p50 off against on: Goldshire
+//! 9.2 against 10.5 ms, Northshire 10.1 against 11.1, Booty Bay 8.0 against 8.4, Darnassus 10.4
+//! against 10.6, Stormwind 8.0 against 8.2. Off, nothing here runs and no pipeline changes: the prepass twins
 //! compile only into prepass pipelines, and the shader cuts are inert without `PREPASS_PIPELINE`
 //! and `DEPTH_PREPASS`.
 //!
