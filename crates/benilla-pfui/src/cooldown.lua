@@ -33,8 +33,15 @@ local function countdown(self, ms)
   if ms and ms > 0 and not self:GetHideCountdownNumbers()
     and self.duration * 1000 > self:GetMinimumCountdownDuration()
     and (tonumber(GetCVar("countdownForCooldowns") or 0) or 0) ~= 0 then
-    text = countdownText(ms, self:GetCountdownAbbrevThreshold(),
-      self:GetCountdownMillisecondsThreshold())
+    local formatter = self.benillaCountdownFormatter
+    if formatter then
+      -- A formatter replaces the rules: it gets the seconds left, unrounded; an error shows none.
+      local ok, formatted = pcall(formatter.FormatNumber, formatter, ms / 1000)
+      text = ok and formatted or ""
+    else
+      text = countdownText(ms, self:GetCountdownAbbrevThreshold(),
+        self:GetCountdownMillisecondsThreshold())
+    end
   end
   if text == (self.benillaCountdownText or "") then return end
   self.benillaCountdownText = text
@@ -88,6 +95,14 @@ flag("HideCountdownNumbers", false)
 flag("CountdownAbbrevThreshold", 120)
 flag("CountdownMillisecondsThreshold", 0)
 flag("MinimumCountdownDuration", 2000)
+-- The frame keeps the formatter itself, so a later change to its breakpoints changes the text.
+function M:SetCountdownFormatter(formatter)
+  if formatter ~= nil and (type(formatter) ~= "table" or type(formatter.FormatNumber) ~= "function") then
+    error("Usage: " .. (self:GetName() or "<unnamed>") .. ":SetCountdownFormatter([formatter])", 2)
+  end
+  self.benillaCountdownFormatter = formatter
+end
+function M:GetCountdownFormatter() return self.benillaCountdownFormatter end
 function M:SetSwipeColor() end
 function M:SetEdgeColor() end
 function M:SetSwipeTexture() end
