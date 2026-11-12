@@ -24,6 +24,7 @@ mod message_history;
 pub mod player_stats;
 pub mod professions;
 pub mod quests;
+mod sizes;
 pub mod social;
 pub(crate) mod tooltip_subjects;
 pub mod totems;
@@ -331,6 +332,7 @@ pub fn install(lua: &Lua) -> mlua::Result<()> {
     descriptors::install(lua)?;
     engine::install(lua)?;
     durations::install(lua)?;
+    sizes::install(lua)?;
     xml::install(lua)?;
     message_history::install(lua)?;
     editbox_caret::install(lua)?;

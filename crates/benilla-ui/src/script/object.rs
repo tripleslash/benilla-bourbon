@@ -23,6 +23,8 @@ mod events_regions;
 pub(crate) use events_regions::{broken_handler, xml_title_region};
 mod frame_state;
 mod layout_methods;
+#[cfg(feature = "pfui")]
+pub(crate) use layout_methods::classicapi_size_read;
 pub(crate) use layout_methods::{eff_scale, layout_scale};
 pub(in crate::script) use layout_methods::{settle_frame, settle_region};
 pub(crate) mod movable;

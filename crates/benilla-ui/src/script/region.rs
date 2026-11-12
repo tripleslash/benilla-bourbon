@@ -523,6 +523,8 @@ pub(super) fn install_in_game(lua: &Lua) -> mlua::Result<()> {
 }
 
 mod layout;
+#[cfg(feature = "pfui")]
+pub(crate) use layout::classicapi_region_size_read;
 mod paint;
 mod text;
 

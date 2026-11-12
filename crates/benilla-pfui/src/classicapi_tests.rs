@@ -62,7 +62,7 @@ fn a_regions_relative_key_finds_a_frame_nested_in_the_same_load() {
 }
 
 #[test]
-fn an_anchored_size_reads_in_the_units_of_its_edges_at_any_scale() {
+fn an_anchored_unscaled_size_reads_in_the_units_of_its_edges_at_any_scale() {
     let script = extended();
     script
         .run(
@@ -72,15 +72,19 @@ fn an_anchored_size_reads_in_the_units_of_its_edges_at_any_scale() {
         f:SetScale(0.5)
         f:SetPoint("TOPLEFT", UIParent, "TOPLEFT", 10, -10)
         f:SetPoint("BOTTOMRIGHT", UIParent, "TOPLEFT", 110, -60)
-        assert(near(f:GetWidth(), f:GetRight() - f:GetLeft()), f:GetWidth())
-        assert(near(f:GetHeight(), f:GetTop() - f:GetBottom()), f:GetHeight())
-        assert(f:GetWidth(true) == 0 and f:GetHeight(true) == 0)
+        assert(near(f:GetUnscaledWidth(), f:GetRight() - f:GetLeft()), f:GetUnscaledWidth())
+        assert(near(f:GetUnscaledHeight(), f:GetTop() - f:GetBottom()), f:GetUnscaledHeight())
+        local w, h = f:GetUnscaledSize()
+        assert(near(w, f:GetUnscaledWidth()) and near(h, f:GetUnscaledHeight()))
+        -- ClassicAPI 1.20: GetWidth/GetHeight keep 1.12's scaled read.
+        assert(near(f:GetHeight(), (f:GetTop() - f:GetBottom()) * f:GetEffectiveScale()), f:GetHeight())
+        assert(f:GetWidth(true) == 0 and f:GetHeight(true) == 0 and f:GetUnscaledHeight(true) == 0)
         local t = f:CreateTexture()
         t:SetAllPoints()
-        assert(near(t:GetHeight(), t:GetTop() - t:GetBottom()), t:GetHeight())
-        assert(t:GetHeight(true) == 0)
+        assert(near(t:GetUnscaledHeight(), t:GetTop() - t:GetBottom()), t:GetUnscaledHeight())
+        assert(t:GetHeight(true) == 0 and t:GetUnscaledHeight(true) == 0)
         f:SetHeight(40)
-        assert(near(f:GetHeight(true), 40) and near(f:GetHeight(), 40))
+        assert(near(f:GetHeight(true), 40) and near(f:GetHeight(), 40) and near(f:GetUnscaledHeight(), 40))
     "#,
         )
         .unwrap();

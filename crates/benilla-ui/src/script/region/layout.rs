@@ -90,7 +90,7 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
     set_shared(lua, m, Side::Region, "GetWidth", |lua, this: Table| {
         region_size_read(lua, &this, true)
     })?;
-    // ClassicAPI's `GetWidth([ignoreRect])`.
+    // ClassicAPI's `GetWidth([ignoreRect])`: 1.12's read; with `ignoreRect` only the set size.
     #[cfg(feature = "pfui")]
     set_shared(
         lua,
@@ -98,14 +98,18 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         Side::Region,
         "GetWidth",
         |lua, (this, ignore_rect): (Table, Option<bool>)| {
-            classicapi_region_size_read(lua, &this, true, ignore_rect == Some(true))
+            if ignore_rect == Some(true) {
+                classicapi_region_size_read(lua, &this, true, true)
+            } else {
+                region_size_read(lua, &this, true)
+            }
         },
     )?;
 
     set_shared(lua, m, Side::Region, "GetHeight", |lua, this: Table| {
         region_size_read(lua, &this, false)
     })?;
-    // ClassicAPI's `GetHeight([ignoreRect])`.
+    // ClassicAPI's `GetHeight([ignoreRect])`: 1.12's read; with `ignoreRect` only the set size.
     #[cfg(feature = "pfui")]
     set_shared(
         lua,
@@ -113,7 +117,11 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         Side::Region,
         "GetHeight",
         |lua, (this, ignore_rect): (Table, Option<bool>)| {
-            classicapi_region_size_read(lua, &this, false, ignore_rect == Some(true))
+            if ignore_rect == Some(true) {
+                classicapi_region_size_read(lua, &this, false, true)
+            } else {
+                region_size_read(lua, &this, false)
+            }
         },
     )?;
 
@@ -341,7 +349,7 @@ fn region_size_read(lua: &Lua, this: &Table, width: bool) -> mlua::Result<f64> {
 /// ClassicAPI's size of a region: as [`region_size_read`], the anchored span over the scale, in
 /// `GetTop`'s units; with `ignore_rect` a size that is not set answers 0.
 #[cfg(feature = "pfui")]
-fn classicapi_region_size_read(
+pub(crate) fn classicapi_region_size_read(
     lua: &Lua,
     this: &Table,
     width: bool,
