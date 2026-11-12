@@ -131,3 +131,5 @@ function table.wipe(value)
   for key in pairs(value) do value[key] = nil end
   return value
 end
+-- ClassicAPI registers it as a global too, which its addon reads back as `ClassicAPI.wipe`.
+wipe = table.wipe

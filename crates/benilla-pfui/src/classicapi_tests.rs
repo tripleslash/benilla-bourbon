@@ -1014,3 +1014,70 @@ fn autocomplete_matches_whispered_names_most_recent_first() {
         )
         .unwrap();
 }
+
+/// ClassicAPI 1.20's base-library additions: the stack heights an error handler reads, and the
+/// reference's examples for the rest.
+#[test]
+fn baselib_additions_follow_the_reference() {
+    let mut script = extended();
+    script.set_screen_size(1024.0, 768.0);
+    script
+        .run(
+            r#"
+      local function depth() return GetCallstackHeight() end
+      local outer = GetCallstackHeight()
+      assert(depth() == outer + 1, depth() .. " " .. outer)
+      local function where() local text = debugstack(1, 1, 0); return text end
+      assert(string.find(where(), "in function `where'", 1, true), where())
+      assert(string.find(debugstack(), "in main chunk", 1, true))
+      handler = function(message)
+        seen = message
+        local height = GetErrorCallstackHeight()
+        stackFromError = debugstack(GetCallstackHeight() - height + 1, 1, 0)
+        locals = debuglocals(1)
+      end
+      seterrorhandler(handler)
+      assert(geterrorhandler() == handler)
+      local f = CreateFrame("Frame")
+      f:RegisterEvent("PLAYER_ALIVE")
+      f:SetScript("OnEvent", function() local function failing() error("boom") end failing() end)
+    "#,
+        )
+        .unwrap();
+    script.fire_event("PLAYER_ALIVE", vec![]);
+    let stack = script.eval::<String>("return stackFromError").unwrap();
+    assert!(
+        script
+            .eval::<String>("return seen")
+            .unwrap()
+            .contains("boom"),
+        "the addon's handler heard the error"
+    );
+    assert!(
+        stack.starts_with("[C]: in function `error'"),
+        "the error height names the failing code: {stack}"
+    );
+    script
+        .run(
+            r#"
+      assert(locals == "" and debuglocals() == nil and GetErrorCallstackHeight() == nil)
+      SetErrorCallstackHeight(4); assert(GetErrorCallstackHeight() == 4); SetErrorCallstackHeight(nil)
+      local a, b, c, d, e = scrub(1, "a", true, {}, print)
+      assert(a == 1 and b == "a" and c == true and d == nil and e == nil)
+      assert(difftime(10, 4) == 6 and difftime(5) == 5)
+      local t = { "a", "b", "c", "d", "e" }
+      local x, y, z = table.removemulti(t, 2, 3)
+      assert(x == "b" and y == "c" and z == "d" and table.getn(t) == 2 and t[2] == "e")
+      assert(table.removemulti({}) == nil and not pcall(table.removemulti, { 1 }, 2, 3))
+      local p, q, r = string.byte("ABC", 1, -1)
+      assert(p == 65 and q == 66 and r == 67 and string.byte("ABC") == 65)
+      local m, n2 = strbyte("ABC", -2, -1)
+      assert(m == 66 and n2 == 67 and string.byte("ABC", 4) == nil)
+      assert(string.gsub("$name the $class", "%$(%w+)", { name = "Bob", class = "Druid" }) == "Bob the Druid")
+      assert(gsub("$name and $unknown", "%$(%w+)", { name = "Bob" }) == "Bob and $unknown")
+      assert(string.gsub("aXb", "X", { X = "-" }) == "a-b")
+      assert(not pcall(string.gsub, "a", "a", { a = {} }))
+    "#,
+        )
+        .unwrap();
+}
