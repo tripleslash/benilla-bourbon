@@ -145,7 +145,9 @@ pub(crate) struct Shared {
     /// Bytes written so far.
     pub(crate) done: AtomicU64,
     pub(crate) state: AtomicU8,
-    /// fork: dlss (FORK.md) — the window's heading; empty is the client update's.
+    /// fork: dlss (FORK.md) — the window's heading; empty is the client update's. Only the
+    /// Win32 progress window reads it.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) heading: &'static str,
 }
 
