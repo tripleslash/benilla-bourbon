@@ -43,8 +43,10 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             a.push(Value::Nil);
             a.push(per_character);
             // The stock verb raises on a full table; the modern one answers nil.
-            Ok(with_named_icons(|| create.call::<MultiValue>(MultiValue::from_vec(a)))
-                .unwrap_or_default())
+            Ok(
+                with_named_icons(|| create.call::<MultiValue>(MultiValue::from_vec(a)))
+                    .unwrap_or_default(),
+            )
         })?,
     )?;
     namespace.set(
