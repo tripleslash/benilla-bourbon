@@ -1,7 +1,7 @@
 //! The engine half the ClassicAPI DLL's own Lua addon (`!!!ClassicAPI`) builds on, and the
 //! FrameXML it reads: each behaviour as that addon or pfUI uses it.
 
-use benilla_ui::script::UiScript;
+use benilla_ui::script::{ScriptValue, UiScript};
 
 fn extended() -> UiScript {
     let mut script = UiScript::new().unwrap();
@@ -976,5 +976,41 @@ fn a_casts_unit_target_is_named_while_the_cast_runs() {
     casts::set_casts(script.lua(), []);
     script
         .run(r#"assert(UnitSpellTargetName("target") == nil)"#)
+        .unwrap();
+}
+
+/// ClassicAPI 1.20's name completion over this session's whispers: the most recent first, the
+/// text before the cursor starting the name and the text after it later in the name.
+#[test]
+fn autocomplete_matches_whispered_names_most_recent_first() {
+    let mut script = extended();
+    for (event, who) in [
+        ("CHAT_MSG_WHISPER", "Johnson"),
+        ("CHAT_MSG_WHISPER_INFORM", "Jonas"),
+        ("CHAT_MSG_WHISPER", "Mira"),
+    ] {
+        script.fire_event(
+            event,
+            vec![ScriptValue::Str("hi".into()), ScriptValue::Str(who.into())],
+        );
+    }
+    script.tick(0.0);
+    script
+        .run(
+            r#"
+      local r = C_AutoComplete.GetAutoCompleteResults("jo", 0, 0, false, 0, 0)
+      assert(table.getn(r) == 2 and r[1].name == "Jonas" and r[2].name == "Johnson", table.getn(r))
+      assert(r[1].priority == Enum.AutoCompletePriority.Interacted and r[1].bnetID == 0)
+      local mid = C_AutoComplete.GetAutoCompleteResults("Jhn", 0, 1, false, 0, 0)
+      assert(table.getn(mid) == 1 and mid[1].name == "Johnson")
+      assert(table.getn(C_AutoComplete.GetAutoCompleteResults("mira", 0, 0, false, 0, 0)) == 0)
+      assert(table.getn(C_AutoComplete.GetAutoCompleteResults("mira", 0, 0, true, 0, 0)) == 1)
+      local online = C_AutoComplete.GetAutoCompleteResults("", 1, 0, true, Enum.AutoCompleteEntryFlag.Online, 0)
+      assert(table.getn(online) == 1 and online[1].name == "Mira")
+      assert(table.getn(C_AutoComplete.GetAutoCompleteResults("", 0, 0, true, Enum.AutoCompleteEntryFlag.InGuild, 0)) == 0)
+      assert(C_AutoComplete.IsRecognizedName("JOHNSON") and not C_AutoComplete.IsRecognizedName("Nobody"))
+      assert(C_AutoComplete.GetAutoCompletePresenceID("Mira") == nil)
+    "#,
+        )
         .unwrap();
 }
