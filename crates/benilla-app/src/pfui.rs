@@ -9,6 +9,7 @@ pub(crate) mod clicks;
 mod combat_log;
 mod icons;
 pub(crate) mod input;
+mod item_sets;
 mod lockout;
 mod loot;
 #[cfg(feature = "nampower")]
@@ -73,6 +74,7 @@ pub(crate) fn prepare(script: &UiScript) -> Result<(), String> {
         .install(lua)
         .map_err(|e| e.to_string())?;
     icons::prepare(script)?;
+    item_sets::install(lua).map_err(|e| e.to_string())?;
     benilla_pfui::install_class_names(
         script,
         creatures
