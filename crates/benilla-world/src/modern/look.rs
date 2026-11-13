@@ -407,9 +407,9 @@ impl ZoneLook {
     /// haze and sky go grey at the same fog brightness, and the grade is less saturated. Exposed
     /// down from 0.95 (asked: the noon air blew out white over the Long Wash; at the approved pose
     /// it read 220-230 of 255 on the bank, with the sea fog and banks off no darker, and 0.72 still
-    /// too bright), to a little over the approved 17:00 frame's levels there.
+    /// too bright, and 0.6), to the approved 17:00 frame's levels there.
     pub const DARKSHORE_NOON: Self = Self {
-        exposure: 0.6,
+        exposure: 0.55,
         glow: [1.0, 0.96, 0.95],
         fog_tint: [1.9, 1.9, 1.91],
         sky_tint: [1.0, 1.0, 1.04],
