@@ -407,7 +407,7 @@ fn wind_dir() -> vec2<f32> {
     return normalize(vec2<f32>(0.9, 0.35));
 }
 
-// A wind-driven sea as a surface SLOPE (d height / d xz), for the modern water. Nine directional
+// A wind-driven sea as a surface SLOPE (d height / d xz), for the modern water. Ten directional
 // deep-water trains from long swell to short chop, their directions spread irregularly about the wind
 // (not a fan), their phases pushed around by a caller-supplied noise `warp` so crests never line up
 // into a visible lattice, and their energy gathered into gust patches by `gust` (0..1, also noise).
@@ -417,16 +417,18 @@ fn wind_swell(xz: vec2<f32>, time: f32, dist: f32, warp: vec2<f32>, gust: f32) -
 }
 
 /// The sea's train count, longest first ([`wind_wave`]).
-const WIND_TRAINS: u32 = 9u;
+const WIND_TRAINS: u32 = 10u;
 /// A [`wind_sea`] call that wants no height: no train is this long.
 const WIND_SEA_HEIGHT_OFF: f32 = 1.0e9;
 /// The mean square of the crest-sharpened profile `cos θ · (1 + 0.35 sin θ)` over a cycle,
 /// `½ + ½ · 0.175²`: a train's slope variance per unit of its amplitude squared.
 const WIND_CREST_VAR: f32 = 0.5153;
 
-/// Row `k` of the sea: wavelength (yd), direction offset across the wind, steepness.
+/// Row `k` of the sea: wavelength (yd), direction offset across the wind, steepness. The first is a
+/// gentle long swell (~0.15 yd high), shallower than the rest, under the one at 17 yd.
 fn wind_wave(k: u32) -> vec3<f32> {
-    let waves = array<vec3<f32>, 9>(
+    let waves = array<vec3<f32>, 10>(
+        vec3<f32>(24.7, -0.21, 0.038),
         vec3<f32>(17.3, 0.07, 0.055),
         vec3<f32>(11.1, -0.31, 0.06),
         vec3<f32>(7.9, 0.46, 0.058),
@@ -470,7 +472,10 @@ fn wind_train(k: u32, xz: vec2<f32>, time: f32, dist: f32, warp: vec2<f32>, gust
     t.fade = 1.0 - smoothstep(wl * 18.0, wl * 45.0, dist);
     // Chop (short trains) follows the gusts; swell (long trains) barely does.
     let chop = mix(0.85, 0.25 + 1.1 * gust, clamp(1.0 - wl / 8.0, 0.0, 1.0));
-    t.amp = wave.z * chop;
+    // Wave groups: each train swells and dies away over its own mix of the warp field (~90 yd), so a
+    // train never runs at one height across a whole bay and the trains do not peak together.
+    let group = clamp(1.0 + 0.5 * dot(warp, vec2<f32>(sin(fk * 1.9 + 0.5), cos(fk * 1.3 + 1.1))), 0.5, 1.5);
+    t.amp = wave.z * chop * group;
     return t;
 }
 
