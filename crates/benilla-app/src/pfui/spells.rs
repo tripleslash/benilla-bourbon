@@ -15,7 +15,8 @@ struct RangeSpell {
 #[derive(Default)]
 struct Memo {
     costs: Option<(u32, u32, u32)>,
-    cooldowns_fed: bool,
+    /// The cooldown list's flush counters when the rows were last built.
+    cooldowns: Option<(u64, u64, u64)>,
 }
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -64,6 +65,10 @@ fn feed(
     let (Some(script), Some(spells)) = (script, spells) else {
         return;
     };
+    // A VM without the extension (a stock interface, pfUI off) has no reader for any of this.
+    if !runtime::installed(script.lua()) {
+        return;
+    }
     let memo = memo.get(&script);
     let ranges = ranges.get(&script);
     let now = Instant::now();
@@ -107,7 +112,17 @@ fn feed(
         runtime::set_costs(script.lua(), costs);
         memo.costs = basis;
     }
-    if !memo.cooldowns_fed || cooldowns.is_changed() || cooldowns.sweep_pending(now) {
+    // The getter reads the list as of its call wherever a host is lent, so these rows are its
+    // list of catalog spells and its answer without a host. They are rebuilt when the list
+    // flushes, as the stock interface hears of a change (`0x4b31b0`, `0x4b31c0`, `0x4f93d0`), and
+    // never for time alone: the table holds a row per catalog spell. The resource's change tick
+    // is no test for a flush: in a live session the list reads as changed on every frame.
+    let flushed = (
+        cooldowns.generation,
+        cooldowns.usable_refreshes,
+        cooldowns.bag_flushes,
+    );
+    if memo.cooldowns != Some(flushed) {
         runtime::set_cooldowns(
             script.lua(),
             spells
@@ -124,7 +139,7 @@ fn feed(
                 })
                 .collect(),
         );
-        memo.cooldowns_fed = true;
+        memo.cooldowns = Some(flushed);
     }
     let carried = me
         .map(|(store, _)| crate::ui_items::stack_counts(&store.0, &objects))
@@ -215,4 +230,88 @@ fn feed(
         }) as runtime::RangeQuery
     });
     runtime::set_range_query(script.lua(), query);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pfui::test_support::{fixture, HEAL};
+
+    fn feeds(world: &World) -> u64 {
+        runtime::cooldown_feeds(world.non_send_resource::<UiScript>().lua())
+    }
+
+    /// The fixture's spell, as its catalog holds it, with a cooldown of its own.
+    fn heal() -> SpellDisplay {
+        SpellDisplay {
+            start_recovery_category: 133,
+            start_recovery_ms: 1500,
+            recovery_ms: 30_000,
+            ..Default::default()
+        }
+    }
+
+    /// The rows are built once and again when the list flushes, not on every frame: neither for
+    /// a record the two-minute sweep has yet to free (a GCD-only one is its from the cast on),
+    /// nor because the resource was taken mutably.
+    #[test]
+    fn the_cooldown_rows_are_rebuilt_at_a_flush_alone() {
+        let (mut app, _commands) = fixture();
+        let world = app.world_mut();
+        let feed = world.register_system(feed);
+        let now = Instant::now();
+        world.resource_mut::<crate::spell::Cooldowns>().start_gcd(
+            HEAL,
+            &heal(),
+            now,
+            &crate::spell::SpellModifiers::default(),
+        );
+        assert!(
+            world
+                .resource::<crate::spell::Cooldowns>()
+                .sweep_pending(now),
+            "a GCD-only record is the sweep's from the start"
+        );
+
+        world.run_system(feed).unwrap();
+        let built = feeds(world);
+        assert_eq!(built, 1, "the first frame builds the rows");
+        for _ in 0..3 {
+            // A mutable borrow that writes nothing, as the list's lane takes every frame.
+            let _ = &mut *world.resource_mut::<crate::spell::Cooldowns>();
+            world.run_system(feed).unwrap();
+        }
+        assert_eq!(feeds(world), built, "frames with no flush rebuild nothing");
+
+        world.resource_mut::<crate::spell::Cooldowns>().flush();
+        world.run_system(feed).unwrap();
+        assert_eq!(feeds(world), built + 1, "a flush rebuilds them");
+    }
+
+    /// `C_Spell.GetSpellCooldown` reads the list as of the call, so a cooldown started after the
+    /// rows were built shows with no rebuild.
+    #[test]
+    fn the_cooldown_getter_reads_the_list_at_the_call() {
+        let (mut app, _commands) = fixture();
+        let feed = app.world_mut().register_system(feed);
+        app.world_mut().run_system(feed).unwrap();
+        let built = feeds(app.world());
+        crate::pfui::test_support::run(
+            &mut app,
+            &format!("cold = C_Spell.GetSpellCooldown({HEAL}).duration"),
+        );
+        app.world_mut()
+            .resource_mut::<crate::spell::Cooldowns>()
+            .start_spell(HEAL, &heal(), 0, Instant::now(), None);
+        crate::pfui::test_support::run(
+            &mut app,
+            &format!("running = C_Spell.GetSpellCooldown({HEAL}).duration"),
+        );
+        let script = app.world().non_send_resource::<UiScript>();
+        assert_eq!(
+            script.eval::<(f64, f64)>("return cold, running").unwrap(),
+            (0.0, 30.0)
+        );
+        assert_eq!(feeds(app.world()), built, "and no rebuild between");
+    }
 }

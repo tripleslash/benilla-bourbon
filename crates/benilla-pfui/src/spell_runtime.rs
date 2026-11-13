@@ -1,6 +1,7 @@
 //! Gameplay queries read snapshots built with the engine's stock spell calculations.
 
 use benilla_ui::script::pfui_host::units;
+use benilla_ui::script::CooldownQuery;
 use mlua::{Lua, Table, Value};
 use std::collections::HashMap;
 
@@ -18,8 +19,17 @@ pub type RangeQuery = Box<dyn Fn(u32, u64) -> Option<bool>>;
 struct Runtime {
     costs: HashMap<u32, Cost>,
     cooldowns: HashMap<u32, Cooldown>,
+    /// How often [`set_cooldowns`] replaced the table: it holds a row per catalog spell, so the
+    /// host's feed must not rebuild it every frame.
+    cooldown_feeds: u64,
     usable: HashMap<u32, (bool, bool)>,
     range: Option<RangeQuery>,
+}
+
+/// Whether this VM carries the spell getters: without them nothing reads the snapshots, and the
+/// host's feed skips building them.
+pub fn installed(lua: &Lua) -> bool {
+    lua.app_data_ref::<Runtime>().is_some()
 }
 
 pub fn set_costs(lua: &Lua, costs: HashMap<u32, Cost>) {
@@ -27,10 +37,19 @@ pub fn set_costs(lua: &Lua, costs: HashMap<u32, Cost>) {
         state.costs = costs;
     }
 }
+/// The rows `GetSpellCooldown` answers from where no host is lent to ask, and its list of the
+/// spells it knows: with a host it reads the list as of the call, so the rows need not follow it
+/// frame by frame.
 pub fn set_cooldowns(lua: &Lua, cooldowns: HashMap<u32, Cooldown>) {
     if let Some(mut state) = lua.app_data_mut::<Runtime>() {
         state.cooldowns = cooldowns;
+        state.cooldown_feeds += 1;
     }
+}
+/// [`Runtime::cooldown_feeds`], for the host's tests.
+pub fn cooldown_feeds(lua: &Lua) -> u64 {
+    lua.app_data_ref::<Runtime>()
+        .map_or(0, |state| state.cooldown_feeds)
 }
 pub fn set_usable(lua: &Lua, usable: HashMap<u32, (bool, bool)>) {
     if let Some(mut state) = lua.app_data_mut::<Runtime>() {
@@ -88,21 +107,32 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(id) = units::spell_identifier(lua, input)? else {
                 return Ok(None);
             };
-            let state = lua.app_data_ref::<Runtime>().expect("spell runtime");
-            let Some((start, duration, enabled)) = state.cooldowns.get(&id) else {
+            let fed = lua
+                .app_data_ref::<Runtime>()
+                .expect("spell runtime")
+                .cooldowns
+                .get(&id)
+                .copied();
+            // No row: a spell the catalog lacks.
+            let Some(fed) = fed else {
                 return Ok(None);
             };
+            // The player's list as of this call, as the stock `GetSpellCooldown` reads it
+            // (`CooldownQuery::Spell`); the fed row where no host is lent.
+            let (start, duration, enabled) =
+                benilla_ui::script::live::ask(lua, &CooldownQuery::Spell(id))
+                    .map_or(fed, |live| live.unwrap_or((0, 0, true)));
             let now: f64 = lua.globals().get::<mlua::Function>("GetTime")?.call(())?;
             let (start, duration) =
-                if *enabled && now >= (*start as f64 + f64::from(*duration)) / 1000.0 {
+                if enabled && now >= (start as f64 + f64::from(duration)) / 1000.0 {
                     (0.0, 0.0)
                 } else {
-                    (*start as f64 / 1000.0, f64::from(*duration) / 1000.0)
+                    (start as f64 / 1000.0, f64::from(duration) / 1000.0)
                 };
             let result = lua.create_table()?;
             result.set("startTime", start)?;
             result.set("duration", duration)?;
-            result.set("isEnabled", *enabled)?;
+            result.set("isEnabled", enabled)?;
             result.set("modRate", 1.0)?;
             Ok(Some(result))
         })?,
