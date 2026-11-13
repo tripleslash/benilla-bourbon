@@ -430,6 +430,11 @@ pub fn install(script: &UiScript) -> mlua::Result<()> {
     lua.load(include_str!("autocomplete.lua"))
         .set_name("@benilla-pfui/autocomplete.lua")
         .exec()?;
+    lua.load(include_str!("bagsort.lua"))
+        .set_name("@benilla-pfui/bagsort.lua")
+        .call::<()>(lua.named_registry_value::<mlua::Table>(
+            benilla_ui::script::pfui_host::items::BAG_ENGINE,
+        )?)?;
     attributes::install(lua)?;
     #[cfg(feature = "nampower")]
     nampower::install(lua)?;

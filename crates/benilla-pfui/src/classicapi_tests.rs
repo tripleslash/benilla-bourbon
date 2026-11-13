@@ -1370,3 +1370,119 @@ fn a_region_anchored_to_the_bar_texture_follows_the_fill() {
         .unwrap();
     assert_eq!(span(&mut script), "100 300 50 60");
 }
+
+/// ClassicAPI's bag sort, round by round against a server that swaps (merging stacks of one
+/// item, as `Player::SwapItem` does): partial stacks combine first, then Hearthstone, weapons,
+/// consumables, everything else, and junk from the last slot; a locked item stays put; a call
+/// while a sort runs is ignored; the settings read and write their CVars.
+#[test]
+fn sort_bags_combines_stacks_orders_items_and_leaves_locked_ones() {
+    use benilla_ui::script::pfui_host::items;
+    use benilla_ui::script::{ContainerSlot, ContainerState, ItemTemplateView};
+    let mut script = extended();
+    let template = |name: &str, quality, class, inventory_type, stackable| ItemTemplateView {
+        name: name.into(),
+        quality,
+        class,
+        inventory_type,
+        stackable,
+        ..Default::default()
+    };
+    script.set_item_template(6948, template("Hearthstone", 1, 15, 0, 1));
+    script.set_item_template(30, template("Sword", 2, 2, 13, 1));
+    script.set_item_template(40, template("Bread", 1, 0, 0, 20));
+    script.set_item_template(50, template("Broken Tooth", 0, 15, 0, 1));
+    script.set_item_template(60, template("Stone", 1, 15, 0, 1));
+    let slot = |guid: u64, item_id, count| ContainerSlot {
+        guid: 0x4000_0000_0000_0000 | guid,
+        item_id,
+        count,
+        ..Default::default()
+    };
+    let mut bag = ContainerState {
+        num_slots: 8,
+        ..Default::default()
+    };
+    // Junk first, bread split in two, a sword, the Hearthstone, a locked stone in slot 8.
+    for (s, item) in [
+        (1, slot(1, 50, 1)),
+        (2, slot(2, 40, 5)),
+        (4, slot(3, 30, 1)),
+        (5, slot(4, 40, 7)),
+        (6, slot(5, 6948, 1)),
+        (8, slot(6, 60, 1)),
+    ] {
+        bag.slots.insert(s, item);
+    }
+    script.set_container(0, Some(bag.clone()));
+    script.lock_item(0x4000_0000_0000_0006);
+    script
+        .run(
+            r#"
+      assert(C_Container.GetSortBagsRightToLeft() == false)
+      C_Container.SetBackpackAutosortDisabled(false)
+      C_Container.SortBags()
+      C_Container.SortBags()
+    "#,
+        )
+        .unwrap();
+    let mut rounds = 0;
+    loop {
+        script.tick(0.05);
+        let moves = items::take_bag_moves(script.lua());
+        items::set_bag_busy(script.lua(), false);
+        if moves.is_empty() {
+            break;
+        }
+        rounds += 1;
+        assert!(rounds < 20, "the sort settles");
+        for mv in moves {
+            assert_eq!((mv.src_bag, mv.dst_bag, mv.count), (0, 0, None));
+            let src = bag.slots.remove(&mv.src_slot).expect("a source");
+            match bag.slots.remove(&mv.dst_slot) {
+                Some(mut dst) if dst.item_id == src.item_id && dst.item_id == 40 => {
+                    dst.count += src.count;
+                    bag.slots.insert(mv.dst_slot, dst);
+                }
+                Some(dst) => {
+                    bag.slots.insert(mv.src_slot, dst);
+                    bag.slots.insert(mv.dst_slot, src);
+                }
+                None => {
+                    bag.slots.insert(mv.dst_slot, src);
+                }
+            }
+        }
+        script.set_container(0, Some(bag.clone()));
+    }
+    let layout: Vec<(u32, u32)> = (1..=8)
+        .map(|s| bag.slots.get(&s).map_or((0, 0), |i| (i.item_id, i.count)))
+        .collect();
+    assert_eq!(
+        layout,
+        [
+            (6948, 1),
+            (30, 1),
+            (40, 12),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (50, 1),
+            (60, 1)
+        ],
+        "Hearthstone, sword, the combined bread, junk at the last free slot, the locked stone kept"
+    );
+    script
+        .run(
+            r#"
+      C_Container.SetSortBagsRightToLeft(true)
+      assert(C_Container.GetSortBagsRightToLeft() and GetCVar("sortBagsRightToLeft") == "1")
+      C_Container.SetBankAutosortDisabled(true)
+      assert(C_Container.GetBankAutosortDisabled() and not C_Container.GetBackpackAutosortDisabled())
+      C_Container.SortBankBags() -- the bank is closed: nothing
+    "#,
+        )
+        .unwrap();
+    script.tick(0.05);
+    assert!(items::take_bag_moves(script.lua()).is_empty());
+}

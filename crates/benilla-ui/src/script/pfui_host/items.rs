@@ -237,6 +237,10 @@ fn string(lua: &Lua, value: Option<&str>) -> mlua::Result<Value> {
         .unwrap_or(Ok(Value::Nil))
 }
 
+/// Registry key of the table `benilla-pfui`'s `bagsort.lua` takes: `busy()`, whether queued bag
+/// moves are still going out, and `bank_open()`.
+pub const BAG_ENGINE: &str = "benilla.pfui.bag_engine";
+
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     lua.set_app_data(Extras::default());
     new_items::install(lua)?;
@@ -555,7 +559,26 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             )?,
         )?;
     }
-    lua.globals().set("C_Container", container)
+    lua.globals().set("C_Container", container)?;
+    let engine = lua.create_table()?;
+    engine.set(
+        "busy",
+        lua.create_function(|lua, ()| {
+            Ok(events::bag_busy(lua)
+                || lua
+                    .app_data_ref::<Extras>()
+                    .is_some_and(|extras| !extras.moves.is_empty()))
+        })?,
+    )?;
+    engine.set(
+        "bank_open",
+        lua.create_function(|lua, ()| {
+            Ok(lua
+                .app_data_ref::<Model>()
+                .is_some_and(|model| model.bank.is_some()))
+        })?,
+    )?;
+    lua.set_named_registry_value(BAG_ENGINE, engine)
 }
 
 pub(super) fn quality_color(quality: u32) -> &'static str {

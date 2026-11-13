@@ -18,6 +18,12 @@ pub(super) fn set_bag_busy(lua: &Lua, busy: bool) {
     }
 }
 
+/// Whether the host still works through queued bag moves.
+pub(super) fn bag_busy(lua: &Lua) -> bool {
+    lua.app_data_ref::<State>()
+        .is_some_and(|state| state.bag_busy)
+}
+
 pub(super) fn observe_equipment(lua: &Lua, guids: [u64; 19]) {
     if let Some(mut state) = lua.app_data_mut::<State>() {
         state.current = Some(guids);
