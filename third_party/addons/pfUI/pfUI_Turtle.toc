@@ -4,8 +4,9 @@
 ## Notes: A complete user interface replacement.
 ## Notes-ruRU: Полная замена пользовательского интерфейса.
 ## Version: @project-version@
-## SavedVariables: pfUI_profiles, pfUI_addon_profiles, pfUI_cache, pfUI_throttle, pfUI_combatlog
+## SavedVariables: pfUI_profiles, pfUI_addon_profiles, pfUI_cache, pfUI_combatlog
 ## SavedVariablesPerCharacter: pfUI_config, pfUI_init, pfUI_playerDB, pfUI_eqmgr
+## LoadSavedVariablesFirst: 1
 ## X-Website: https://github.com/brues-code/pfUI
 
 # Selected by ClassicAPI on Turtle WoW, where it wins over pfUI_ClassicAPI.toc.

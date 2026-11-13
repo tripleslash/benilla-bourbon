@@ -6,13 +6,6 @@ pfUI:RegisterModule("bags", function ()
     [1804] = {frame="picklock"},
   }
 
-  local function BagSortOpts()
-    return {
-      reverse     = C.appearance.bags.sortreverse == "1",
-      reversePrio = C.appearance.bags.sortprioreverse == "1",
-    }
-  end
-
   -- function to detect openable items in inventory
   local openable = { bag = nil, slot = nil, icon = nil }
   local function GetNextOpenable()
@@ -363,7 +356,7 @@ pfUI:RegisterModule("bags", function ()
         chat:Hide()
       end
       if C.appearance.bags.autoSortOnOpen == "1" then
-        libbagsort:Sort({0, 1, 2, 3, 4}, BagSortOpts())
+        C_Container.SortBags()
       end
       pfUI.bag:CreateBags(object)
       PlaySound("INTERFACESOUND_BACKPACKOPEN")
@@ -997,7 +990,7 @@ pfUI:RegisterModule("bags", function ()
         end)
 
         frame.sort:SetScript("OnClick", function()
-          libbagsort:Sort({0, 1, 2, 3, 4}, BagSortOpts())
+          C_Container.SortBags()
         end)
       end
 
@@ -1036,7 +1029,7 @@ pfUI:RegisterModule("bags", function ()
 
         frame.search.edit:SetFont(pfUI.font_default, C.global.font_size, "OUTLINE")
         frame.search.edit:SetAutoFocus(false)
-        frame.search.edit:SetText(T["Search"])
+        frame.search.edit:SetText(SEARCH)
         frame.search.edit:SetTextColor(.5,.5,.5,1)
 
         frame.search.edit:SetScript("OnEditFocusGained", function()
@@ -1044,12 +1037,12 @@ pfUI:RegisterModule("bags", function ()
         end)
 
         frame.search.edit:SetScript("OnEditFocusLost", function()
-          this:SetText(T["Search"])
+          this:SetText(SEARCH)
           C_Container.SetItemSearch("")
         end)
 
         frame.search.edit:SetScript("OnTextChanged", function()
-          if this:GetText() == T["Search"] then return end
+          if this:GetText() == SEARCH then return end
           C_Container.SetItemSearch(this:GetText())
         end)
 
@@ -1064,7 +1057,7 @@ pfUI:RegisterModule("bags", function ()
         end)
 
         frame.search:SetScript("OnHide", function()
-          frame.search.edit:SetText(T["Search"])
+          frame.search.edit:SetText(SEARCH)
           C_Container.SetItemSearch("")
         end)
       end
@@ -1163,7 +1156,7 @@ pfUI:RegisterModule("bags", function ()
         end)
 
         frame.sort:SetScript("OnClick", function()
-          libbagsort:Sort({-1, 5, 6, 7, 8, 9, 10}, BagSortOpts())
+          C_Container.SortBankBags()
         end)
       end
     end

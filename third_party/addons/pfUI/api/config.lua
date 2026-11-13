@@ -2,11 +2,6 @@
 setfenv(1, pfUI:GetEnvironment())
 
 function pfUI:UpdateConfig(group, subgroup, entry, value)
-  -- create empty config if not existing
-  if not pfUI_config then
-    _G.pfUI_config = {}
-  end
-
   -- check for missing config groups
   if not pfUI_config[group] then
     pfUI_config[group] = {}
@@ -175,8 +170,6 @@ function pfUI:LoadConfig()
   pfUI:UpdateConfig("appearance", "bags",        "bagrowlength",     "10")
   pfUI:UpdateConfig("appearance", "bags",        "bankrowlength",    "10")
   pfUI:UpdateConfig("appearance", "bags",        "autoSortOnOpen",   "0")
-  pfUI:UpdateConfig("appearance", "bags",        "sortreverse",      "0")
-  pfUI:UpdateConfig("appearance", "bags",        "sortprioreverse",  "0")
   pfUI:UpdateConfig("appearance", "bags",        "timers",           "both")
   pfUI:UpdateConfig("appearance", "minimap",     "size",             "140")
   pfUI:UpdateConfig("appearance", "minimap",     "arrowscale",       "1")
@@ -817,8 +810,6 @@ function pfUI:LoadConfig()
   pfUI:UpdateConfig("tooltip",     nil,          "font_tooltip_size", "12")
   pfUI:UpdateConfig("tooltip",     nil,          "aura_timers",      "text")
 
-  -- Throttle Settings
-
   pfUI:UpdateConfig("chat",       "text",        "input_width",      "0")
   pfUI:UpdateConfig("chat",       "text",        "input_height",     "0")
   pfUI:UpdateConfig("chat",       "text",        "outline",          "1")
@@ -990,6 +981,7 @@ function pfUI:LoadConfig()
   pfUI:UpdateConfig("thirdparty", "shagudps",    "skin",             "0")
   pfUI:UpdateConfig("thirdparty", "shagudps",    "dock",             "0")
   pfUI:UpdateConfig("thirdparty", "greedmeter",  "dock",             "0")
+  pfUI:UpdateConfig("thirdparty", "combatledger", "dock",            "0")
   pfUI:UpdateConfig("thirdparty", "swstats",     "skin",             "0")
   pfUI:UpdateConfig("thirdparty", "swstats",     "dock",             "0")
   pfUI:UpdateConfig("thirdparty", "ktm",         "skin",             "0")
