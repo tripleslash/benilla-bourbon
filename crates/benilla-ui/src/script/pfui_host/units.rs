@@ -496,7 +496,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let Some(guid) = guid(lua, &unit)? else {
                 return Ok((false, false));
             };
-            let model = lua.app_data_ref::<Model>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             if guid == model.unit_guids.player {
                 return Ok((false, false));
             }

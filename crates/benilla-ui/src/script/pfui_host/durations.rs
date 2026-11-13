@@ -3,7 +3,6 @@
 //! objects, text bindings and the per-frame pass are Lua (`benilla-pfui`'s `durations.lua`).
 
 use crate::script::object::frame_handle_of;
-use crate::script::Model;
 use crate::widget::KindState;
 use mlua::{Lua, Table, Value};
 
@@ -21,7 +20,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 _ => None,
             };
             let handle = frame_handle_of(lua, &bar)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             if let Some(KindState::StatusBar(state)) = model
                 .arena
                 .frame_mut(handle)

@@ -89,7 +89,10 @@ pub fn fire_pfui_event(lua: &Lua, event: &str, args: Vec<super::ScriptValue>) {
 /// raises these from its own per-frame passes, inside the tick, with the host lent.
 pub fn fire_pfui_values(lua: &Lua, event: &str, values: Vec<Value>) {
     super::origin::within(super::origin::Origin::Tick, || {
-        let model_mut = || lua.app_data_mut::<super::Model>().expect("model");
+        let model_mut = || {
+            lua.app_data_mut::<crate::script::ModelCell>()
+                .expect("model")
+        };
         let mut at = model_mut()
             .event_to_frames
             .get(event)
@@ -375,7 +378,7 @@ pub fn install(lua: &Lua) -> mlua::Result<()> {
     sizes::install(lua)?;
     tiling::install(lua)?;
     // ClassicAPI's status bars: a bar texture lays out as its fill.
-    if let Some(mut model) = lua.app_data_mut::<crate::script::Model>() {
+    if let Some(mut model) = lua.app_data_mut::<crate::script::ModelCell>() {
         model.classicapi_fill_rects = true;
     }
     xml::install(lua)?;

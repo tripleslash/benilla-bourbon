@@ -136,6 +136,8 @@ pub(crate) fn casting(app: &App, end_ms: Option<f64>) {
                     cast_guid: "Cast-3-1".into(),
                     delay_ms: 0,
                     channel: false,
+                    silenceable: false,
+                    interruptible: false,
                 },
             )
         }),

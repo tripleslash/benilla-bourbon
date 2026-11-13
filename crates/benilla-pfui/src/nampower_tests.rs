@@ -370,6 +370,8 @@ fn cast_query_shares_gettime_epoch_and_does_not_confuse_long_cooldowns_with_gcd(
                 cast_guid: "Cast-0003-42".into(),
                 delay_ms: 0,
                 channel: false,
+                silenceable: false,
+                interruptible: false,
             },
         )],
     );
@@ -463,6 +465,7 @@ fn observed_sources_enrich_real_auras_and_server_duration_wins_over_dbc() {
                 crowd_control: false,
                 self_only: false,
                 applies_aura: false,
+                immunities: Vec::new(),
                 state: AuraState {
                     spell_id: 139,
                     name: Some("Renew".into()),

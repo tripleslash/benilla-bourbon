@@ -18,7 +18,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         "prepare",
         lua.create_function(|lua, texture: Table| {
             let rh = region_handle_of(lua, &texture)?;
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            let mut model = lua
+                .app_data_mut::<crate::script::ModelCell>()
+                .expect("model app_data");
             let Some((path, wrap)) = model
                 .region_data
                 .get(&rh)
@@ -33,7 +35,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     region_data,
                     texels,
                     ..
-                } = &mut *model;
+                } = &mut **model;
                 if let Some(data) = region_data.get_mut(&rh) {
                     texels.set(&mut data.tex, TexSet::None, |_| false);
                     texels.set(&mut data.tex, TexSet::WrapFile(path.clone()), |_| false);
