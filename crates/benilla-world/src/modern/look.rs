@@ -286,12 +286,13 @@ impl ZoneLook {
     /// fork: **Tirisfal Glades**, the eerie look tinted greener (asked in the viewer): the sun,
     /// shafts, fog and sky lean further from red and blue toward green, through a thinner haze than
     /// the eerie look's, day and night (asked), halved with it from 0.0012 (asked: too hazy) and
-    /// then taken to two thirds (asked: 0.0006), keeping the whole 1.3 night bank by day and night
-    /// (asked: 60% of it read too faint) on the eerie look's lower banks.
+    /// then taken to two thirds (asked: 0.0006), its banks by day and night halfway between the
+    /// 1.3 night bank and the 60% of it that read too faint (asked: 1.3 too much), on the eerie
+    /// look's lower banks.
     pub const TIRISFAL: Self = Self {
         haze: 0.0004,
-        ground_fog: 1.3,
-        night_banks: 1.3,
+        ground_fog: 1.04,
+        night_banks: 1.04,
         glow: [0.58, 1.0, 0.62],
         fog_tint: [0.7, 1.05, 0.7],
         sky_tint: [0.52, 0.72, 0.52],
@@ -383,10 +384,10 @@ impl ZoneLook {
         // eerie looks' lie (approved in the viewer, `worldview_pose=6405.2,492.5,13.9,4310.7,-8.1`, 18:20),
         // softer, fainter and closer to the ground than theirs (asked: 1.3, at the default height
         // and billow, stood as lumpy mounds over the shore), then at 60 % and lower still (asked:
-        // 1.1 at 0.6 of the height drew too strong), then that 60 % undone at the lower height, as
-        // Tirisfal's was (asked: 0.66 too faint).
-        ground_fog: 1.1,
-        night_banks: 1.1,
+        // 1.1 at 0.6 of the height drew too strong), then raised halfway back at the lower height, as
+        // Tirisfal's were (asked: 0.66 too faint, 1.1 too much).
+        ground_fog: 0.88,
+        night_banks: 0.88,
         bank_height: 0.45,
         bank_billow: 0.4,
         // The night's banks whole: ground fog, not the haze's share.
