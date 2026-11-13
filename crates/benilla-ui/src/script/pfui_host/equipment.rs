@@ -99,7 +99,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(false);
             }
             {
-                let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model");
                 if locked(lua, &model, bag, slot) || locked(lua, &model, EQUIPMENT_BAG, target) {
                     return Ok(false);
                 }

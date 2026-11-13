@@ -371,7 +371,6 @@ fn cast_query_shares_gettime_epoch_and_does_not_confuse_long_cooldowns_with_gcd(
                 delay_ms: 0,
                 channel: false,
                 silenceable: false,
-                interruptible: false,
             },
         )],
     );

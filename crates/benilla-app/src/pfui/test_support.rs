@@ -137,7 +137,6 @@ pub(crate) fn casting(app: &App, end_ms: Option<f64>) {
                     delay_ms: 0,
                     channel: false,
                     silenceable: false,
-                    interruptible: false,
                 },
             )
         }),

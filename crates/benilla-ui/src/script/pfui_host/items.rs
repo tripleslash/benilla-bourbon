@@ -45,7 +45,9 @@ pub fn set_bag_busy(lua: &Lua, busy: bool) {
 /// Whether a queued bag move may touch `(bag, slot)` now: a bank position only while the bank is
 /// open. The host, which holds the bags, checks the slot against the bag's size.
 pub fn bag_position_available(lua: &Lua, bag: i64, slot: u32) -> bool {
-    let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+    let model = lua
+        .app_data_ref::<crate::script::ModelCell>()
+        .expect("model");
     slot > 0 && !((bag == -1 || (5..=10).contains(&bag)) && model.bank.is_none())
 }
 
@@ -336,7 +338,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "IsEquippedItem",
         lua.create_function(|lua, input: Value| {
             let id = id(lua, input)?;
-            let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(id.is_some_and(|id| {
                 (1..20).any(|slot| {
                     crate::script::worn::worn_slot(lua, &model, slot)
@@ -450,7 +454,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     container.set(
         "GetContainerItemID",
         lua.create_function(|lua, (bag, slot): (i64, u32)| {
-            let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
             Ok(crate::script::held::bag_slot(lua, &model, bag, slot)
                 .map(|slot| slot.item_id)
                 .filter(|id| *id > 0))
@@ -460,7 +466,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "IsContainerItemOpenable",
         lua.create_function(|lua, (bag, slot): (i64, u32)| {
             let instance = {
-                let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+                let model = lua
+                    .app_data_ref::<crate::script::ModelCell>()
+                    .expect("model");
                 crate::script::held::bag_slot(lua, &model, bag, slot)
             };
             let Some(instance) = instance else {
@@ -574,7 +582,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "bank_open",
         lua.create_function(|lua, ()| {
             Ok(lua
-                .app_data_ref::<Model>()
+                .app_data_ref::<crate::script::ModelCell>()
                 .is_some_and(|model| model.bank.is_some()))
         })?,
     )?;

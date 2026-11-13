@@ -238,7 +238,7 @@ mod tests {
     use crate::pfui::test_support::{fixture, HEAL};
 
     fn feeds(world: &World) -> u64 {
-        runtime::cooldown_feeds(world.non_send_resource::<UiScript>().lua())
+        runtime::cooldown_feeds(world.non_send::<UiScript>().lua())
     }
 
     /// The fixture's spell, as its catalog holds it, with a cooldown of its own.
@@ -307,7 +307,7 @@ mod tests {
             &mut app,
             &format!("running = C_Spell.GetSpellCooldown({HEAL}).duration"),
         );
-        let script = app.world().non_send_resource::<UiScript>();
+        let script = app.world().non_send::<UiScript>();
         assert_eq!(
             script.eval::<(f64, f64)>("return cold, running").unwrap(),
             (0.0, 30.0)
