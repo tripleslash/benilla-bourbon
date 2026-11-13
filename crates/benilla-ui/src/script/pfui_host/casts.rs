@@ -16,12 +16,8 @@ pub struct Cast {
     pub cast_guid: String,
     pub delay_ms: u32,
     pub channel: bool,
-    /// A silence stops it (`PreventionType` silence).
+    /// An interrupt or a silence can stop it (`PreventionType` silence).
     pub silenceable: bool,
-    /// An interrupt effect stops it: silenceable, and its interrupt flags take an interrupt
-    /// (`SPELL_INTERRUPT_FLAG_DAMAGE` for a cast, `CHANNEL_FLAG_INTERRUPT` for a channel, as the
-    /// server's `EffectInterruptCast` reads them).
-    pub interruptible: bool,
 }
 
 #[derive(Default)]

@@ -1,10 +1,13 @@
 //! ClassicAPI's `notInterruptible`: whether none of the interrupts and silences the player knows
-//! can stop a cast, by the spell's own data and the caster's immunity auras. The rules are the
-//! server's: an interrupt effect stops a cast whose `PreventionType` is silence and whose
-//! interrupt flags take an interrupt (`Spell::EffectInterruptCast`), a silence stops any cast whose
-//! `PreventionType` is silence (`Aura::HandleAuraModSilence`), and an immunity aura of the caster
-//! blocks either (`Unit::IsImmuneToSpell`, `Unit::IsImmuneToSpellEffect`). A creature's own
-//! immunities are server data the client never sees, so such a cast reads interruptible.
+//! can stop a cast, by the spell's own data and the caster's immunity auras, as ClassicAPI
+//! decides it: an interrupt or a silence stops a cast whose `PreventionType` is silence
+//! (`Spell::EffectInterruptCast`, `Aura::HandleAuraModSilence`), unless an immunity aura of the
+//! caster blocks it (`Unit::IsImmuneToSpell`, `Unit::IsImmuneToSpellEffect`). The server's
+//! interrupt effect also tests the cast's interrupt flags, but in its own spell table, which a
+//! server can patch apart from the client's `Spell.dbc` (ClassicAPI a16b990: stock 1.12's
+//! Healing Ward lacks the bit that Turtle's and the server's carry), so the flags are not read.
+//! A creature's own immunities are server data the client never sees, so such a cast reads
+//! interruptible.
 
 use super::auras::Aura;
 use super::casts::Cast;
@@ -72,12 +75,7 @@ fn blocks(immunity: &Immunity, helpful: bool, stopper: &Stopper) -> bool {
 
 /// Whether `stopper` stops `cast` on a caster wearing `auras`.
 pub fn stops(stopper: &Stopper, cast: &Cast, auras: &[Aura]) -> bool {
-    let takes = if stopper.silence {
-        cast.silenceable
-    } else {
-        cast.interruptible
-    };
-    takes
+    cast.silenceable
         && !auras.iter().any(|aura| {
             aura.immunities
                 .iter()

@@ -3358,7 +3358,6 @@ fn observed_cast_queries_and_events_share_ids_timing_and_unit_filters() {
         delay_ms: 200,
         channel: false,
         silenceable: false,
-        interruptible: false,
     };
     casts::set_casts(script.lua(), [(3, cast.clone())]);
     script.run(r#"

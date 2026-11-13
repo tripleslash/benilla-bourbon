@@ -10,22 +10,14 @@ const EFFECT_INTERRUPT_CAST: u32 = 68;
 const EFFECT_TRIGGER_SPELL: u32 = 64;
 const AURA_MOD_SILENCE: u32 = 27;
 const PREVENTION_TYPE_SILENCE: u32 = 1;
-const INTERRUPT_FLAG_DAMAGE: u32 = 0x02;
-const CHANNEL_FLAG_INTERRUPT: u32 = 0x04;
 const ATTR_UNAFFECTED_BY_INVULNERABILITY: u32 = 0x2000_0000;
 const ATTR_EX_DISPEL_AURAS_ON_IMMUNITY: u32 = 0x0000_8000;
 const ATTR_EX_IMMUNITY_TO_HOSTILE_AND_FRIENDLY: u32 = 0x0001_0000;
 const ATTR_EX2_NO_SCHOOL_IMMUNITIES: u32 = 0x0400_0000;
 
-/// `(silenceable, interruptible)` of a cast of `spell`, as `Cast` carries them.
-pub(super) fn cast_facts(spell: &SpellDisplay, channel: bool) -> (bool, bool) {
-    let silenceable = spell.prevention_type == PREVENTION_TYPE_SILENCE;
-    let flag = if channel {
-        spell.channel_interrupt_flags & CHANNEL_FLAG_INTERRUPT
-    } else {
-        spell.interrupt_flags & INTERRUPT_FLAG_DAMAGE
-    };
-    (silenceable, silenceable && flag != 0)
+/// Whether an interrupt or a silence can stop a cast of `spell`, as `Cast` carries it.
+pub(super) fn silenceable(spell: &SpellDisplay) -> bool {
+    spell.prevention_type == PREVENTION_TYPE_SILENCE
 }
 
 fn stopper(spell: &SpellDisplay, effect: usize, silence: bool) -> Stopper {
@@ -135,10 +127,10 @@ mod tests {
         assert_eq!(schools(&all(11958)), 127);
         let banish = all(710);
         assert!(schools(&banish) == 127 && banish.iter().all(|i| i.both_polarities));
-        let facts = |id: u32, channel| cast_facts(catalog.get(id).unwrap(), channel);
-        // Greater Heal and Arcane Missiles: both stop them; First Aid: neither.
-        assert_eq!(facts(2060, false), (true, true));
-        assert_eq!(facts(5143, true), (true, true));
-        assert_eq!(facts(746, true), (false, false));
+        let stoppable = |id: u32| silenceable(catalog.get(id).unwrap());
+        // Greater Heal, Arcane Missiles and Healing Ward (whose stock InterruptFlags lack the
+        // interrupt bit) can be stopped; First Aid and Hearthstone cannot.
+        assert!(stoppable(2060) && stoppable(5143) && stoppable(5605));
+        assert!(!stoppable(746) && !stoppable(8690));
     }
 }

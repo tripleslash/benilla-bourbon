@@ -968,7 +968,6 @@ fn a_casts_unit_target_is_named_while_the_cast_runs() {
         delay_ms: 0,
         channel: false,
         silenceable: false,
-        interruptible: false,
     };
     casts::set_casts(script.lua(), [(7, cast)]);
     casts::set_cast_targets(script.lua(), [(7, 9)]);
@@ -1170,7 +1169,7 @@ fn derived_events_fire_on_change_with_their_payloads() {
         .unwrap();
 }
 
-/// ClassicAPI's notInterruptible, by the server's rules: a known interrupt stops an interruptible
+/// ClassicAPI's notInterruptible: a known interrupt stops a silenceable
 /// cast until the caster wears an immunity that blocks it, a hostile immunity blocks only with the
 /// both-polarities attribute, a cast nothing can stop reads uninterruptible, and the target's
 /// changes during a cast fire UNIT_SPELLCAST_(NOT_)INTERRUPTIBLE.
@@ -1200,7 +1199,7 @@ fn not_interruptible_follows_known_interrupts_and_the_casters_immunities() {
         ..Default::default()
     };
     units::set_unit_states(script.lua(), [(7, caster, 0)]);
-    let cast = |silenceable, interruptible| casts::Cast {
+    let cast = |silenceable| casts::Cast {
         spell_id: 2054,
         name: "Heal".into(),
         rank: String::new(),
@@ -1212,7 +1211,6 @@ fn not_interruptible_follows_known_interrupts_and_the_casters_immunities() {
         delay_ms: 0,
         channel: false,
         silenceable,
-        interruptible,
     };
     let immune = |aura, misc, helpful, both_polarities| Aura {
         slot: 0,
@@ -1248,7 +1246,7 @@ fn not_interruptible_follows_known_interrupts_and_the_casters_immunities() {
     "#,
         )
         .unwrap();
-    casts::set_casts(script.lua(), [(7, cast(true, true))]);
+    casts::set_casts(script.lua(), [(7, cast(true))]);
     // Without a known interrupt or silence the value is always false.
     assert_eq!(read(&mut script), Some(false));
     let kick = Stopper {
@@ -1282,10 +1280,8 @@ fn not_interruptible_follows_known_interrupts_and_the_casters_immunities() {
     interrupts::set_stoppers(script.lua(), vec![kick, silence]);
     auras::set_auras(script.lua(), 7, Some(vec![immune(39, 1, true, false)]));
     assert_eq!(read(&mut script), Some(false));
-    // A cast no interrupt takes still falls to the silence; one neither takes cannot be stopped.
-    casts::set_casts(script.lua(), [(7, cast(true, false))]);
-    assert_eq!(read(&mut script), Some(false));
-    casts::set_casts(script.lua(), [(7, cast(false, false))]);
+    // A cast whose PreventionType is not silence cannot be stopped.
+    casts::set_casts(script.lua(), [(7, cast(false))]);
     assert_eq!(read(&mut script), Some(true));
     let flips = script
         .eval::<String>("return table.concat(flips, ',')")
