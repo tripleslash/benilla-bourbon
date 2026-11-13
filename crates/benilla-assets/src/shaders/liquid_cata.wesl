@@ -1191,6 +1191,27 @@ fn lively_fresnel(mu_px: f32, mu_flat: f32, sigma: f32, alpha: f32, f0: f32, cei
     return clamp(f_px * min(1.0, ceiling / max(f_mean, 1e-4)), f0, 0.95);
 }
 
+/// fork: **the ripples' share of the reflectance where the view is steep.** Water's curve
+/// ([`water_fresnel`]) sits flat at its floor above ~40° of pitch, so there the lively Fresnel no
+/// longer moves with the wave normal and the ripples vanish from a surface looked down on. This adds
+/// back the slope of the stylised climb the tier drew before (`f0` to `cap` along `(1 − cos)²`), as
+/// the pixel's departure from the flat water's value: zero on flat water and, to first order, zero-mean
+/// over the waves, so the water's mean look is the lively Fresnel's. It comes in from `STEEP_RIPPLE_FROM`
+/// (~20° of pitch, where the lively curve's own slope already shows the waves) to full at
+/// `STEEP_RIPPLE_FULL` (~45°), and grazing water is left as it was.
+fn steep_ripple_fresnel(mu_px: f32, mu_flat: f32, f0: f32, cap: f32) -> f32 {
+    let k = smoothstep(STEEP_RIPPLE_FROM, STEEP_RIPPLE_FULL, mu_flat);
+    let climb_px = pow(1.0 - clamp(mu_px, 0.0, 1.0), STEEP_RIPPLE_POWER);
+    let climb_flat = pow(1.0 - clamp(mu_flat, 0.0, 1.0), STEEP_RIPPLE_POWER);
+    return k * (cap - f0) * (climb_px - climb_flat);
+}
+
+/// fork: the flat view's `μ` (the sine of its pitch) where [`steep_ripple_fresnel`] starts, ~20°, and
+/// where it is whole, ~45°; and the power of the stylised climb whose slope it restores.
+const STEEP_RIPPLE_FROM: f32 = 0.34;
+const STEEP_RIPPLE_FULL: f32 = 0.71;
+const STEEP_RIPPLE_POWER: f32 = 2.0;
+
 /// fork: the cosine of a ray of cosine `mu` (against the surface's up) once refracted into water
 /// (`n = 1.333`), floored at the critical angle's 0.6612: however grazing the ray in air, it crosses at
 /// most ~1.5 yards of water per yard of depth.
@@ -1397,7 +1418,8 @@ struct ClearInputs {
 ///   left of it at the authored depth;
 /// * the reflection goes over that at the **lively Fresnel** ([`lively_fresnel`]): water's curve over
 ///   the surface's roughness raised to a head-on floor (`look_a.z`), its far-water mean rescaled to a
-///   ceiling (`look_c.x`), the facets' spread `look_c.y` times what the roughness says — and is itself
+///   ceiling (`look_c.x`), the facets' spread `look_c.y` times what the roughness says, with the
+///   ripples' share kept where the view is steep ([`steep_ripple_fresnel`]) — and is itself
 ///   pulled `look_a.w` of the way to the body, the reference combine's `c11.y` idea, which is what
 ///   keeps water painterly rather than glossy.
 fn modern_water(
@@ -1438,7 +1460,13 @@ fn modern_water(
     let b = v.xz / max(flat_len, 1e-4);
     let along = b.x * b.x * x.lost.x + b.y * b.y * x.lost.y + 2.0 * b.x * b.y * x.lost.z;
     let sigma = flat_len * sqrt(max(along, 0.0)) * max(w.look_c.y, 0.0);
-    let fres = lively_fresnel(dot(-v, n), mu_v, sigma, tensor_alpha(x.rough), f0, ceiling);
+    let mu_px = dot(-v, n);
+    let fres = clamp(
+        lively_fresnel(mu_px, mu_v, sigma, tensor_alpha(x.rough), f0, ceiling)
+            + steep_ripple_fresnel(mu_px, mu_v, f0, ceiling),
+        f0,
+        0.95,
+    );
 
     let a = clamp(w.look_a.w, 0.0, 1.0);
     var out: ClearWater;
