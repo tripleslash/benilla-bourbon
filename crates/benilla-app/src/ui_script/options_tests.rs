@@ -2370,7 +2370,7 @@ fn a_broad_search_scrolls_the_page_instead_of_overflowing_it() {
     benilla_formats::wow_data_or_skip!();
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
-    // Nameplates' six rows fit its area; Controls' sixteen overflow on their own.
+    // Nameplates' eight rows fit its area; Controls' sixteen overflow on their own.
     s.run("BenillaOptionsFrameCategoryListRowNameplates:Click()")
         .unwrap();
     settle(&mut s);
@@ -2839,6 +2839,11 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
                 "AudioRowBackgroundSound",
             ),
             ("BENILLA_TOOLTIP_BRIGHTNESS", "GraphicsRowBrightness"),
+            // fork: the plate range.
+            (
+                "BENILLA_TOOLTIP_NAMEPLATE_DISTANCE",
+                "NameplatesRowNameplateDistance",
+            ),
         ];
         if let Some((_, want_row)) = BENILLA_OWNED.iter().find(|(k, _)| *k == key) {
             assert_eq!(row, *want_row, "{row}: not this row's string");
@@ -2865,9 +2870,9 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
     // 84 rows less the three untipped below, less Display Mode (pulled on this fork), plus the
     // fork's seven Graphics rows (updated models, shadows, the indirect-lighting pair, Water
     // Detail, Lighting, Lighting Quality) and the Everwood port's four (Graphics Preset, Foliage
-    // Wind and its strength, Wet Surfaces in Rain); a dropdown row is checked on the key it wears
-    // at rest.
-    assert_eq!(checked, 94, "every tipped row carries a live key");
+    // Wind and its strength, Wet Surfaces in Rain), and the plate range; a dropdown row is checked
+    // on the key it wears at rest.
+    assert_eq!(checked, 95, "every tipped row carries a live key");
     assert_eq!(
         untipped,
         vec![
@@ -5259,8 +5264,8 @@ fn turtle_options_carry_every_graphics_row() {
         "General:ENABLE_ERROR_SPEECH,BENILLA_BACKGROUND_SOUND,ENABLE_MUSIC,;\
          Chat:PROFANITY_FILTER,BENILLA_DISABLE_SPAM_FILTER,;\
          Controls:CLICK_TO_MOVE,AUTO_SELF_CAST_TEXT,BENILLA_AUTO_LOOT,BLOCK_TRADES,;\
-         Display:BENILLA_ENEMY_NAMEPLATES,BENILLA_FRIENDLY_NAMEPLATES,SHOW_PLAYER_NAMES,\
-         SHOW_PLAYER_TITLES,;"
+         Display:BENILLA_ENEMY_NAMEPLATES,BENILLA_FRIENDLY_NAMEPLATES,\
+         BENILLA_NAMEPLATE_DISTANCE,SHOW_PLAYER_NAMES,SHOW_PLAYER_TITLES,;"
     );
 
     // The plate rows read and write FrameXML's globals in Turtle's getter/setter shape: the

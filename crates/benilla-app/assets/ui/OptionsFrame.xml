@@ -614,6 +614,11 @@
             .. "calmer, higher is a blustery day. Storms swing everything harder on top.\n\n"
             .. "Grass still parts around characters the same way. Needs Foliage Wind on."
 
+        -- fork: the plate range -- 1.12 has no such row.
+        BENILLA_TOOLTIP_NAMEPLATE_DISTANCE =
+            "How far away a unit shows its name plate, in yards. The original client shows them "
+            .. "to 20 yards.\n\nA server sends units only so far out, about 100 yards."
+
         -- fork: the ground clutter's draw distance, density and size -- 1.12 has no such rows.
         BENILLA_TOOLTIP_GROUND_CLUTTER_DISTANCE =
             "How far away grass, flowers and other ground cover is drawn, in yards. The original "
@@ -812,7 +817,7 @@
             -- Guild Names and Player Titles are children of Player Names
             -- (UIOptionsFrame.lua:703-709).
             Nameplates = {
-                "RowEnemyPlates", "RowFriendlyPlates",
+                "RowEnemyPlates", "RowFriendlyPlates", "RowNameplateDistance",
                 "RowPlayerNames", "RowGuildNames", "RowPlayerTitles", "RowNpcNames", "RowOwnName",
             },
             -- 1.12's Display box by column, then Help; target-of-target sits under Status Text.
@@ -3860,10 +3865,23 @@
                                             <Scripts><OnLoad>BenillaOptionsFuncRow_OnLoad(this, BenillaOptionsFrame_GetFriendlyPlates,
                                                 BenillaOptionsFrame_SetFriendlyPlates, "0", "Friendly Name Plates")</OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowPlayerNames" inherits="BenillaOptionsCheckboxRowTemplate">
+                                        <Frame name="$parentRowNameplateDistance" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowFriendlyPlates" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowFriendlyPlates" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- fork: `nameplateDistance`, our own row: the plate
+                                                -- range in yards, from 1.12's fixed 20, which it ships.
+                                                BenillaOptionsRow_OnLoad(this, "nameplateDistance", "Name Plate Distance",
+                                                    "BENILLA_TOOLTIP_NAMEPLATE_DISTANCE")
+                                                BenillaOptionsSliderRow_Setup(this, 20, 100, 5, "raw")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowPlayerNames" inherits="BenillaOptionsCheckboxRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowNameplateDistance" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowNameplateDistance" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>BenillaOptionsRow_OnLoad(this, "UnitNamePlayer", "Player Names",
                                                 "OPTION_TOOLTIP_SHOW_PLAYER_NAMES")</OnLoad></Scripts>
@@ -4415,6 +4433,7 @@
                 .. "opens. Hold Shift while looting to open the window instead."
             BENILLA_ENEMY_NAMEPLATES = "Enemy Name Plates"
             BENILLA_FRIENDLY_NAMEPLATES = "Friendly Name Plates"
+            BENILLA_NAMEPLATE_DISTANCE = "Name Plate Distance"
 
             -- Turtle's getter/setter shape for the plate globals: a getter its checkbox can
             -- `tonumber`, a setter handed the number its click computes or the string Defaults
@@ -4688,6 +4707,11 @@
                     name = "BENILLA_FRIENDLY_NAMEPLATES", type = "checkbutton",
                     getter = "BenillaTurtle_GetFriendlyPlates",
                     setter = "BenillaTurtle_SetFriendlyPlates", defaultValue = "0" } },
+                -- fork: the plate range, under the plate switches as on our Nameplates page.
+                { before = "SHOW_PLAYER_NAMES", row = {
+                    name = "BENILLA_NAMEPLATE_DISTANCE", desc = BENILLA_TOOLTIP_NAMEPLATE_DISTANCE,
+                    type = "slider", cvar = "nameplateDistance", minval = 20, maxval = 100,
+                    step = 5 } },
             }
             -- fork: desktop — a native client's Multisampling and Graphics API rows, the Display
             -- section's last; `restartGx` commits each latched row.

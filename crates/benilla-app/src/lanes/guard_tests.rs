@@ -394,8 +394,10 @@ pub(super) const BUILT_OUTSIDE_THE_PACKETS_IN_THE_REFERENCE: &[(&str, &[&str], &
     // The units' gate binds what it reads of a unit it gives a plate, and its in-packet runs and
     // the unit's callbacks write a bound plate's bar, colour, level, icon and name at their
     // packets; `widescreen` shapes the screen the seat solves on, the camera rig the freelook
-    // edge, the selection the alpha and the targeting the hit-test veto (`0x7cba30`).
-    ("::vplates::drive_vplates", &["Transform", "names::NameCache", "net::GuidIndex",
+    // edge, the selection the alpha and the targeting the hit-test veto (`0x7cba30`); the fork's
+    // `nameplateDistance` the range the gate measures against, as the reference reads its own
+    // range global (`[0xc4d988]`) in the frame pass.
+    ("::vplates::drive_vplates", &["Transform", "cvars::Cvars", "names::NameCache", "net::GuidIndex",
         "net::ObjectStore", "net::SelfGuid", "net::reputations::Reputations",
         "player::camera::CameraControl", "spell::group_relation::GroupRoster",
         "spell::targeting::SpellTargeting", "target::Selection", "ui_party::GroupState",

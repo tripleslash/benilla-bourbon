@@ -127,8 +127,24 @@ const SKULL_SIZE: f32 = 0.01;
 const RAID_ICON_SIZE: f32 = 0.02;
 /// `[0x80abfc]`.
 const PLATE_LIFT: f32 = 2.0 / 3.0;
-/// 20 yd squared, `[0xc4d988]` (set from `0x5fa130`).
-const MAX_DIST_SQ: f32 = 20.0 * 20.0;
+/// The plate range in yards, `sqrt([0xc4d988])` (set from `0x5fa130`), and the reach the
+/// `nameplateDistance` row allows: past about 100 yd a server sends no units to plate.
+pub(crate) const PLATE_DISTANCE_DEFAULT: f32 = 20.0;
+pub(crate) const PLATE_DISTANCE_RANGE: std::ops::RangeInclusive<f32> = 20.0..=100.0;
+
+/// The squared plate range `nameplateDistance` sets, held to its range; a missing or non-number
+/// value is the reference's 20 yd. Deviation: the reference's range is the fixed 20 yd; the row is
+/// the fork's own and ships at it.
+fn max_dist_sq(cvars: Option<&crate::cvars::Cvars>) -> f32 {
+    let yards = cvars
+        .and_then(|c| c.get("nameplateDistance"))
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|v| v.is_finite())
+        .map_or(PLATE_DISTANCE_DEFAULT, |v| {
+            v.clamp(*PLATE_DISTANCE_RANGE.start(), *PLATE_DISTANCE_RANGE.end())
+        });
+    yards * yards
+}
 /// `CreatureType.dbc` id 11, Totem: a friendly one gets no plate (`0x60f757` `cmp eax,0xb`).
 const CREATURE_TYPE_TOTEM: u32 = 11;
 /// Deviation: the reference dims non-target plates to `0x7F`; raised because that fades them too
@@ -362,6 +378,8 @@ struct PlateWorld<'w, 's> {
     mode: Res<'w, VPlateMode>,
     /// The spatial verdicts this gate leaves for the packets'.
     spots: ResMut<'w, PlateSpots>,
+    /// `nameplateDistance`, the plate range ([`max_dist_sq`]).
+    cvars: Option<Res<'w, crate::cvars::Cvars>>,
 }
 
 /// Every frame, the units' gate (`0x60f600` from each unit's update, `0x607ef9`), the seat pass
@@ -497,6 +515,7 @@ fn drive_vplates(
         let sort_pt = Vec2::new(0.4 * diag, viewport.y - 0.3 * diag);
         let mut cands = Vec::new();
         let mut spots = std::collections::HashSet::new();
+        let max_dist_sq = max_dist_sq(world.cvars.as_deref());
         for (entity, net, guid, tf, store) in &world.units {
             // The camera's own unit (`0x60f68c`); our body is a candidate while we are attached to
             // another unit.
@@ -509,7 +528,7 @@ fn drive_vplates(
                 continue;
             }
             // Measured from the camera's unit (`0x60f780`-`0x60f7b8`).
-            if (tf.translation - centre_pos).length_squared() > MAX_DIST_SQ {
+            if (tf.translation - centre_pos).length_squared() > max_dist_sq {
                 continue;
             }
             // Behind the camera or outside the viewport there is no plate: `0x60f600` destroys it
@@ -863,6 +882,18 @@ mod unheld_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `nameplateDistance` boots at the reference's 20 yd and holds a write to 20..=100.
+    #[test]
+    fn the_plate_range_follows_its_row_within_its_range() {
+        let mut cvars = crate::cvars::Cvars::default();
+        assert_eq!(max_dist_sq(None), 400.0);
+        assert_eq!(max_dist_sq(Some(&cvars)), 400.0, "the shipped default");
+        for (wrote, yards) in [("60", 60.0), ("5", 20.0), ("900", 100.0)] {
+            cvars.set("nameplateDistance", wrote);
+            assert_eq!(max_dist_sq(Some(&cvars)), yards * yards, "{wrote}");
+        }
+    }
 
     /// `0x7cbd50` at level 30 (grayband[6] = 7: green down to 23, gray at 22) and the low edge.
     #[test]

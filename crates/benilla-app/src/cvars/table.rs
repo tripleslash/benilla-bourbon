@@ -1150,6 +1150,15 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "1",
         "the fork's own — the gain on `foliageWind`'s sway",
     ),
+    // `nameplateDistance` — how far from the camera's unit a unit gets a name plate, in yards,
+    // 20..100 ([`crate::vplates`]). 1.12 fixes it at 20 (`[0xc4d988]`, set from `0x5fa130`); the
+    // row ships that and lets the player reach out to the range a server sends units in.
+    ours(
+        "nameplateDistance",
+        "20",
+        "the fork's own — 1.12 plates units within a fixed 20 yd and has no setting for it; ours \
+         ships 20 and reaches to 100",
+    ),
     // `groundClutterDistance` — the detail-doodad draw distance in yards, 70..500 (70 the
     // reference's hardcoded `[0x867958]`). `groundClutterDensity` — a gain on the High stop's
     // cells per chunk (`frillDensity` 48), 0..2 (0 no clutter, 1 High as 1.12 scatters it, 2 twice
