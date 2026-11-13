@@ -1,0 +1,21 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.blizzard.com/wow/ui/
+..\FrameXML\UI.xsd">
+	<Script file="SecureTemplates.lua"/>
+
+	<!-- A base template for secure frames (no-op in 1.12, no taint system) -->
+	<Frame name="SecureFrameTemplate" virtual="true"/>
+
+	<!-- Secure action button. Click behavior is driven natively by the C++
+	     Frame::Attributes module: setting a "type*" attribute installs the
+	     OnClick dispatcher, so the template itself needs no <OnClick>. -->
+	<Button name="SecureActionButtonTemplate" inherits="SecureFrameTemplate" virtual="true"/>
+
+	<!-- Unit-button variant (identical to the action button on 1.12; its
+	     "type"/"unit" attributes drive it). SecureUnitButton_OnLoad is a Lua
+	     convenience for the common target + right-click-menu setup. -->
+	<Button name="SecureUnitButtonTemplate" inherits="SecureFrameTemplate" virtual="true"/>
+
+	<!-- Insecure variant: identical behavior in 1.12 (no combat lockdown), so
+	     just inherit the secure template rather than duplicate its OnClick. -->
+	<Button name="InsecureActionButtonTemplate" inherits="SecureActionButtonTemplate" virtual="true"/>
+</Ui>
