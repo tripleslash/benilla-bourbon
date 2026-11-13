@@ -422,7 +422,12 @@ fn aura_edges(
     clock: Res<crate::ui_script::UiClock>,
 ) {
     let Some(script) = script else { return };
+    // A VM without Nampower's state keeps none of what follows.
+    if !api::installed(script.lua()) {
+        return;
+    }
     let mut present = HashSet::new();
+    let (now, me) = (api::now(script.lua()), api::player(script.lua()));
     let gcd_end = benilla_ui::script::pfui_host::casts::player_cast(script.lua())
         .and_then(|cast| {
             spells
@@ -441,7 +446,7 @@ fn aura_edges(
         if let Some(health) = store.0.unit_health() {
             api::health(script.lua(), guid.0, health);
         }
-        api::auras(
+        api::auras_at(
             script.lua(),
             guid.0,
             store
@@ -458,6 +463,8 @@ fn aura_edges(
                         .is_none_or(|d| !d.hidden_from_aura_bar() && !d.tracking_aura()),
                 })
                 .collect(),
+            now,
+            me,
         );
     }
     api::retain_units(script.lua(), &present);

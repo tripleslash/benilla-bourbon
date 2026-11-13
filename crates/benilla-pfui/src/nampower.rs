@@ -196,10 +196,14 @@ pub fn application(lua: &Lua, caster: u64, target: u64, spell: u32, duration_ms:
 }
 
 /// Descriptor edges use raw slots; Lua indices skip hidden auras and holes in each half.
-pub fn auras(lua: &Lua, guid: u64, mut incoming: Vec<Aura>) {
+pub fn auras(lua: &Lua, guid: u64, incoming: Vec<Aura>) {
+    auras_at(lua, guid, incoming, now(lua), player(lua));
+}
+
+/// [`auras`] with [`now`] and [`player`] given: each is a call into the VM, which the host makes
+/// once for a frame's units.
+pub fn auras_at(lua: &Lua, guid: u64, mut incoming: Vec<Aura>, now: f64, me: u64) {
     incoming.sort_by_key(|a| a.slot);
-    let now = now(lua);
-    let me = player(lua);
     let (previous, annotations) = {
         let Some(mut state) = lua.app_data_mut::<State>() else {
             return;
