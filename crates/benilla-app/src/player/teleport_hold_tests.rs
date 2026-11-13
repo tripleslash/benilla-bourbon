@@ -22,6 +22,9 @@ use benilla_world::world_map::CurrentMap;
 
 const GM_ISLAND: [f32; 3] = [16_222.0, 16_252.0, 12.5];
 const SOUTH_SEAS: [f32; 3] = [-11_880.0, -4_700.0, 2.0];
+/// 60 yd along the island: past the reference's 30 yd reload, short of the loading screen's
+/// `SNAP_LOAD_MIN_YD`, so the frame holds and no cover comes up.
+const ISLAND_HOP: [f32; 3] = [GM_ISLAND[0] + 60.0, GM_ISLAND[1], GM_ISLAND[2]];
 
 fn tile_of(wow: [f32; 3]) -> (i32, i32) {
     let (tx, ty) = benilla_formats::world_to_tile(wow[0], wow[1]);
@@ -174,23 +177,23 @@ fn covering(app: &App) -> bool {
     app.world().resource::<LoadingScreen>().covering()
 }
 
-/// GM Island to the South Seas, both on Kalimdor (`0x630bd0` → `0x694920`): no frame is
-/// presented from the snap until the destination is resident, and no screen comes up.
+/// 60 yd across GM Island (`0x630bd0` → `0x694920`, past 30 yd): no frame is presented from the
+/// snap until the destination is resident, and no screen comes up.
 #[test]
-fn a_long_teleport_presents_no_frame_until_resident_and_raises_no_screen() {
+fn a_reloading_teleport_presents_no_frame_until_resident_and_raises_no_screen() {
     let mut app = on_gm_island();
     assert!(
         !held(&app),
         "standing on resident ground, every frame presents"
     );
-    ack_teleport(&mut app, SOUTH_SEAS);
-    stream(&mut app, SOUTH_SEAS, false);
+    ack_teleport(&mut app, ISLAND_HOP);
+    stream(&mut app, ISLAND_HOP, false);
     for frame in 0..30 {
         app.update();
         assert!(held(&app), "frame {frame} after the snap is presented");
         assert!(!covering(&app), "and the hold is no loading screen");
     }
-    stream(&mut app, SOUTH_SEAS, true);
+    stream(&mut app, ISLAND_HOP, true);
     app.update();
     assert!(
         !held(&app),
@@ -199,20 +202,35 @@ fn a_long_teleport_presents_no_frame_until_resident_and_raises_no_screen() {
     assert!(!covering(&app));
 }
 
+/// GM Island to the South Seas, both on Kalimdor: the loading screen covers the load (the
+/// deviation at `loading_screen::drive_loading_screen`), and the hold stands down under it, so the
+/// cover reaches the window instead of the frozen last frame.
+#[test]
+fn a_long_teleport_is_covered_and_holds_no_frame() {
+    let mut app = on_gm_island();
+    ack_teleport(&mut app, SOUTH_SEAS);
+    stream(&mut app, SOUTH_SEAS, false);
+    for frame in 0..30 {
+        app.update();
+        assert!(covering(&app), "frame {frame} after the snap is not covered");
+        assert!(!held(&app), "frame {frame} withholds the cover's present");
+    }
+}
+
 /// vmangos sends `MSG_MOVE_TELEPORT` twice, both to the destination (`MovementHandler.cpp:252`,
 /// `:255`), and an ack hop can land under a hold: a second, short teleport keeps the hold, which
 /// only its release ends.
 #[test]
 fn a_second_teleport_under_the_hold_keeps_it_until_resident() {
     for second in [
-        SOUTH_SEAS,
-        [SOUTH_SEAS[0] + 10.0, SOUTH_SEAS[1], SOUTH_SEAS[2]],
+        ISLAND_HOP,
+        [ISLAND_HOP[0] + 10.0, ISLAND_HOP[1], ISLAND_HOP[2]],
     ] {
         for by_ack in [true, false] {
             let mut app = on_gm_island();
             let send = if by_ack { ack_teleport } else { self_teleport };
-            send(&mut app, SOUTH_SEAS);
-            stream(&mut app, SOUTH_SEAS, false);
+            send(&mut app, ISLAND_HOP);
+            stream(&mut app, ISLAND_HOP, false);
             app.update();
             send(&mut app, second);
             for _ in 0..5 {
@@ -230,8 +248,8 @@ fn a_second_teleport_under_the_hold_keeps_it_until_resident() {
 #[test]
 fn a_worldport_under_the_hold_ends_it_and_shows_its_screen() {
     let mut app = on_gm_island();
-    ack_teleport(&mut app, SOUTH_SEAS);
-    stream(&mut app, SOUTH_SEAS, false);
+    ack_teleport(&mut app, ISLAND_HOP);
+    stream(&mut app, ISLAND_HOP, false);
     app.update();
     assert!(held(&app));
     app.world_mut().write_message(WorldportMessage {
@@ -251,10 +269,9 @@ fn a_worldport_under_the_hold_ends_it_and_shows_its_screen() {
 #[test]
 fn the_hold_ends_at_its_stall_budget_from_the_snap() {
     let mut app = on_gm_island();
-    ack_teleport(&mut app, SOUTH_SEAS);
-    // The destination never comes in, and its tile never matches: the stale world keeps pushing
-    // the settle deadline.
-    stream(&mut app, GM_ISLAND, false);
+    ack_teleport(&mut app, ISLAND_HOP);
+    // The destination never comes in: the stale world keeps pushing the settle deadline.
+    stream(&mut app, ISLAND_HOP, false);
     let frames = |secs: f32| (secs * 10.0).round() as usize;
     for _ in 0..frames(SETTLE_TIMEOUT - 0.5) {
         app.update();

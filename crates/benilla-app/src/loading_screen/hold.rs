@@ -19,6 +19,10 @@
 //! holds where it was on the last frame shown, so no `OnEnter`, `OnLeave` or tooltip fires under
 //! the frozen frame. The hold ends with the settle hold, on the destination's residency
 //! (`WorldLoadProgress::presentable`) or its stall budget.
+//!
+//! A snap long enough to raise the loading screen (`SNAP_LOAD_MIN_YD`, a deviation) is covered
+//! instead, and the hold stands down under any cover: a withheld present would keep the last frame
+//! on the glass over it. So the frozen frame is a snap's between 30 yd and the cover's reach.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -58,16 +62,21 @@ impl PresentHold {
     }
 }
 
-/// `PostUpdate`: hold the frame while a reloading snap's settle hold is up.
+/// `PostUpdate`: hold the frame while a reloading snap's settle hold is up and no cover is: the
+/// loading screen's drive runs in `Update`, so a cover raised by this frame's snap is seen here.
 pub(crate) fn decide_present_hold(
     player: Option<Res<crate::player::Player>>,
+    screen: Option<Res<super::LoadingScreen>>,
     mut hold: ResMut<PresentHold>,
     mut frames: Local<u32>,
 ) {
     // Deviation: the page holds no frame, because a WebGPU canvas texture lives only until the end
     // of the task that acquired it and the canvas shows whatever it holds then, so a withheld present is
     // a blank canvas there, not the last frame; the destination streams in on screen instead.
-    let held = cfg!(not(target_arch = "wasm32")) && player.is_some_and(|p| p.holds_the_frame());
+    let covered = screen.is_some_and(|s| s.covering());
+    let held = cfg!(not(target_arch = "wasm32"))
+        && !covered
+        && player.is_some_and(|p| p.holds_the_frame());
     if held {
         *frames += 1;
     }

@@ -1,7 +1,8 @@
 //! The loading screen: the full-screen splash and progress bar over world entry and cross-map
-//! teleports. The art resolves `Map.dbc` → `LoadingScreens.dbc` → BLP for every map kind; the bar
-//! is two layers, `Loading-BarBorder` and `Loading-BarFill` (Background, Glow and Glass are never
-//! drawn in 1.12). A transfer aboard a transport with a drawn route shows the world map and that
+//! teleports, and over a long same-map snap as a deviation (`SNAP_LOAD_MIN_YD`). The art resolves
+//! `Map.dbc` → `LoadingScreens.dbc` → BLP for every map kind; the bar is two layers,
+//! `Loading-BarBorder` and `Loading-BarFill` (Background, Glow and Glass are never drawn in 1.12).
+//! A transfer aboard a transport with a drawn route shows the world map and that
 //! route instead ([`ship`]).
 //!
 //! Event-raised, as in the reference: it rises at the character pick's `Connected` edge and at
@@ -922,10 +923,12 @@ fn drive_loading_screen(
         );
     }
 
-    // --- Deviation, on the page alone: a long same-map snap is covered until the destination is
-    // presentable. The reference's `MSG_MOVE_TELEPORT_ACK` handler (`0x603f90`) reaches none of
-    // the screen's raises; native holds the last frame instead (`hold::decide_present_hold`), which
-    // the page cannot, so there the cover keeps the destination from being seen streaming in. ---
+    // --- A long same-map snap. Deviation: a snap of `SNAP_LOAD_MIN_YD` or more is covered until
+    // the destination is presentable, because a long jump reads as a load here, not as a frozen
+    // picture (the maintainer's call), and the page cannot hold a frame at all. The reference's
+    // `MSG_MOVE_TELEPORT_ACK` handler (`0x603f90`) reaches none of the screen's raises: it reloads
+    // the destination in place behind its last frame, which native still does for a shorter snap
+    // past 30 yd (`hold::decide_present_hold`, which stands down under a cover). ---
     let body = player.as_ref().map(|p| p.pos);
     let relocated = match (teleported, screen.last_pos, body) {
         (true, Some(was), Some(now_pos)) => was.distance(now_pos) >= SNAP_LOAD_MIN_YD,
@@ -934,8 +937,7 @@ fn drive_loading_screen(
         _ => false,
     };
     screen.last_pos = body;
-    if cfg!(target_arch = "wasm32")
-        && relocated
+    if relocated
         && !screen.active
         && *state.get() == crate::client_state::ClientState::InWorld
         && !(progress.is_ready() && progress.presentable())
@@ -1446,10 +1448,10 @@ mod tests {
     const SOUTH_SEAS: [f32; 3] = [-11880.0, -4700.0, 2.0];
     const NORTHSHIRE: [f32; 3] = [-8949.95, -132.493, 83.5312];
 
-    /// GM Island to the South Seas, both on Kalimdor: the page covers the load; native holds the
-    /// frame instead and raises no screen (`player::teleport_hold_tests`).
+    /// GM Island to the South Seas, both on Kalimdor: the load is covered, on native as on the page
+    /// (`player::teleport_hold_tests` has the frame hold standing down under it).
     #[test]
-    fn a_same_map_teleport_across_the_continent_covers_its_load_on_the_page() {
+    fn a_same_map_teleport_across_the_continent_covers_its_load() {
         let mut app = in_world(GM_ISLAND);
         assert!(!covering(&app), "standing on resident ground");
 
@@ -1461,11 +1463,7 @@ mod tests {
             orientation: 0.0,
         });
         app.update();
-        assert_eq!(
-            covering(&app),
-            cfg!(target_arch = "wasm32"),
-            "the page's deviation covers a long same-map snap"
-        );
+        assert!(covering(&app), "the deviation covers a long same-map snap");
     }
 
     /// A charge-length snap (25 yd) onto ground still arriving is never covered.
