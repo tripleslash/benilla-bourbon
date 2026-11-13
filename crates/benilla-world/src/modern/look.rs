@@ -269,9 +269,13 @@ impl ZoneLook {
         vignette: 0.38,
         // The volume's banks lying faintly over all the ground, lit and shadowed in depth (approved in
         // the viewer at Lordaeron, `worldview_pose=642.2,1351.1,88.0,2204.3,-9.3`, 14:00), thinned by
-        // day from 1.3 (asked); the night keeps the whole bank.
-        ground_fog: 1.0,
-        night_banks: 1.3,
+        // day from 1.3 (asked); the night keeps the whole bank. Then 60% of that, day and night, and
+        // as Darkshore's lie, closer to the ground and smoother (asked: 1.0 and 1.3 by day and night
+        // at the default height and billow).
+        ground_fog: 0.6,
+        night_banks: 0.78,
+        bank_height: 0.45,
+        bank_billow: 0.4,
         noon_mix: 0.0,
         // The dark zones need the doubled moon to read at night (Duskwood, approved in the client).
         moon_key: 2.0,
@@ -283,10 +287,11 @@ impl ZoneLook {
     /// fork: **Tirisfal Glades**, the eerie look tinted greener (asked in the viewer): the sun,
     /// shafts, fog and sky lean further from red and blue toward green, through a thinner haze than
     /// the eerie look's, day and night (asked), halved with it from 0.0012 (asked: too hazy),
-    /// keeping the full 1.3 day banks the other dark zones thinned (asked).
+    /// keeping the whole night bank by day the other dark zones thinned (asked), at 60% of the 1.3
+    /// it was with the eerie look's lower, smoother banks (asked).
     pub const TIRISFAL: Self = Self {
         haze: 0.0006,
-        ground_fog: 1.3,
+        ground_fog: 0.78,
         glow: [0.58, 1.0, 0.62],
         fog_tint: [0.7, 1.05, 0.7],
         sky_tint: [0.52, 0.72, 0.52],
