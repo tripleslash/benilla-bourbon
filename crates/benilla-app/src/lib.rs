@@ -667,25 +667,32 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
             "executor: PostUpdate -> single-threaded (the default; WOW_MT_POSTUPDATE=1 for MT)"
         );
     }
-    // PreUpdate as well: its systems sum to ~0.01 ms a frame, under ~0.2 ms of multi-threaded
-    // dispatch. `WOW_MT_PREUPDATE=1` restores it.
-    if std::env::var_os("WOW_MT_PREUPDATE").is_none() {
-        app.edit_schedule(PreUpdate, |s| {
-            s.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
-        });
-    }
-    // The fixed-timestep schedules hold a handful of systems around avian's `PhysicsSchedule`,
-    // which avian already runs single-threaded; their dispatch cost ~0.1 ms a frame.
-    // `WOW_MT_FIXED=1` restores it.
-    if std::env::var_os("WOW_MT_FIXED").is_none() {
-        let single = |s: &mut Schedule| {
-            s.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+    // The frame's other schedules too. Under the multi-threaded executor the main thread parks
+    // for each of their systems while a worker wakes to run it. On a laptop's balanced power
+    // profile a frame measured 12.9 ms that way and 11.2 ms single-threaded; at full clock the
+    // two are level. `WOW_MT_REST=1` restores them.
+    if std::env::var_os("WOW_MT_REST").is_none() {
+        use bevy::app::{
+            FixedFirst, FixedLast, FixedPostUpdate, FixedPreUpdate, FixedUpdate, RunFixedMainLoop,
         };
-        app.edit_schedule(FixedFirst, single)
-            .edit_schedule(FixedPreUpdate, single)
-            .edit_schedule(FixedUpdate, single)
-            .edit_schedule(FixedPostUpdate, single)
-            .edit_schedule(FixedLast, single);
+        use bevy::ecs::schedule::{ScheduleLabel, SingleThreadedExecutor};
+        for label in [
+            First.intern(),
+            PreUpdate.intern(),
+            StateTransition.intern(),
+            RunFixedMainLoop.intern(),
+            FixedFirst.intern(),
+            FixedPreUpdate.intern(),
+            FixedUpdate.intern(),
+            FixedPostUpdate.intern(),
+            FixedLast.intern(),
+            SpawnScene.intern(),
+            Last.intern(),
+        ] {
+            app.edit_schedule(label, |s| {
+                s.set_executor(SingleThreadedExecutor::new());
+            });
+        }
     }
     // The build banner ships in every build: which build produced a log is the first thing a report
     // from another machine must establish.
