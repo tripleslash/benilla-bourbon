@@ -22,6 +22,7 @@ pub mod macro_verbs;
 pub mod maps;
 mod merchant;
 mod message_history;
+pub mod mirror_timers;
 pub mod player_stats;
 pub mod professions;
 pub mod quests;
@@ -389,6 +390,7 @@ pub fn install(lua: &Lua) -> mlua::Result<()> {
     units::install(lua)?;
     player_stats::install(lua)?;
     totems::install(lua)?;
+    mirror_timers::install(lua)?;
     super::nameplate::pfui::install(lua)?;
     attributes::install(lua)?;
     auras::install(lua)?;

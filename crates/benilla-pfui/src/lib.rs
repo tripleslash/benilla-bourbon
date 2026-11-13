@@ -121,6 +121,8 @@ pub fn install(script: &UiScript) -> mlua::Result<()> {
         "CancelPlayerAuraSpellId",
         "BenillaNampowerCompatibility",
         "GetTotemInfo",
+        "GetMirrorTimerInfo",
+        "GetMirrorTimerProgress",
         "GetShapeshiftFormID",
         "GetSpellInfo",
         "GetSpellBonusDamage",

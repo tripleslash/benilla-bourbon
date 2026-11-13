@@ -106,6 +106,32 @@ pub(crate) fn fire_edge(script: &mut UiScript, edge: MirrorTimerEdge, spells: Op
         ),
         MirrorTimerEdge::Stop { .. } => ("MIRROR_TIMER_STOP", vec![name]),
     };
+    // fork: pfUI — ClassicAPI's mirror-timer slots, written before the event so its handlers
+    // read the new state.
+    #[cfg(feature = "pfui")]
+    {
+        use benilla_ui::script::pfui_host::mirror_timers;
+        match edge {
+            MirrorTimerEdge::Start(start) => {
+                let label = match args.get(5) {
+                    Some(ScriptValue::Str(label)) => label.as_str(),
+                    _ => "",
+                };
+                mirror_timers::start(
+                    script.lua(),
+                    start.kind,
+                    i64::from(start.remaining_ms),
+                    i64::from(start.duration_ms),
+                    i64::from(start.scale),
+                    start.paused,
+                    start.spell_id,
+                    label,
+                );
+            }
+            MirrorTimerEdge::Pause { .. } => {}
+            MirrorTimerEdge::Stop { kind } => mirror_timers::stop(script.lua(), kind),
+        }
+    }
     // One log line per edge: the bars live inside the VM, so this is their only outside trace.
     debug!("net: mirror timer {event} {edge:?}");
     script.fire_event(event, args);

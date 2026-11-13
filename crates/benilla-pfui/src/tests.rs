@@ -4138,3 +4138,38 @@ fn config_copies_and_icon_pools_preserve_ownership_across_reuse() {
         )
         .unwrap();
 }
+
+/// ClassicAPI's mirror-timer slots (`src/unit/MirrorTimer.cpp`): a start stamps its slot and the
+/// value runs at `scale` ms per ms, a paused start holds, a stop empties the slot.
+#[test]
+fn mirror_timer_progress_runs_from_the_start_and_clears_on_stop() {
+    use benilla_ui::script::pfui_host::mirror_timers;
+    let mut script = extended();
+    script.set_now(100.0);
+    script
+        .run("assert(GetMirrorTimerProgress('BREATH')==0 and GetMirrorTimerProgress('NOPE')==nil); local n=GetMirrorTimerInfo(2); assert(n=='UNKNOWN'); assert(select('#',GetMirrorTimerInfo(4))==0)")
+        .unwrap();
+    mirror_timers::start(script.lua(), 1, 60_000, 60_000, -1, false, 0, "Breath");
+    script.set_now(102.5);
+    script
+        .run("assert(GetMirrorTimerProgress('breath')==57500); local n,v,m,s,p,l,id=GetMirrorTimerInfo(2); assert(n=='BREATH' and v==60000 and m==60000 and s==-1 and p==0 and l=='Breath' and id==0)")
+        .unwrap();
+    mirror_timers::start(
+        script.lua(),
+        2,
+        30_000,
+        360_000,
+        -1,
+        true,
+        5384,
+        "Feign Death",
+    );
+    script.set_now(110.0);
+    script
+        .run("assert(GetMirrorTimerProgress('FEIGNDEATH')==30000)")
+        .unwrap();
+    mirror_timers::stop(script.lua(), 1);
+    script
+        .run("assert(GetMirrorTimerProgress('BREATH')==0 and GetMirrorTimerInfo(2)=='UNKNOWN')")
+        .unwrap();
+}
