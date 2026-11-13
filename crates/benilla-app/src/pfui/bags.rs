@@ -46,7 +46,9 @@ fn drain(
         // The client's locks are per item now, by guid; an empty slot holds none.
         let locks = script.item_locks();
         let read = |bag, slot| {
-            if !items::bag_position_available(script.lua(), bag, slot) {
+            if !items::bag_position_available(script.lua(), bag, slot)
+                || crate::ui_items::bag_num_slots(&store.0, bag, &objects).is_none_or(|n| slot > n)
+            {
                 return None;
             }
             let guid = crate::ui_items::slot_guid(

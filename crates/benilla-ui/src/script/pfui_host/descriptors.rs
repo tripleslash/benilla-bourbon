@@ -69,7 +69,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 .expect("model");
             let durability = (1..=19)
                 .contains(&slot)
-                .then(|| model.inventory_slots[slot as usize].as_ref())
+                .then(|| crate::script::worn::worn_slot(lua, &model, slot as usize))
                 .flatten()
                 .and_then(|slot| slot.durability)
                 .filter(|(_, max)| *max > 0);

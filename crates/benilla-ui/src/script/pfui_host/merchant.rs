@@ -17,7 +17,7 @@ fn junk(lua: &Lua) -> Vec<(i64, u32, u64)> {
             if !(0..=4).contains(&bag) {
                 return None;
             }
-            let state = model.containers.get(&bag)?.slots.get(&slot)?;
+            let state = crate::script::held::bag_slot(lua, &model, bag, slot)?;
             let template = model.item_templates.get(&item.item_id)?;
             (item.guid != 0
                 && !crate::script::cursor::item_locked(&model, state.guid)

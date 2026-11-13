@@ -122,6 +122,25 @@ pub(crate) fn wire_pos(bag: i64, slot1: u32) -> Option<(u8, u8)> {
     }
 }
 
+/// The slot count of a Lua-space bag: the backpack's and the bank's fixed lists, an equipped bag's
+/// container field; none for an empty bag slot or another id.
+#[cfg(feature = "pfui")]
+pub(crate) fn bag_num_slots(
+    store: &ObjectFields,
+    bag: i64,
+    objects: &(impl ItemObjects + ?Sized),
+) -> Option<u32> {
+    let bag_guid = match bag {
+        0 => return Some(u32::from(PACK_SLOTS)),
+        BANK_CONTAINER => return Some(u32::from(BANK_SLOTS)),
+        1..=4 => store.player_inv_slot(BAG_SLOT_FIRST + bag as u8 - 1),
+        5..=10 => store.player_bank_bag_slot((bag - BANK_BAG_ID_FIRST) as u8),
+        _ => None,
+    }
+    .filter(|g| *g != 0)?;
+    objects.object(bag_guid)?.container_num_slots()
+}
+
 /// The item guid in a Lua-space bag slot; for [`EQUIPMENT_BAG`], `slot0` is the wire slot, as in
 /// [`wire_pos`].
 pub(crate) fn slot_guid(

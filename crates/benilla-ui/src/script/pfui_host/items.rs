@@ -42,17 +42,11 @@ pub fn set_bag_busy(lua: &Lua, busy: bool) {
     events::set_bag_busy(lua, busy);
 }
 
+/// Whether a queued bag move may touch `(bag, slot)` now: a bank position only while the bank is
+/// open. The host, which holds the bags, checks the slot against the bag's size.
 pub fn bag_position_available(lua: &Lua, bag: i64, slot: u32) -> bool {
-    let model = lua
-        .app_data_ref::<crate::script::ModelCell>()
-        .expect("model");
-    if (bag == -1 || (5..=10).contains(&bag)) && model.bank.is_none() {
-        return false;
-    }
-    model
-        .containers
-        .get(&bag)
-        .is_some_and(|bag| slot > 0 && slot <= bag.num_slots)
+    let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+    slot > 0 && !((bag == -1 || (5..=10).contains(&bag)) && model.bank.is_none())
 }
 
 pub fn bag_failure(lua: &Lua, guid: u64) {
@@ -165,17 +159,13 @@ fn location_id(lua: &Lua, value: Value) -> mlua::Result<Option<u32>> {
             .app_data_ref::<crate::script::ModelCell>()
             .expect("model");
         if let (Some(bag), Some(slot)) = (bag, slot) {
-            return Ok(model
-                .containers
-                .get(&bag)
-                .and_then(|bag| bag.slots.get(&slot))
+            return Ok(crate::script::held::bag_slot(lua, &model, bag, slot)
                 .map(|s| s.item_id)
                 .filter(|id| *id != 0));
         }
         let equip: Option<usize> = location.get("equipmentSlotIndex")?;
         return Ok(equip
-            .and_then(|i| model.inventory_slots.get(i))
-            .and_then(|v| v.as_ref())
+            .and_then(|i| crate::script::worn::worn_slot(lua, &model, i))
             .map(|v| v.item_id));
     }
     id(lua, value)
@@ -342,13 +332,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "IsEquippedItem",
         lua.create_function(|lua, input: Value| {
             let id = id(lua, input)?;
+            let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
             Ok(id.is_some_and(|id| {
-                lua.app_data_ref::<crate::script::ModelCell>()
-                    .expect("model")
-                    .inventory_slots[1..20]
-                    .iter()
-                    .flatten()
-                    .any(|slot| slot.item_id == id)
+                (1..20).any(|slot| {
+                    crate::script::worn::worn_slot(lua, &model, slot)
+                        .is_some_and(|s| s.item_id == id)
+                })
             }))
         })?,
     )?;
@@ -457,12 +446,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     container.set(
         "GetContainerItemID",
         lua.create_function(|lua, (bag, slot): (i64, u32)| {
-            Ok(lua
-                .app_data_ref::<crate::script::ModelCell>()
-                .expect("model")
-                .containers
-                .get(&bag)
-                .and_then(|bag| bag.slots.get(&slot))
+            let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+            Ok(crate::script::held::bag_slot(lua, &model, bag, slot)
                 .map(|slot| slot.item_id)
                 .filter(|id| *id > 0))
         })?,
@@ -470,13 +455,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     container.set(
         "IsContainerItemOpenable",
         lua.create_function(|lua, (bag, slot): (i64, u32)| {
-            let instance = lua
-                .app_data_ref::<crate::script::ModelCell>()
-                .expect("model")
-                .containers
-                .get(&bag)
-                .and_then(|b| b.slots.get(&slot))
-                .cloned();
+            let instance = {
+                let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+                crate::script::held::bag_slot(lua, &model, bag, slot)
+            };
             let Some(instance) = instance else {
                 return Ok((None, None));
             };
@@ -532,24 +514,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     {
                         return Ok(false);
                     }
-                    let Some(src) = model
-                        .containers
-                        .get(&src_bag)
-                        .and_then(|b| b.slots.get(&src_slot))
+                    let Some(src) = crate::script::held::bag_slot(lua, &model, src_bag, src_slot)
                     else {
                         return Ok(false);
                     };
                     if crate::script::cursor::item_locked(&model, src.guid) || src.count == 0 {
                         return Ok(false);
                     }
-                    let Some(dst) = model.containers.get(&dst_bag) else {
+                    let Some(dst) = crate::script::held::bag(lua, &model, dst_bag) else {
                         return Ok(false);
                     };
                     if dst_slot == 0
                         || dst_slot > dst.num_slots
-                        || dst
-                            .slots
-                            .get(&dst_slot)
+                        || crate::script::held::bag_slot(lua, &model, dst_bag, dst_slot)
                             .is_some_and(|s| crate::script::cursor::item_locked(&model, s.guid))
                     {
                         return Ok(false);

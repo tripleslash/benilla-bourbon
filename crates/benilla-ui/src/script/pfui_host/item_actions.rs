@@ -80,7 +80,7 @@ pub(in crate::script::pfui_host) fn instance(lua: &Lua, input: Value) -> mlua::R
             )
         })
         .and_then(|(&(bag, slot), item)| {
-            (!super::equipment::locked(&model, bag, slot)).then_some(item.guid)
+            (!super::equipment::locked(lua, &model, bag, slot)).then_some(item.guid)
         }))
 }
 

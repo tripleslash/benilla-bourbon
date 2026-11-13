@@ -4,18 +4,13 @@ use super::{Extras, Model};
 use crate::script::{ContainerMove, ScriptValue, EQUIPMENT_BAG};
 use mlua::{Lua, MultiValue, Value};
 
-pub(super) fn locked(model: &Model, bag: i64, slot: u32) -> bool {
+pub(super) fn locked(lua: &Lua, model: &Model, bag: i64, slot: u32) -> bool {
     if bag == EQUIPMENT_BAG {
-        model
-            .inventory_slots
-            .get(slot as usize)
-            .and_then(|s| s.as_ref())
+        crate::script::worn::worn_slot(lua, model, slot as usize)
+            .as_ref()
             .is_some_and(|s| crate::script::cursor::item_locked(model, s.guid) || s.flags & 4 != 0)
     } else {
-        model
-            .containers
-            .get(&bag)
-            .and_then(|b| b.slots.get(&slot))
+        crate::script::held::bag_slot(lua, model, bag, slot)
             .is_some_and(|s| crate::script::cursor::item_locked(model, s.guid) || s.flags & 4 != 0)
     }
 }
@@ -69,7 +64,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 row.set("bag", bag)?;
                 row.set("slot", slot)?;
                 row.set("location", code)?;
-                row.set("locked", locked(&model, bag, slot))?;
+                row.set("locked", locked(lua, &model, bag, slot))?;
                 snapshot.push(row)?;
             }
             Ok(snapshot)
@@ -104,10 +99,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(false);
             }
             {
-                let model = lua
-                    .app_data_ref::<crate::script::ModelCell>()
-                    .expect("model");
-                if locked(&model, bag, slot) || locked(&model, EQUIPMENT_BAG, target) {
+                let model = lua.app_data_ref::<crate::script::ModelCell>().expect("model");
+                if locked(lua, &model, bag, slot) || locked(lua, &model, EQUIPMENT_BAG, target) {
                     return Ok(false);
                 }
             }

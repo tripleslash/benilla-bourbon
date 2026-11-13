@@ -130,12 +130,8 @@ fn subject(lua: &Lua, verb: &str, args: &MultiValue) -> mlua::Result<Option<Item
                 .get(1)
                 .cloned()
                 .and_then(|v| lua.coerce_integer(v).ok().flatten());
-            bag.and_then(|bag| model.containers.get(&bag))
-                .and_then(|bag| {
-                    number(args, 2)
-                        .and_then(|i| u32::try_from(i).ok())
-                        .and_then(|i| bag.slots.get(&i))
-                })
+            bag.zip(number(args, 2).and_then(|i| u32::try_from(i).ok()))
+                .and_then(|(bag, slot)| crate::script::held::bag_slot(lua, &model, bag, slot))
                 .map(|s| s.item_id)
         }
         "SetInventoryItem" => text(args, 1)

@@ -47,8 +47,7 @@ pub(super) fn dispatch(lua: &Lua) {
         }
         if owner != 0 {
             let worn: Worn = std::array::from_fn(|slot| {
-                model.inventory_slots[slot + 1]
-                    .as_ref()
+                crate::script::worn::worn_slot(lua, &model, slot + 1)
                     .map(|item| (item.item_id, item.durability))
             });
             if state.worn.replace(worn).is_some_and(|was| was != worn) {
