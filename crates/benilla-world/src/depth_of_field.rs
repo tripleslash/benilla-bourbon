@@ -49,13 +49,13 @@ impl Default for DepthOfField {
 }
 
 /// Where the blur begins, in yards from the camera: past a zoomed-out player.
-const START_YD: f32 = 30.0;
+const START_YD: f32 = 22.0;
 /// Where the blur reaches [`STRENGTH`], in yards, and holds it beyond: the mid distance takes
 /// the ramp, the horizon no more than the cap.
 const END_YD: f32 = 170.0;
 /// The share of the blur in the farthest pixel: well short of whole, so distance softens
 /// rather than smears.
-const STRENGTH: f32 = 0.3;
+const STRENGTH: f32 = 0.39;
 /// The composite's desaturation of the blur (`DepthOfField2`'s third term), a touch of haze.
 const DESATURATION: f32 = 0.1;
 /// The render height the reference's texel offsets are taken at; a taller frame spreads the
@@ -485,7 +485,7 @@ mod tests {
     /// and more, and caps well short of a whole blur.
     #[test]
     fn the_shipped_focus_is_subtle() {
-        const { assert!(START_YD >= 30.0) };
+        const { assert!(START_YD >= 20.0) };
         const { assert!(END_YD - START_YD >= 100.0) };
         const { assert!(STRENGTH > 0.0 && STRENGTH <= 0.5) };
         const { assert!(DESATURATION < 0.25) };
