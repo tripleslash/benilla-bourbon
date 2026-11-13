@@ -174,6 +174,16 @@ impl super::live::LiveQuery for UnitReachQuery {
     type Answer = Option<UnitReach>;
 }
 
+/// Where the unit `guid` stands at the call, in WoW world coordinates (`[x north, y west, z up]`,
+/// yards), as the lent host holds it; `None` for no unit held. 1.12 has no Lua verb that reads it:
+/// the pfUI layer's `UnitPosition` asks it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnitPositionQuery(pub u64);
+
+impl super::live::LiveQuery for UnitPositionQuery {
+    type Answer = Option<[f32; 3]>;
+}
+
 /// `guid`'s reach at the call: the lent host's, else the seat ([`super::UiScript::set_unit_reach`]).
 pub(super) fn reach_of(lua: &Lua, model: &Model, guid: u64) -> Option<UnitReach> {
     super::live::ask(lua, &UnitReachQuery(guid))

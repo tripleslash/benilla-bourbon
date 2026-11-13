@@ -28,3 +28,6 @@ for _, state in ipairs({"", "-disabled", "-hover-1", "-hover-2", "-open", "-pres
   register("common-dropdown-c-button" .. state, label, 115, 64, 0.1953125, 0.8046875, 0, 1)
 end
 register("common-dropdown-c-bg", "Interface\\Tooltips\\UI-Tooltip-Background", 64, 64, 0, 1, 0, 1, true, true)
+
+-- The player arrow pfUI's radar names: 1.12's minimap arrow art, whole.
+register("MinimapArrow", "Interface\\Minimap\\MinimapArrow", 32, 32, 0, 1, 0, 1)

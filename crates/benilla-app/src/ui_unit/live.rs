@@ -17,8 +17,8 @@ use benilla_ui::script::live::LiveAsk;
 use benilla_ui::script::{
     ControlBypassQuery, DefaultLanguageQuery, FarSightOnQuery, HeldCandidatesQuery,
     KnownLanguagesQuery, LiveCandidate, LiveCandidates, PlayerFactionMasksQuery, RelationQuery,
-    UnitHeld, UnitHeldQuery, UnitReach, UnitReachQuery, UnitRelations, UnitStateAnswer,
-    UnitStateQuery,
+    UnitHeld, UnitHeldQuery, UnitPositionQuery, UnitReach, UnitReachQuery, UnitRelations,
+    UnitStateAnswer, UnitStateQuery,
 };
 
 use benilla_ui::script::UnitState;
@@ -128,6 +128,12 @@ impl UnitFeedLive<'_, '_> {
             at,
             me_at,
         ))
+    }
+
+    /// Where `guid` stands as of here, in WoW world coordinates.
+    fn world_position(&self, guid: u64) -> Option<[f32; 3]> {
+        let (entity, _) = self.held(guid)?;
+        Some(benilla_assets::coords::bevy_to_wow(self.position(entity?)?))
     }
 
     /// `entity`'s position in the world as of here.
@@ -439,6 +445,7 @@ impl crate::script_calls::live::LiveFamily for UnitFeedLive<'_, '_> {
             || ask.answer(|_: &HeldCandidatesQuery| self.candidates())
             || ask.answer(|q: &RelationQuery| Some(q.answer(&*self)))
             || ask.answer(|q: &UnitReachQuery| Some(self.reach(q.0)))
+            || ask.answer(|q: &UnitPositionQuery| Some(self.world_position(q.0)))
             || ask.answer(|q: &ControlBypassQuery| Some(self.exempts(q.0)))
             || ask.answer(|_: &FarSightOnQuery| self.far_sight.as_deref().map(|f| f.on()))
             || ask.answer(|_: &KnownLanguagesQuery| self.known_languages())

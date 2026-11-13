@@ -398,6 +398,32 @@ fn a_relative_key_anchors_to_a_sibling_and_an_anchor_gives_its_own_offset() {
         .unwrap();
 }
 
+/// pfUI's radar reads `ClassicAPI.UnitPosition`, `GetPlayerFacing` and `UnitInLineOfSight` once a
+/// refresh runs (`modules/radar.lua`): with no host the position is nothing, the line of sight
+/// unknown, and the facing the minimap arrow's, wrapped into [0, 2pi).
+#[test]
+fn the_radars_verbs_answer_without_raising() {
+    let mut script = extended();
+    script
+        .run(
+            r##"
+        assert(ClassicAPI.UnitPosition == UnitPosition and ClassicAPI.GetPlayerFacing == GetPlayerFacing)
+        assert(select("#", UnitPosition("player")) == 0 and UnitPosition("mark1") == nil)
+        assert(UnitInLineOfSight("party1") == nil)
+        assert(GetPlayerFacing() == nil)
+        assert(C_Texture.GetAtlasInfo("MinimapArrow").filename == "Interface\\Minimap\\MinimapArrow")
+        CreateFrame("Minimap", "TestMinimap")
+    "##,
+        )
+        .unwrap();
+    script.set_minimap_player_facing(-1.5);
+    let facing = script.eval::<f32>("return GetPlayerFacing()").unwrap();
+    assert!(
+        (facing - (std::f32::consts::TAU - 1.5)).abs() < 1e-5,
+        "{facing}"
+    );
+}
+
 #[test]
 fn an_atlas_points_a_texture_at_its_rectangle() {
     let script = extended();

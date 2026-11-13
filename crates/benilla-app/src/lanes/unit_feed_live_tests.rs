@@ -250,6 +250,34 @@ fn the_range_verbs_measure_the_unit_at_the_call() {
     );
 }
 
+/// The position question reads the unit where it stands at the call, in WoW world coordinates:
+/// Bevy's +X is WoW's -Y (east), so a wolf 20 yards along it stands at y = -20.
+#[test]
+fn the_position_query_reads_the_unit_at_the_call_in_world_coordinates() {
+    let mut c = client();
+    c.place(WOLF, 20.0);
+    let ask = |c: &mut Client, guid: u64| {
+        crate::script_calls::with_hosted_vm(c.app.world_mut(), |s| {
+            benilla_ui::script::live::ask(
+                s.expect("a VM").lua(),
+                &benilla_ui::script::UnitPositionQuery(guid),
+            )
+        })
+    };
+    assert_eq!(ask(&mut c, WOLF), Some(Some([0.0, -20.0, 0.0])));
+    c.place(WOLF, -5.0);
+    assert_eq!(
+        ask(&mut c, WOLF),
+        Some(Some([0.0, 5.0, 0.0])),
+        "no push between"
+    );
+    assert_eq!(
+        ask(&mut c, 0xF130_0000_0099_0001),
+        Some(None),
+        "no unit held"
+    );
+}
+
 /// The language walk and the default language read the player at the call: a learn's known
 /// spells add Common, and a race byte the handler wrote names its own tongue.
 #[test]

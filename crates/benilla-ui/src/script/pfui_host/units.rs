@@ -6,8 +6,8 @@ use std::collections::{BTreeSet, HashMap};
 
 #[path = "focus.rs"]
 mod focus;
-pub use focus::FocusMemory;
 pub(crate) use focus::aliased_npc;
+pub use focus::FocusMemory;
 
 #[derive(Default)]
 struct Metadata {
@@ -507,6 +507,49 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 .filter(|reach| reach.dist_sq.is_finite())
                 .map_or((false, false), |reach| (reach.dist_sq <= 40.0 * 40.0, true)))
         })?,
+    )?;
+    // ClassicAPI's `UnitPosition(unit)`: where the unit stands in world yards, ordered as the
+    // modern client returns them, `y` (west), `x` (north), `z` (up); nil for a token with no unit
+    // or a unit the client does not hold.
+    lua.globals().set(
+        "UnitPosition",
+        lua.create_function(|lua, unit: String| {
+            let Some(guid) = guid(lua, &unit)? else {
+                return Ok(mlua::Variadic::new());
+            };
+            Ok(
+                crate::script::live::ask(lua, &crate::script::UnitPositionQuery(guid))
+                    .flatten()
+                    .map_or_else(mlua::Variadic::new, |[x, y, z]| {
+                        mlua::Variadic::from(vec![y, x, z])
+                    }),
+            )
+        })?,
+    )?;
+    // ClassicAPI's `GetPlayerFacing()`: the facing of the object the camera follows in radians,
+    // 0 north and counterclockwise, in [0, 2pi); the value the minimap's player arrow turns by
+    // (`CMinimap::SetPlayerFacing`, `0x4eb8e0`), nil before the minimap has one.
+    lua.globals().set(
+        "GetPlayerFacing",
+        lua.create_function(|lua, ()| {
+            let model = lua
+                .app_data_ref::<crate::script::ModelCell>()
+                .expect("model");
+            Ok(crate::script::minimap::player_arrows(&model)
+                .into_iter()
+                .find_map(|h| match model.arena.frame(h).map(|f| &f.kind_state) {
+                    Some(crate::widget::KindState::Model(state)) => Some(state.facing),
+                    _ => None,
+                })
+                .map(|facing| facing.rem_euclid(std::f32::consts::TAU)))
+        })?,
+    )?;
+    // ClassicAPI's `UnitInLineOfSight(unit)`: true, false, or nil when the client cannot tell.
+    // benilla traces no line of sight for the interface, so it always answers nil, which pfUI's
+    // radar reads as not blocked.
+    lua.globals().set(
+        "UnitInLineOfSight",
+        lua.create_function(|_, _unit: Value| Ok(Value::Nil))?,
     )?;
     // The inverse of GetSpellName(slot, bookType); the player's book answers before the pet's.
     lua.globals().set(
