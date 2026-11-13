@@ -622,7 +622,7 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     #[cfg(not(target_arch = "wasm32"))]
     desktop::prepare();
     // fork: native — the GPU pipeline cache's file, named before the render plugin finishes.
-    pipeline_cache_file::install();
+    pipeline_cache_file::install(&build);
 
     // Fonts, art and the stock interface all come from the install, so without one the client
     // ends here, before any window or plugin exists (`no_install`).
