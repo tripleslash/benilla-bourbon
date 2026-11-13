@@ -212,7 +212,10 @@ fn a_long_teleport_is_covered_and_holds_no_frame() {
     stream(&mut app, SOUTH_SEAS, false);
     for frame in 0..30 {
         app.update();
-        assert!(covering(&app), "frame {frame} after the snap is not covered");
+        assert!(
+            covering(&app),
+            "frame {frame} after the snap is not covered"
+        );
         assert!(!held(&app), "frame {frame} withholds the cover's present");
     }
 }

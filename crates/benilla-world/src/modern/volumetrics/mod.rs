@@ -1245,11 +1245,17 @@ mod tests {
             assert_eq!(c.x, FINE_YD, "{quality:?}");
             assert_eq!(depth_of_slice(c, 0.0), 0.0);
             let end = depth_of_slice(c, 1.0);
-            assert!((end - tier.range).abs() < 0.05, "{quality:?}: ends at {end}");
+            assert!(
+                (end - tier.range).abs() < 0.05,
+                "{quality:?}: ends at {end}"
+            );
             let eps = 1e-3;
             let below = (depth_of_slice(c, c.y) - depth_of_slice(c, c.y - eps)) / eps;
             let above = (depth_of_slice(c, c.y + eps) - depth_of_slice(c, c.y)) / eps;
-            assert!((above / below - 1.0).abs() < 0.01, "{quality:?}: {below} / {above}");
+            assert!(
+                (above / below - 1.0).abs() < 0.01,
+                "{quality:?}: {below} / {above}"
+            );
             for alloc in platforms {
                 let n = tier.grid.min(alloc).z;
                 let mut last = 0.0;
@@ -1257,7 +1263,10 @@ mod tests {
                     let s = k as f32 / n as f32;
                     let d = depth_of_slice(c, s);
                     assert!(d > last, "{quality:?} slice {k}");
-                    assert!((slice_of_depth(c, d) - s).abs() < 1e-4, "{quality:?} slice {k}");
+                    assert!(
+                        (slice_of_depth(c, d) - s).abs() < 1e-4,
+                        "{quality:?} slice {k}"
+                    );
                     let quadratic = 2.0 * (tier.range * d).sqrt() / n as f32;
                     if (10.0..=75.0).contains(&d) {
                         assert!(
