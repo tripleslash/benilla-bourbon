@@ -1195,19 +1195,20 @@ fn lively_fresnel(mu_px: f32, mu_flat: f32, sigma: f32, alpha: f32, f0: f32, cei
     return clamp(f_px * min(1.0, ceiling / max(f_mean, 1e-4)), f0, 0.95);
 }
 
-/// fork: **the ripples' share of the reflectance where the view is steep.** Water's curve
+/// fork: **the wake ripples' share of the reflectance where the view is steep.** Water's curve
 /// ([`water_fresnel`]) sits flat at its floor above ~40° of pitch, so there the lively Fresnel no
-/// longer moves with the wave normal and the ripples vanish from a surface looked down on. This adds
-/// back the slope of the stylised climb the tier drew before (`f0` to `cap` along `(1 − cos)²`), as
-/// the pixel's departure from the flat water's value: zero on flat water and, to first order, zero-mean
-/// over the waves, so the water's mean look is the lively Fresnel's. It comes in from `STEEP_RIPPLE_FROM`
-/// (~20° of pitch, where the lively curve's own slope already shows the waves) to full at
-/// `STEEP_RIPPLE_FULL` (~45°), and grazing water is left as it was.
-fn steep_ripple_fresnel(mu_px: f32, mu_flat: f32, f0: f32, cap: f32) -> f32 {
+/// longer moves with the wave normal and the ripples a body pushes into the water (`ripple_slope`)
+/// vanish from a surface looked down on. This adds back the slope of the stylised climb the tier drew
+/// before (`f0` to `cap` along `(1 − cos)²`), as the pixel's departure from the same surface without
+/// the wake (`mu_unwoken`): zero wherever no body has stirred the water, so the swell, the wind and the
+/// authored bump keep the lively Fresnel's look. It comes in from `STEEP_RIPPLE_FROM` (~20° of pitch,
+/// where the lively curve's own slope already shows the waves) to full at `STEEP_RIPPLE_FULL` (~45°),
+/// and grazing water is left as it was.
+fn steep_ripple_fresnel(mu_px: f32, mu_unwoken: f32, mu_flat: f32, f0: f32, cap: f32) -> f32 {
     let k = smoothstep(STEEP_RIPPLE_FROM, STEEP_RIPPLE_FULL, mu_flat);
     let climb_px = pow(1.0 - clamp(mu_px, 0.0, 1.0), STEEP_RIPPLE_POWER);
-    let climb_flat = pow(1.0 - clamp(mu_flat, 0.0, 1.0), STEEP_RIPPLE_POWER);
-    return k * (cap - f0) * (climb_px - climb_flat);
+    let climb_unwoken = pow(1.0 - clamp(mu_unwoken, 0.0, 1.0), STEEP_RIPPLE_POWER);
+    return k * (cap - f0) * (climb_px - climb_unwoken);
 }
 
 /// fork: the flat view's `μ` (the sine of its pitch) where [`steep_ripple_fresnel`] starts, ~20°, and
@@ -1386,6 +1387,8 @@ struct ClearInputs {
     to_light: vec3<f32>,
     sun: f32,
     auth_alpha: f32,
+    /// The shading normal without the wake field (`ripple_slope`), for [`steep_ripple_fresnel`].
+    unwoken_n: vec3<f32>,
 }
 
 /// fork: modern lighting — **stylised clear water**, above the water, in linear radiance. Replaces
@@ -1467,7 +1470,7 @@ fn modern_water(
     let mu_px = dot(-v, n);
     let fres = clamp(
         lively_fresnel(mu_px, mu_v, sigma, tensor_alpha(x.rough), f0, ceiling)
-            + steep_ripple_fresnel(mu_px, mu_v, f0, ceiling),
+            + steep_ripple_fresnel(mu_px, dot(-v, x.unwoken_n), mu_v, f0, ceiling),
         f0,
         0.95,
     );
@@ -1602,6 +1605,9 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
         swell + ripple_slope(in.world_position.xz, swell),
         1.0,
     ));
+    // fork: the same normal with no wake in it — what `steep_ripple_fresnel` measures the wake against.
+    let unwoken = normalize(vec3<f32>(swell, 1.0));
+    let unwoken_n = normalize(vec3<f32>(unwoken.x * w.shade_params.x, 1.0, unwoken.y * w.shade_params.x));
     // The shading normal: the vertex normal's horizontal components pushed by the bump gradient,
     // `c23.y` deep. Y-up here where the reference is Z-up — see the header.
     let n = normalize(vec3<f32>(
@@ -2094,6 +2100,7 @@ fn fragment_classic(in: VsOut) -> vec4<f32> {
             x.lost = lost_s;
             x.caustic = caustic;
             x.crest = crest;
+            x.unwoken_n = unwoken_n;
             x.to_light = to_light;
             x.sun = water_sun;
             x.auth_alpha = swatch(in.depth_v).a;
