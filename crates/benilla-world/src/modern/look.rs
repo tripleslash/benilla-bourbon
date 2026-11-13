@@ -385,9 +385,9 @@ impl ZoneLook {
         // softer, fainter and closer to the ground than theirs (asked: 1.3, at the default height
         // and billow, stood as lumpy mounds over the shore), then at 60 % and lower still (asked:
         // 1.1 at 0.6 of the height drew too strong), then raised halfway back at the lower height, as
-        // Tirisfal's were (asked: 0.66 too faint, 1.1 too much).
-        ground_fog: 0.88,
-        night_banks: 0.88,
+        // Tirisfal's were (asked: 0.66 too faint, 1.1 too much), then 30 % fainter (asked: 0.88).
+        ground_fog: 0.62,
+        night_banks: 0.62,
         bank_height: 0.45,
         bank_billow: 0.4,
         // The night's banks whole: ground fog, not the haze's share.
