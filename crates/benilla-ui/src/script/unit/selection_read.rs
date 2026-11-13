@@ -27,7 +27,14 @@ impl LiveQuery for SelectionQuery {
 
 /// The globals through the lent host, `None` with no host free to ask or one that declines.
 pub(crate) fn live_selection(lua: &Lua) -> Option<SelectionGlobals> {
-    ask(lua, &SelectionQuery)
+    let live = ask(lua, &SelectionQuery);
+    // The pfUI layer serves its own tokens (`nameplateN`, `focus`, `markN`) to the stock getters
+    // as `npc`: while it does, `npc` is the unit it pinned, not the interaction global.
+    #[cfg(feature = "pfui")]
+    if let Some(npc) = crate::script::pfui_host::units::aliased_npc(lua) {
+        return live.map(|s| SelectionGlobals { npc, ..s });
+    }
+    live
 }
 
 /// The name `UnitName` reads off the object held under a guid that is no unit (`0x517146`): a game

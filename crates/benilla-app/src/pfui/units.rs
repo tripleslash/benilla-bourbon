@@ -169,3 +169,7 @@ fn feed(
     }
     *memo.get(&script) = true;
 }
+
+#[cfg(test)]
+#[path = "nameplate_unit_tests.rs"]
+mod nameplate_unit_tests;

@@ -7,6 +7,7 @@ use std::collections::{BTreeSet, HashMap};
 #[path = "focus.rs"]
 mod focus;
 pub use focus::FocusMemory;
+pub(crate) use focus::aliased_npc;
 
 #[derive(Default)]
 struct Metadata {

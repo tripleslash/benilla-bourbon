@@ -178,9 +178,34 @@ struct SavedAlias {
 struct Aliases<'a> {
     lua: &'a Lua,
     saved: Vec<SavedAlias>,
+    /// The guid this call pinned on `npc`, and the pin an enclosing call held before it.
+    npc: Option<u64>,
+    outer_npc: Option<AliasedNpc>,
 }
+
+/// The guid an alias holds on `npc` while the original getter runs. The live resolver reads `npc`
+/// from the host's interaction global, which the alias cannot swap, so it asks for this first
+/// ([`aliased_npc`]).
+#[derive(Clone, Copy)]
+struct AliasedNpc(u64);
+
+/// The guid an extension token is aliased to on `npc` for the call under way, if any.
+pub(crate) fn aliased_npc(lua: &Lua) -> Option<u64> {
+    lua.app_data_ref::<AliasedNpc>().map(|pin| pin.0)
+}
+
 impl Drop for Aliases<'_> {
     fn drop(&mut self) {
+        if self.npc.is_some() {
+            match self.outer_npc.take() {
+                Some(outer) => {
+                    self.lua.set_app_data(outer);
+                }
+                None => {
+                    self.lua.remove_app_data::<AliasedNpc>();
+                }
+            }
+        }
         let mut model = self
             .lua
             .app_data_mut::<crate::script::ModelCell>()
@@ -252,6 +277,7 @@ impl Aliases<'_> {
             model.units_by_lower.insert(token.into(), state);
         }
         let old_guid = if token == "npc" {
+            self.npc = Some(guid);
             std::mem::replace(&mut model.unit_guids.npc, guid)
         } else {
             std::mem::replace(&mut model.unit_guids.mouseover, guid)
@@ -281,7 +307,12 @@ pub(super) fn call(lua: &Lua, original: &Function, args: MultiValue) -> mlua::Re
     }) {
         return original.call::<MultiValue>(args);
     }
-    let mut aliases = Aliases { lua, saved: vec![] };
+    let mut aliases = Aliases {
+        lua,
+        saved: vec![],
+        npc: None,
+        outer_npc: None,
+    };
     let mut replaced = Vec::new();
     for arg in args {
         let custom = if let Value::String(token) = &arg {
@@ -294,6 +325,10 @@ pub(super) fn call(lua: &Lua, original: &Function, args: MultiValue) -> mlua::Re
         } else {
             arg
         });
+    }
+    if let Some(npc) = aliases.npc {
+        aliases.outer_npc = lua.app_data_ref::<AliasedNpc>().map(|pin| *pin);
+        lua.set_app_data(AliasedNpc(npc));
     }
     original.call::<MultiValue>(MultiValue::from_vec(replaced))
 }
