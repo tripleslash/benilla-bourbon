@@ -383,9 +383,10 @@ impl ZoneLook {
         // eerie looks' lie (approved in the viewer, `worldview_pose=6405.2,492.5,13.9,4310.7,-8.1`, 18:20),
         // softer, fainter and closer to the ground than theirs (asked: 1.3, at the default height
         // and billow, stood as lumpy mounds over the shore), then at 60 % and lower still (asked:
-        // 1.1 at 0.6 of the height drew too strong).
-        ground_fog: 0.66,
-        night_banks: 0.66,
+        // 1.1 at 0.6 of the height drew too strong), then that 60 % undone at the lower height, as
+        // Tirisfal's was (asked: 0.66 too faint).
+        ground_fog: 1.1,
+        night_banks: 1.1,
         bank_height: 0.45,
         bank_billow: 0.4,
         // The night's banks whole: ground fog, not the haze's share.
