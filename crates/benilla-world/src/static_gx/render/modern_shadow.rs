@@ -341,7 +341,6 @@ struct EntityDrawCmd {
     /// draw passes it as `first_instance`, and a run of consecutive slots of one mesh, pipeline
     /// and cutout draws as one instanced draw ([`draw_caster_runs`]).
     slot: u32,
-    skinned: bool,
     cutout: Option<BindGroup>,
     center: Vec3,
     radius: f32,
@@ -1176,7 +1175,6 @@ fn prepare_entity_shadows(
             pipeline,
             fixture_pipeline,
             slot: rows.len() as u32 - 1,
-            skinned,
             cutout: cutout_bind,
             center: part.center,
             radius: part.radius,

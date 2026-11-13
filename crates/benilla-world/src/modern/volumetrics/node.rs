@@ -872,7 +872,8 @@ mod tests {
 
     /// A camera at the origin looking down -Z, 90 degrees across, on a 1000-pixel square.
     fn camera() -> (Mat4, UVec2) {
-        let proj = Mat4::perspective_infinite_reverse_rh(std::f32::consts::FRAC_PI_2, 1.0, 0.1);
+        let proj =
+            bevy::math::proj::perspective_infinite_reverse(std::f32::consts::FRAC_PI_2, 1.0, 0.1);
         (proj, UVec2::new(1000, 1000))
     }
 

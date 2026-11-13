@@ -1347,13 +1347,17 @@ pub(crate) mod schedule_tests {
     /// (`check_tonemapping_none`, the 2D mesh and material change markers, `bevy_ui`'s
     /// `sync_font_size_to_em_size`, inline-image and editable-text layout, `bevy_ui_render`'s image
     /// and atlas markers), `First` by `gpu_readback::cleanup_readback_once`, `Last` by `bevy_time`'s
-    /// `silence_delayed_command_queues_on_exit` (behind a condition).
+    /// `silence_delayed_command_queues_on_exit` (behind a condition). Raised 2026-11-13 at
+    /// `9390dd10e` (Windows, `-p benilla-ui -p benilla-app`, no pfUI) to the counts it failed with:
+    /// `PostUpdate` 235, `PreUpdate` 103 (89 every frame), `First` 14 (11), the pfUI build's own,
+    /// so the `PostUpdate`/`PreUpdate`/`First` systems the tortoise_pfui_split merge counted as
+    /// pfUI's run without it too; `Update` held.
     #[cfg(not(feature = "pfui"))]
     const FRAME_FLOOR: &[(&str, usize, usize)] = &[
         ("Update", 543, 529),
-        ("PostUpdate", 231, 185),
-        ("PreUpdate", 100, 85),
-        ("First", 13, 10),
+        ("PostUpdate", 235, 185),
+        ("PreUpdate", 103, 89),
+        ("First", 14, 11),
         ("RunFixedMainLoop", 13, 13),
         ("Last", 60, 44),
     ];
