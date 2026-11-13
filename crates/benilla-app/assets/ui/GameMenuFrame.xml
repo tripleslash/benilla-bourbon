@@ -105,7 +105,9 @@
             <!-- Literal: 1.12 has no GAMEMENU_OPTIONS; its OPTIONS_MENU is "Options Menu". -->
             <Button name="GameMenuButtonOptions" inherits="GameMenuButtonTemplate" text="Options">
                 <Anchors>
-                    <Anchor point="TOPLEFT"><Offset><AbsDimension x="28" y="-32"/></Offset></Anchor>
+                    <!-- Centred, as 1.12's rungs are (GameMenuFrame.xml): at the era's 200 wide the
+                         same place as 28 in, and still centred when an addon resizes the frame. -->
+                    <Anchor point="TOP"><Offset><AbsDimension x="0" y="-32"/></Offset></Anchor>
                 </Anchors>
                 <Scripts>
                     <OnClick>
@@ -126,7 +128,7 @@
                  opens our window's Keybindings page. -->
             <Button name="GameMenuButtonKeybindings" inherits="GameMenuButtonTemplate" text="KEY_BINDINGS" hidden="true">
                 <Anchors>
-                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonOptions" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                    <Anchor point="TOP" relativeTo="GameMenuButtonOptions" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
                 </Anchors>
                 <Scripts>
                     <OnClick>
@@ -140,13 +142,13 @@
 
             <Button name="BenillaGameMenuButtonEditMode" inherits="GameMenuButtonTemplate">
                 <Anchors>
-                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonOptions" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-20"/></Offset></Anchor>
+                    <Anchor point="TOP" relativeTo="GameMenuButtonOptions" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-20"/></Offset></Anchor>
                 </Anchors>
                 <Scripts><OnLoad>BenillaGameMenuButton_Pending(this, "Edit Mode")</OnLoad></Scripts>
             </Button>
             <Button name="BenillaGameMenuButtonSupport" inherits="GameMenuButtonTemplate">
                 <Anchors>
-                    <Anchor point="TOPLEFT" relativeTo="BenillaGameMenuButtonEditMode" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                    <Anchor point="TOP" relativeTo="BenillaGameMenuButtonEditMode" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
                 </Anchors>
                 <!-- The era's Support opens the help window, which 1.12 opens from its "?" micro
                      button (`MainMenuBarMicroButtons.xml:217`); closing the menu first, as Macros. -->
@@ -161,7 +163,7 @@
             </Button>
             <Button name="GameMenuButtonMacros" inherits="GameMenuButtonTemplate" text="MACROS">
                 <Anchors>
-                    <Anchor point="TOPLEFT" relativeTo="BenillaGameMenuButtonSupport" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                    <Anchor point="TOP" relativeTo="BenillaGameMenuButtonSupport" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
                 </Anchors>
                 <!-- GameMenuFrame.xml:118-122. -->
                 <Scripts>
@@ -177,7 +179,7 @@
                  raises QUIT where the Exit Game rung is hidden. -->
             <Button name="GameMenuButtonLogout" inherits="GameMenuButtonTemplate" text="LOGOUT">
                 <Anchors>
-                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonMacros" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-20"/></Offset></Anchor>
+                    <Anchor point="TOP" relativeTo="GameMenuButtonMacros" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-20"/></Offset></Anchor>
                 </Anchors>
                 <Scripts>
                     <OnShow>
@@ -198,7 +200,7 @@
                  only (shown below); the countdown gate is Log Out's. -->
             <Button name="GameMenuButtonQuit" inherits="GameMenuButtonTemplate" text="EXIT_GAME" hidden="true">
                 <Anchors>
-                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonLogout" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                    <Anchor point="TOP" relativeTo="GameMenuButtonLogout" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
                 </Anchors>
                 <Scripts>
                     <OnShow>
@@ -217,7 +219,7 @@
             </Button>
             <Button name="GameMenuButtonContinue" inherits="GameMenuButtonTemplate" text="RETURN_TO_GAME">
                 <Anchors>
-                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonLogout" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-20"/></Offset></Anchor>
+                    <Anchor point="TOP" relativeTo="GameMenuButtonLogout" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-20"/></Offset></Anchor>
                 </Anchors>
                 <Scripts>
                     <OnClick>
@@ -247,7 +249,7 @@
         if ( BENILLA_NATIVE ) then
             GameMenuButtonQuit:Show()
             GameMenuButtonContinue:ClearAllPoints()
-            GameMenuButtonContinue:SetPoint("TOPLEFT", GameMenuButtonQuit, "BOTTOMLEFT", 0, -20)
+            GameMenuButtonContinue:SetPoint("TOP", GameMenuButtonQuit, "BOTTOM", 0, -20)
             GameMenuFrame:SetHeight(GameMenuFrame:GetHeight() + GameMenuButtonQuit:GetHeight())
         end
         -- On a Turtle realm the Key Bindings rung sits between Options and Edit Mode, one rung
@@ -255,7 +257,7 @@
         if ( BENILLA_TURTLE_OPTIONS ) then
             GameMenuButtonKeybindings:Show()
             BenillaGameMenuButtonEditMode:ClearAllPoints()
-            BenillaGameMenuButtonEditMode:SetPoint("TOPLEFT", GameMenuButtonKeybindings, "BOTTOMLEFT", 0, -20)
+            BenillaGameMenuButtonEditMode:SetPoint("TOP", GameMenuButtonKeybindings, "BOTTOM", 0, -20)
             GameMenuFrame:SetHeight(GameMenuFrame:GetHeight() + GameMenuButtonKeybindings:GetHeight())
         end
     ]]></Script>

@@ -96,6 +96,20 @@ fn the_menu_has_the_era_frame_and_button_ladder() {
             "{name} sits at the era 28-unit left padding"
         );
     }
+    // The rungs hang off the frame's centre, as 1.12's do, so an addon that narrows the frame
+    // (pfUI's skin takes 30 off) keeps them centred.
+    s.run("GameMenuFrame:SetWidth(170)").unwrap();
+    s.resolve();
+    let left = s.eval::<f64>("return GameMenuFrame:GetLeft()").unwrap();
+    for name in LADDER {
+        let bleft = s
+            .eval::<f64>(&format!("return {name}:GetLeft()"))
+            .unwrap();
+        assert!(
+            (bleft - (left + 13.0)).abs() < 0.001,
+            "{name} stays centred in a narrowed frame"
+        );
+    }
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
