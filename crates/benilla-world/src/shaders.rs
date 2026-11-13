@@ -16,7 +16,10 @@ pub(crate) fn plugin(app: &mut App) {
     bevy::asset::embedded_asset!(app, "shaders/celestial.wesl");
     bevy::asset::embedded_asset!(app, "shaders/ffx_glow.wesl");
     bevy::asset::embedded_asset!(app, "shaders/wow_effect.wesl");
-    bevy::asset::embedded_asset!(app, "shaders/static_gx.wesl");
+    // Held loaded from startup: the meshlet lane's `static_gx_mesh.wesl`, inserted from source,
+    // imports it (`benilla_world::shaders::static_gx`), and an embedded asset loaded only when
+    // static_gx's pipeline first asked for it left that import unresolved for the first frames.
+    bevy::shader::load_shader_library!(app, "shaders/static_gx.wesl");
     bevy::asset::embedded_asset!(app, "shaders/ssilvb.wesl");
     bevy::asset::embedded_asset!(app, "shaders/depth_of_field.wesl");
     bevy::asset::embedded_asset!(app, "shaders/liquid_screen.wesl");
