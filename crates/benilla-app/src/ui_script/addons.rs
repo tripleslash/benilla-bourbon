@@ -370,31 +370,60 @@ fn chain_addons_in(flavor: UiFlavor, chain: impl Fn(&str) -> Option<Vec<u8>>) ->
 /// it decides whose copy of a global wins.
 fn discover(flavor: UiFlavor) -> Vec<Addon> {
     // The archive pass, in `BLIZZARD_ADDONS` order: the shipped `patch.MPQ` listfile's too.
-    let mut found = chain_addons(flavor);
+    registration_order(
+        chain_addons(flavor),
+        discover_folder(),
+        bundled_addons(flavor),
+    )
+}
+
+/// [`discover`]'s merge of the archive pass (`found`), the loose pass and the bundle.
+fn registration_order(
+    mut found: Vec<Addon>,
+    folder: Vec<Addon>,
+    bundled: Vec<Addon>,
+) -> Vec<Addon> {
+    #[cfg(feature = "pfui")]
+    let interface = found.len();
     // The loose pass, minus the names the archive registered.
     let seen: HashSet<String> = found.iter().map(|a| a.name.to_ascii_lowercase()).collect();
     found.extend(
-        discover_folder()
+        folder
             .into_iter()
             .filter(|a| !seen.contains(&a.name.to_ascii_lowercase())),
     );
     // The bundled ones last, so a copy of the same name in the player's folder is the one used.
     let seen: HashSet<String> = found.iter().map(|a| a.name.to_ascii_lowercase()).collect();
     found.extend(
-        bundled_addons(flavor)
+        bundled
             .into_iter()
             .filter(|a| !seen.contains(&a.name.to_ascii_lowercase())),
     );
+    // fork: the ClassicAPI library, the folder's copy or the bundle's, registers right after the
+    // client's own interface and ahead of every other addon, so it has loaded before any addon
+    // that builds on it, whatever that addon's folder is called; none declares it a dependency.
+    #[cfg(feature = "pfui")]
+    if let Some(at) = found
+        .iter()
+        .skip(interface)
+        .position(|a| a.name.eq_ignore_ascii_case(CLASSIC_API_ADDON))
+    {
+        let library = found.remove(interface + at);
+        found.insert(interface, library);
+    }
     found
 }
 
 /// The addons benilla bundles and the flavor each is offered in, `None` for both: pfQuest's
 /// Turtle WoW database names Turtle's own quests, zones and NPCs and means nothing on a 1.12 realm.
 /// pfUI (brues-code's ClassicAPI build) loads through its flavor TOC, which only a `pfui` build
-/// reads, and is offered on Turtle alone, as its Turtle TOC is the one this client carries.
+/// reads, and is offered on Turtle alone, as its Turtle TOC is the one this client carries. The
+/// ClassicAPI library it builds on comes with it, pinned ([`is_pinned`]): always on, never listed.
 const BUNDLED_ADDONS: &[(&str, Option<UiFlavor>)] = &[
     ("pfQuest", None),
     ("pfQuest-turtle", Some(UiFlavor::Turtle)),
+    #[cfg(feature = "pfui")]
+    (CLASSIC_API_ADDON, Some(UiFlavor::Turtle)),
     #[cfg(feature = "pfui")]
     ("pfUI", Some(UiFlavor::Turtle)),
 ];
@@ -613,14 +642,28 @@ pub(crate) fn secure_url(
     Some(benilla_ui::source::decode(&url[..end]).into_owned())
 }
 
-/// fork: whether a row is one of [`TURTLE_ADDONS`] off the player's chain, which the registry
-/// pins on and keeps out of every AddOns list ([`benilla_ui::script::AddOnInfo::pinned`]).
+/// fork: whether a row is one of [`TURTLE_ADDONS`] off the player's chain, or, with pfUI, the
+/// ClassicAPI library folder ([`CLASSIC_API_ADDON`]), which the registry pins on and keeps out of
+/// every AddOns list ([`benilla_ui::script::AddOnInfo::pinned`]).
 fn is_pinned(addon: &Addon) -> bool {
+    #[cfg(feature = "pfui")]
+    if addon.name.eq_ignore_ascii_case(CLASSIC_API_ADDON) {
+        return true;
+    }
     matches!(addon.source, Source::ChainFolder)
         && TURTLE_ADDONS
             .iter()
             .any(|n| n.eq_ignore_ascii_case(&addon.name))
 }
+
+/// fork: the Lua half of the ClassicAPI DLL, which benilla's engine half builds on. The DLL
+/// registers it as an addon that is always enabled and left out of `GetNumAddOns` and
+/// `GetAddOnInfo(i)`, while a lookup by name or a `## Dependencies` line still finds it
+/// (ClassicAPI's README, "Installation"). benilla bundles the folder on Turtle (v1.20.6, what the
+/// engine half answers), a copy in the player's AddOns folder wins, and the pin gives either the
+/// DLL's standing.
+#[cfg(feature = "pfui")]
+const CLASSIC_API_ADDON: &str = "!!!ClassicAPI";
 
 /// What the signature check `0x6f10f0` answers for an addon, modelled: 3 (the addon is SECURE,
 /// `0x51dbfb`) for one that claims `## Secure` and is read from the player's own patch chain,
@@ -1374,6 +1417,67 @@ mod tests {
             Source::Dir(PathBuf::from("AddOns")),
         );
         assert!(!info_for(&folder).pinned);
+    }
+
+    /// fork: with pfUI, the ClassicAPI library folder is pinned as the DLL's own addon is: always
+    /// on and never listed. Without pfUI it is an ordinary addon, since its engine half is absent.
+    #[test]
+    fn the_classicapi_folder_is_pinned_only_with_pfui() {
+        let folder = Addon::new(
+            "!!!ClassicAPI".into(),
+            Toc::parse("## Interface: 11200\nCompat.lua\n"),
+            Source::Dir(PathBuf::from("AddOns")),
+        );
+        assert_eq!(info_for(&folder).pinned, cfg!(feature = "pfui"));
+        let other = Addon::new(
+            "pfUI".into(),
+            Toc::parse("## Interface: 11200\npfUI.lua\n"),
+            Source::Dir(PathBuf::from("AddOns")),
+        );
+        assert!(!info_for(&other).pinned);
+    }
+
+    /// fork: the ClassicAPI library registers, so loads, right after the client's own interface
+    /// and ahead of every other addon; the player's copy wins over the bundle's and takes its place.
+    #[cfg(feature = "pfui")]
+    #[test]
+    fn the_classicapi_library_registers_right_after_the_interface() {
+        let row = |name: &str, source: Source| {
+            Addon::new(
+                name.into(),
+                Toc::parse("## Interface: 11200\nx.lua\n"),
+                source,
+            )
+        };
+        let dir = || Source::Dir(PathBuf::from("AddOns"));
+        let chain = || vec![row("Turtle_General", Source::ChainFolder)];
+        let names = |rows: &[Addon]| rows.iter().map(|a| a.name.clone()).collect::<Vec<_>>();
+        let rows = registration_order(
+            chain(),
+            vec![row("Bagnon", dir())],
+            vec![
+                row("pfQuest", Source::Bundled),
+                row("!!!ClassicAPI", Source::Bundled),
+                row("pfUI", Source::Bundled),
+            ],
+        );
+        assert_eq!(
+            names(&rows),
+            [
+                "Turtle_General",
+                "!!!ClassicAPI",
+                "Bagnon",
+                "pfQuest",
+                "pfUI"
+            ]
+        );
+        let rows = registration_order(
+            chain(),
+            vec![row("Aux", dir()), row("!!!ClassicAPI", dir())],
+            vec![row("!!!ClassicAPI", Source::Bundled)],
+        );
+        assert_eq!(names(&rows), ["Turtle_General", "!!!ClassicAPI", "Aux"]);
+        assert!(matches!(rows[1].source, Source::Dir(_)));
     }
 
     /// Every chain row is LoadOnDemand and chain-sourced, the eight windows the interface opens
