@@ -1036,6 +1036,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "1",
         "the fork's own — the reference's exposure never moves",
     ),
+    // `depthOfField` — a subtle far-field blur after WoW Forever's DoF passes
+    // (`benilla_world::depth_of_field`): distant scenery softens past the player. Applies to the
+    // next frame; 0, the default, draws the frame sharp as 1.12 does.
+    ours(
+        "depthOfField",
+        "0",
+        "the fork's own — 1.12 has no depth of field; ours ships off",
+    ),
     // `serverTimeOffset` — whole hours, -12 to 12, added to the server's time of day for the sky,
     // the light and the clock the UI reads (`net::game_time::TimeOffset`); the session clock
     // itself and the daytime gate the server checks stay on its time. Applies to the next frame.

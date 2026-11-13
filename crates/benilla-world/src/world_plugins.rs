@@ -126,6 +126,8 @@ impl PluginGroup for WorldPlugins {
             // full-screen pass, and the one before FFXGlow in the graph. Its two strengths are
             // player sliders and both halves are exact no-ops at zero.
             .add(crate::ssilvb::SsilvbPlugin)
+            // fork: depth of field — the far-field blur, between the main pass and the upscaler.
+            .add(crate::depth_of_field::DepthOfFieldPlugin)
             // The fork's parallel lighting model (FORK.md). Classic by default,
             // and a classic session never reads anything it registers.
             .add(crate::modern::ModernLightingPlugin)

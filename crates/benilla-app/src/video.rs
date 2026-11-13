@@ -491,6 +491,8 @@ pub(crate) struct VideoKnobs<'w> {
         Option<ResMut<'w, benilla_world::horizon::HorizonCulling>>,
         // fork: native GPU — `rayTracing` and its three lanes, switched at run time.
         Option<ResMut<'w, benilla_world::modern::RayTracingSetting>>,
+        // fork: depth of field.
+        Option<ResMut<'w, benilla_world::depth_of_field::DepthOfField>>,
     ),
 }
 
@@ -682,6 +684,12 @@ impl VideoKnobs<'_> {
             "autoexposure" => {
                 if let Some(auto) = fork.7.as_deref_mut() {
                     auto.0 = ev.flag();
+                }
+            }
+            // fork: depth of field; the render pass reads the knob each frame.
+            "depthoffield" => {
+                if let Some(dof) = fork.10.as_deref_mut() {
+                    dof.0 = ev.flag();
                 }
             }
             // fork: rain on surfaces; the wetness tick reads the knob each frame.

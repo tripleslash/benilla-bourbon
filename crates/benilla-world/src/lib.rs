@@ -112,6 +112,8 @@ pub mod clouds;
 pub mod clutter;
 pub mod collision;
 pub mod decal;
+// fork: depth of field — a subtle far-field blur after WoW Forever's, off by default.
+pub mod depth_of_field;
 pub mod dev_state;
 pub mod doodad_anim;
 pub mod entity_cull;

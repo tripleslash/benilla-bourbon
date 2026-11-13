@@ -188,6 +188,7 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("model_render::lazy::realize", "record"),
     ("model_render::order::NoDepthFill", "wall"),
     ("model_render::order::SortInstance", "wall"),
+    ("depth_of_field::DepthOfField", "wall"),
     ("modern::LightingModel", "wall"),
     ("modern::LightingQuality", "wall"),
     ("modern::LightingSettings", "wall"),

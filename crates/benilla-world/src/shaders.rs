@@ -18,6 +18,7 @@ pub(crate) fn plugin(app: &mut App) {
     bevy::asset::embedded_asset!(app, "shaders/wow_effect.wesl");
     bevy::asset::embedded_asset!(app, "shaders/static_gx.wesl");
     bevy::asset::embedded_asset!(app, "shaders/ssilvb.wesl");
+    bevy::asset::embedded_asset!(app, "shaders/depth_of_field.wesl");
     bevy::asset::embedded_asset!(app, "shaders/liquid_screen.wesl");
     bevy::asset::embedded_asset!(app, "shaders/liquid_ripple.wesl");
     bevy::asset::embedded_asset!(app, "shaders/wet_ssr.wesl");

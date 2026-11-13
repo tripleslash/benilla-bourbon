@@ -755,6 +755,12 @@
             .. "and a night still reads as night.\n\n"
             .. "Has no effect on Classic lighting. Applies when you click Apply."
 
+        -- fork: `depthOfField`, a far-field blur -- 1.12 has no such row.
+        BENILLA_TOOLTIP_DEPTH_OF_FIELD =
+            "Softens distant scenery a little, the way a camera lens does, while you and "
+            .. "everything near you stay sharp. A subtle effect, after WoW Forever's.\n\n"
+            .. "Applies when you click Apply."
+
         -- 1.12's GAMMA text points at gray-bar art this page does not have.
         BENILLA_TOOLTIP_GAMMA =
             "Bends the midtones of the whole picture while black stays black and white stays "
@@ -810,7 +816,7 @@
                 "RowGroundClutterScale",
                 "RowHdModels", "RowSpellDetail", "RowWaterDetail",
                 "RowLightingModel", "RowLightingQuality", "RowWorldShadows", "RowAmbientOcclusion",
-                "RowIndirectLight", "RowAutoExposure",
+                "RowIndirectLight", "RowAutoExposure", "RowDepthOfField",
                 "RowWeatherDensity", "RowRainSurfaces", "RowFoliageWind", "RowFoliageWindStrength",
                 "RowServerTimeOffset",
             },
@@ -875,7 +881,7 @@
             -- fork: native GPU — the Ray Tracing box and its three lanes close the Lighting
             -- section.
             for i, rkey in ipairs(graphics) do
-                if ( rkey == "RowAutoExposure" ) then
+                if ( rkey == "RowDepthOfField" ) then
                     table.insert(graphics, i + 1, "RowRayTracing")
                     table.insert(graphics, i + 2, "RowRayTracingGI")
                     table.insert(graphics, i + 3, "RowRayTracingShadows")
@@ -3096,10 +3102,22 @@
                                                     "BENILLA_TOOLTIP_AUTO_EXPOSURE")
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <Frame name="$parentRowRayTracing" inherits="BenillaOptionsCheckboxRowTemplate" hidden="true">
+                                        <Frame name="$parentRowDepthOfField" inherits="BenillaOptionsCheckboxRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowAutoExposure" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowAutoExposure" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- fork: Depth of Field -- `depthOfField`, the
+                                                -- far-field blur (benilla_world::depth_of_field).
+                                                BenillaOptionsRow_OnLoad(this, "depthOfField", "Depth of Field",
+                                                    "BENILLA_TOOLTIP_DEPTH_OF_FIELD")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowRayTracing" inherits="BenillaOptionsCheckboxRowTemplate" hidden="true">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowDepthOfField" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowDepthOfField" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- fork: native GPU — `rayTracing`, a native
@@ -3154,8 +3172,8 @@
                                              SetweatherDensity global. -->
                                         <Frame name="$parentRowWeatherDensity" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
-                                                <Anchor point="TOPLEFT" relativeTo="$parentRowAutoExposure" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-33"/></Offset></Anchor>
-                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowAutoExposure" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-33"/></Offset></Anchor>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowDepthOfField" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-33"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowDepthOfField" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-33"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- fork: native GPU — under the Ray Tracing box's
@@ -4392,6 +4410,7 @@
             }
             BENILLA_LIGHTING_QUALITY = "Lighting Quality"
             BENILLA_AUTO_EXPOSURE = "Auto Exposure"
+            BENILLA_DEPTH_OF_FIELD = "Depth of Field"
             BENILLA_SERVER_TIME_OFFSET = "Server Time Offset"
             BENILLA_AMBIENT_OCCLUSION = "Ambient Occlusion"
             BENILLA_INDIRECT_LIGHT = "Indirect Lighting"
@@ -4652,6 +4671,10 @@
                 { category = PIXEL_SHADERS, row = {
                     name = "BENILLA_AUTO_EXPOSURE", desc = BENILLA_TOOLTIP_AUTO_EXPOSURE,
                     type = "checkbutton", cvar = "autoExposure" } },
+                -- fork: depth of field, under the light's switches as on our Graphics page.
+                { category = PIXEL_SHADERS, row = {
+                    name = "BENILLA_DEPTH_OF_FIELD", desc = BENILLA_TOOLTIP_DEPTH_OF_FIELD,
+                    type = "checkbutton", cvar = "depthOfField" } },
                 -- fork: the hour the world's day and night are drawn at, under the light's rows.
                 { after = "BENILLA_AUTO_EXPOSURE", row = {
                     name = "BENILLA_SERVER_TIME_OFFSET", desc = BENILLA_TOOLTIP_SERVER_TIME_OFFSET,
@@ -4811,7 +4834,7 @@
                 { name = "Lighting", from = PIXEL_SHADERS, rows = {
                     "BENILLA_LIGHTING_MODEL", "BENILLA_LIGHTING_QUALITY", "BENILLA_WORLD_SHADOWS",
                     "BENILLA_AMBIENT_OCCLUSION", "BENILLA_INDIRECT_LIGHT", "BENILLA_AUTO_EXPOSURE",
-                    "BENILLA_RAY_TRACING", "BENILLA_RAY_TRACING_GI", "BENILLA_RAY_TRACING_SHADOWS",
+                    "BENILLA_DEPTH_OF_FIELD", "BENILLA_RAY_TRACING", "BENILLA_RAY_TRACING_GI", "BENILLA_RAY_TRACING_SHADOWS",
                     "BENILLA_RAY_TRACING_VOLUMETRICS" } },
                 { name = "Weather & Time", rows = {
                     "WEATHER_DETAIL", "BENILLA_RAIN_SURFACES", "BENILLA_FOLIAGE_WIND",

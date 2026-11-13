@@ -507,7 +507,10 @@ impl Plugin for FsrPlugin {
                         .in_set(Core3dSystems::MainPass)
                         .after(main_transparent_pass_3d)
                         .after(crate::modern::volumetrics::lamp_halo_pass),
-                    upscaler::fsr_upscale_pass.in_set(Core3dSystems::EarlyPostProcess),
+                    // fork: depth of field — the frame it upscales has the far blur in it.
+                    upscaler::fsr_upscale_pass
+                        .in_set(Core3dSystems::EarlyPostProcess)
+                        .after(crate::depth_of_field::dof_pass),
                     // After the FFXGlow filter passes, whose blur the compose reads.
                     framegen::fsr_framegen_pass
                         .in_set(Core3dSystems::PostProcess)

@@ -1344,6 +1344,8 @@ pub(crate) const GRAPHICS_CVARS: &[&str] = &[
     "lightingModel",
     "lightingQuality",
     "autoExposure",
+    // fork: depth of field.
+    "depthOfField",
     // fork: the hour the world's day and night are drawn at.
     "serverTimeOffset",
     "renderScale",
