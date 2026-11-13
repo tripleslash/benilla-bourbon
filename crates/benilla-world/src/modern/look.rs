@@ -367,7 +367,9 @@ impl ZoneLook {
     pub const DARKSHORE: Self = Self {
         key: 0.85,
         fill: 0.95,
-        exposure: 1.0,
+        // Darkshore's ceiling at every hour (asked: as its noon's, 0.5; was 1.0). The auto-exposure
+        // still lifts its nights.
+        exposure: 0.5,
         haze: 0.001,
         // A little forward lobe: the sun's side of the haze is gently brighter, never a glare.
         forward: 0.1,
