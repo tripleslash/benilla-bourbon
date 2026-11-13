@@ -78,6 +78,12 @@ pfUI:RegisterSkin("Options - New", function ()
   SkinButton(OptionsFrameDefaults)
   OptionsFrameOkay:ClearAllPoints()
   OptionsFrameOkay:SetPoint("RIGHT", OptionsFrameCancel, "LEFT", -2*bpad, 0)
+  -- benilla: the client's own Apply button, which its options layer puts left of Okay
+  if OptionsFrameApply then
+    SkinButton(OptionsFrameApply)
+    OptionsFrameApply:ClearAllPoints()
+    OptionsFrameApply:SetPoint("RIGHT", OptionsFrameOkay, "LEFT", -2*bpad, 0)
+  end
 
   -- category buttons
   for i = 1, NUM_CATEGORIES_TO_DISPLAY or 18 do
