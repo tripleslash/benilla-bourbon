@@ -21,7 +21,8 @@ struct Events(Vec<SessionEvent>);
 #[derive(Default)]
 struct Seen {
     alive: HashMap<u64, bool>,
-    auras: HashMap<u64, HashMap<u8, (u32, u8)>>,
+    /// Each unit's auras as `(slot, spell, stacks)`, in the descriptor's slot order.
+    auras: HashMap<u64, Vec<(u8, u32, u8)>>,
     /// The last cast each caster began with a cast time: its go then raises no `SPELL_CAST_SUCCESS`.
     timed_cast: HashMap<u64, u32>,
 }
@@ -778,6 +779,39 @@ fn execute(e: &Emit, d: &Describe, caster: u64, spell: u32, effect: u32, entry: 
     }
 }
 
+/// One unit's auras, `(slot, spell, stacks)` in slot order.
+type Auras = [(u8, u32, u8)];
+
+/// What changed between two reads of a unit's auras, as `(subevent, slot, spell, stacks)`: a slot
+/// holding a new spell applied it, the same spell with another stack count changed its dose (the
+/// only two that carry the stacks), and a slot that lost its spell removed it.
+fn aura_changes(before: &Auras, now: &Auras) -> Vec<(&'static str, u8, u32, Option<u8>)> {
+    let at = |list: &Auras, slot: u8| {
+        list.iter()
+            .find(|(s, ..)| *s == slot)
+            .map(|&(_, spell, stacks)| (spell, stacks))
+    };
+    let mut out = Vec::new();
+    for &(slot, spell, stacks) in now {
+        match at(before, slot) {
+            Some((old, old_stacks)) if old == spell => {
+                if stacks > old_stacks {
+                    out.push(("SPELL_AURA_APPLIED_DOSE", slot, spell, Some(stacks)));
+                } else if stacks < old_stacks {
+                    out.push(("SPELL_AURA_REMOVED_DOSE", slot, spell, Some(stacks)));
+                }
+            }
+            _ => out.push(("SPELL_AURA_APPLIED", slot, spell, None)),
+        }
+    }
+    for &(slot, spell, _) in before {
+        if at(now, slot).is_none_or(|(s, _)| s != spell) {
+            out.push(("SPELL_AURA_REMOVED", slot, spell, None));
+        }
+    }
+    out
+}
+
 /// The frame's deaths (a unit whose health fell to 0: `UNIT_DIED`, or `UNIT_DESTROYED` for one a
 /// player summoned) and aura changes by slot (`SPELL_AURA_APPLIED` / `_REMOVED` /
 /// `_APPLIED_DOSE` / `_REMOVED_DOSE`, the caster unknown: no packet names it).
@@ -800,45 +834,56 @@ fn deaths_and_auras(e: &Emit, d: &Describe, seen: &mut Seen) {
                 e.push(subevent, 0, guid, None, Vec::new());
             }
         }
-        let now: HashMap<u8, (u32, u8)> = fields
+        let now: Vec<(u8, u32, u8)> = fields
             .unit_auras()
             .filter(|a| a.spell_id != 0)
-            .map(|a| (a.slot, (a.spell_id, a.stacks)))
+            .map(|a| (a.slot, a.spell_id, a.stacks))
             .collect();
-        if let Some(before) = seen.auras.get(&guid) {
-            for (slot, (spell, stacks)) in &now {
-                let kind = V::Str(if *slot < 32 { "BUFF" } else { "DEBUFF" }.into());
-                let prefix = d.spell(*spell).to_vec();
-                match before.get(slot) {
-                    Some((old, old_stacks)) if old == spell => {
-                        if stacks != old_stacks {
-                            let subevent = if stacks > old_stacks {
-                                "SPELL_AURA_APPLIED_DOSE"
-                            } else {
-                                "SPELL_AURA_REMOVED_DOSE"
-                            };
-                            let mut values = prefix;
-                            values.extend([kind, int(*stacks)]);
-                            e.push(subevent, 0, guid, Some(*spell), values);
-                        }
-                    }
-                    _ => {
-                        let mut values = prefix;
-                        values.push(kind);
-                        e.push("SPELL_AURA_APPLIED", 0, guid, Some(*spell), values);
-                    }
-                }
-            }
-            for (slot, (spell, _)) in before {
-                if now.get(slot).is_none_or(|(s, _)| s != spell) {
-                    let mut values = d.spell(*spell).to_vec();
-                    values.push(V::Str(if *slot < 32 { "BUFF" } else { "DEBUFF" }.into()));
-                    e.push("SPELL_AURA_REMOVED", 0, guid, Some(*spell), values);
-                }
-            }
+        let before = seen.auras.get(&guid);
+        // Nearly every unit on nearly every frame: nothing moved, nothing to say.
+        if before == Some(&now) {
+            continue;
+        }
+        for (subevent, slot, spell, dose) in before.map_or(Vec::new(), |b| aura_changes(b, &now)) {
+            let mut values = d.spell(spell).to_vec();
+            values.push(V::Str(if slot < 32 { "BUFF" } else { "DEBUFF" }.into()));
+            values.extend(dose.map(int));
+            e.push(subevent, 0, guid, Some(spell), values);
         }
         seen.auras.insert(guid, now);
     }
     seen.alive.retain(|g, _| present.contains(g));
     seen.auras.retain(|g, _| present.contains(g));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A slot's new spell applies, its lost one is removed, the same spell with more or fewer
+    /// stacks changes its dose, and a spell replaced in its slot is both; nothing else speaks.
+    #[test]
+    fn aura_changes_name_what_moved_by_slot() {
+        let before = [(0, 1126, 1), (1, 21562, 1), (32, 589, 2), (33, 172, 1)];
+        assert!(aura_changes(&before, &before).is_empty());
+        let now = [(0, 1126, 1), (2, 467, 1), (32, 589, 3), (33, 980, 1)];
+        assert_eq!(
+            aura_changes(&before, &now),
+            [
+                ("SPELL_AURA_APPLIED", 2, 467, None),
+                ("SPELL_AURA_APPLIED_DOSE", 32, 589, Some(3)),
+                ("SPELL_AURA_APPLIED", 33, 980, None),
+                ("SPELL_AURA_REMOVED", 1, 21562, None),
+                ("SPELL_AURA_REMOVED", 33, 172, None),
+            ]
+        );
+        assert_eq!(
+            aura_changes(&now, &before)[1],
+            ("SPELL_AURA_REMOVED_DOSE", 32, 589, Some(2))
+        );
+        assert_eq!(
+            aura_changes(&[], &[(0, 1126, 1)]),
+            [("SPELL_AURA_APPLIED", 0, 1126, None)]
+        );
+    }
 }
