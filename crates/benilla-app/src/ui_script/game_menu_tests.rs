@@ -102,9 +102,7 @@ fn the_menu_has_the_era_frame_and_button_ladder() {
     s.resolve();
     let left = s.eval::<f64>("return GameMenuFrame:GetLeft()").unwrap();
     for name in LADDER {
-        let bleft = s
-            .eval::<f64>(&format!("return {name}:GetLeft()"))
-            .unwrap();
+        let bleft = s.eval::<f64>(&format!("return {name}:GetLeft()")).unwrap();
         assert!(
             (bleft - (left + 13.0)).abs() < 0.001,
             "{name} stays centred in a narrowed frame"
