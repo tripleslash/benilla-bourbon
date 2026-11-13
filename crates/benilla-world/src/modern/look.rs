@@ -263,8 +263,8 @@ impl ZoneLook {
         // Half the air the look was tuned with (asked in the client): since the air scatters the light
         // that reaches it under one exposure, Brill's 181 yd fog end at the default reach (0.0177/yd)
         // and this haze at 0.0034 hid the town 60 yd off in a lit green wash. Halved again (asked:
-        // still too hazy at 0.0017).
-        haze: 0.00085,
+        // still too hazy at 0.0017), then two thirds of that (asked: 0.00085).
+        haze: 0.00057,
         fog_reach: 1.0,
         vignette: 0.38,
         // The volume's banks lying faintly over all the ground, lit and shadowed in depth (approved in
@@ -285,12 +285,13 @@ impl ZoneLook {
 
     /// fork: **Tirisfal Glades**, the eerie look tinted greener (asked in the viewer): the sun,
     /// shafts, fog and sky lean further from red and blue toward green, through a thinner haze than
-    /// the eerie look's, day and night (asked), halved with it from 0.0012 (asked: too hazy),
-    /// keeping the whole night bank by day the other dark zones thinned (asked), at 60% of the 1.3
-    /// it was and the eerie look's lower banks, as Darkshore's were scaled (asked).
+    /// the eerie look's, day and night (asked), halved with it from 0.0012 (asked: too hazy) and
+    /// then taken to two thirds (asked: 0.0006), keeping the whole 1.3 night bank by day and night
+    /// (asked: 60% of it read too faint) on the eerie look's lower banks.
     pub const TIRISFAL: Self = Self {
-        haze: 0.0006,
-        ground_fog: 0.78,
+        haze: 0.0004,
+        ground_fog: 1.3,
+        night_banks: 1.3,
         glow: [0.58, 1.0, 0.62],
         fog_tint: [0.7, 1.05, 0.7],
         sky_tint: [0.52, 0.72, 0.52],
@@ -403,9 +404,12 @@ impl ZoneLook {
     /// fork: **Darkshore at midday**, which [`look_for_zone_at`] ramps [`Self::DARKSHORE`] into
     /// across `sun_arc::midday_at`, as the default look takes [`Self::NOON`]. The salmon glow and
     /// warm fog read golden under the white noon sun (asked in the viewer): the noon sun, glow, fog,
-    /// haze and sky go grey at the same fog brightness, and the grade is less saturated.
+    /// haze and sky go grey at the same fog brightness, and the grade is less saturated. Exposed
+    /// down from 0.95 (asked: the noon air blew out white over the Long Wash; at the approved pose
+    /// it read 220-230 of 255 on the bank, with the sea fog and banks off no darker, and 0.72 still
+    /// too bright), to a little over the approved 17:00 frame's levels there.
     pub const DARKSHORE_NOON: Self = Self {
-        exposure: 0.95,
+        exposure: 0.6,
         glow: [1.0, 0.96, 0.95],
         fog_tint: [1.9, 1.9, 1.91],
         sky_tint: [1.0, 1.0, 1.04],
