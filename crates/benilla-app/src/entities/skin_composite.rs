@@ -343,15 +343,17 @@ fn work(plan: CompositePlan, chain: Arc<Mutex<Chain>>) -> Work {
     })
 }
 
-/// Read and decode one BLP off `chain`, locked only to find its archive.
+/// Read and decode one BLP off `chain`, locked only to find its archive (or its container).
 #[cfg(not(target_arch = "wasm32"))]
 fn read_texture(chain: &Mutex<Chain>, path: &str) -> anyhow::Result<BlpMipChain> {
     let name = path.replace('/', "\\");
     let bytes = {
         let locked = chain.lock_recover();
-        if locked.is_packed() {
-            // fork: desktop — a container hands out no archive to read outside the lock.
-            locked.read(&name)
+        if let Some(packs) = locked.packed_reader() {
+            // fork: desktop — a pack's download must not hold the lock every frame-thread chain
+            // ask takes.
+            drop(locked);
+            packs.read(&name)
         } else {
             let archive = locked.archive_for(&name)?;
             drop(locked);

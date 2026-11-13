@@ -267,3 +267,45 @@ fn a_failed_fill_passes_the_pack_but_a_read_still_fetches_it() {
     std::fs::write(&served, &good).unwrap();
     assert_eq!(store.read("Sound\\two.wav").unwrap(), vec![9u8; 2048]);
 }
+
+#[test]
+fn the_world_entry_set_reports_its_bytes_on_disk() {
+    let (origin, cache) = (Scratch::new("origin"), Scratch::new("cache"));
+    publish(&origin.0, &[9u8; 2048]);
+    let store = open(&cache.0, &origin.0);
+    assert_eq!(
+        store.world_entry_progress(),
+        (0, 0),
+        "no set before the pointer is read"
+    );
+    // `publish`'s pointer lists pack 1 alone; land it by a read first, so nothing races the count.
+    let size = u64::from(store.index().pack(1).unwrap().size_wire);
+    store.read("Sound\\one.wav").unwrap();
+    store.warm_boot_set();
+    assert_eq!(store.world_entry_progress(), (size, size));
+    store.promote_world_entry();
+    assert_eq!(
+        cached_packs(&cache.0).len(),
+        1,
+        "a landed set queues nothing"
+    );
+}
+
+#[test]
+fn a_promoted_world_entry_set_lands_and_counts_up() {
+    let (origin, cache) = (Scratch::new("origin"), Scratch::new("cache"));
+    publish(&origin.0, &[9u8; 2048]);
+    let store = open(&cache.0, &origin.0);
+    store.warm_boot_set();
+    store.promote_world_entry();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let (done, total) = store.world_entry_progress();
+        assert!(total > 0 && done <= total);
+        if done == total {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the set never landed");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}

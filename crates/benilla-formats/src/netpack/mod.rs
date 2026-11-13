@@ -54,6 +54,10 @@ const POINTER: &str = "boot-packs.json";
 const WARM_THREADS: usize = 6;
 /// Attempts at one object before its read fails.
 const ATTEMPTS: usize = 3;
+/// fork: desktop — a read on the frame thread that waited on the network at least this long is
+/// reported ([`NetPackStore::read`]): the window draws nothing while it waits, and past ~5 s Windows
+/// calls it "Not Responding".
+const FRAME_WAIT_REPORT: std::time::Duration = std::time::Duration::from_millis(100);
 /// Decoded bodies of solid packs kept in memory. A stored pack is read a frame at a time off its
 /// file, so only a solid one (one zstd stream, unreadable in parts) is held whole.
 const SOLID_CACHE_BYTES: usize = 256 * 1024 * 1024;
@@ -98,6 +102,11 @@ pub struct NetPackStore {
     warm: WarmQueue,
     /// The background fill's place: every pack below it is cached or skipped.
     fill_cursor: AtomicU32,
+    /// The packs the origin's version pointer lists for boot and world entry
+    /// ([`Self::warm_boot_set`]), the set Enter World waits on ([`Self::world_entry_progress`]).
+    entry_set: OnceLock<Vec<u32>>,
+    /// Members of [`Self::entry_set`] seen cached or failed, so a progress poll stats each once.
+    entry_landed: Mutex<HashSet<u32>>,
     /// Packs whose background download failed: the fill passes them, a read still asks.
     fill_skipped: Mutex<HashSet<u32>>,
 }
@@ -122,6 +131,8 @@ impl NetPackStore {
             warm: WarmQueue::default(),
             fill_cursor: AtomicU32::new(0),
             fill_skipped: Mutex::new(HashSet::new()),
+            entry_set: OnceLock::new(),
+            entry_landed: Mutex::new(HashSet::new()),
         })
     }
 
@@ -151,9 +162,10 @@ impl NetPackStore {
             // The native chain's wording: callers match on it.
             bail!("file not in patch chain: {name}");
         };
-        let path = self
-            .ensure(at.pack_id, &meta)
-            .map_err(|e| pack_err(name, at.pack_id, e))?;
+        let started = std::time::Instant::now();
+        let ensured = self.ensure(at.pack_id, &meta);
+        report_frame_wait(started.elapsed(), at.pack_id, name);
+        let path = ensured.map_err(|e| pack_err(name, at.pack_id, e))?;
         self.frame(&path, &at, &meta)
             .and_then(|frame| frame_bytes(&frame).map_err(|e| anyhow!("{e}")))
             .with_context(|| format!("reading {name} from pack {}", at.pack_id))
@@ -209,11 +221,64 @@ impl NetPackStore {
         let Ok(pointer) = origin.get(POINTER) else {
             return;
         };
-        for id in boot_pack_ids(&String::from_utf8_lossy(&pointer)) {
+        let ids = boot_pack_ids(&String::from_utf8_lossy(&pointer));
+        for &id in &ids {
             if let Some(meta) = self.index.pack(id) {
                 if self.cached(id, &meta).is_none() {
                     self.queue(id, crate::web::PRIORITY_NORMAL);
                 }
+            }
+        }
+        let _ = self.entry_set.set(ids);
+    }
+
+    /// fork: desktop — how much of the boot and world-entry set ([`Self::warm_boot_set`]) is on
+    /// disk: `(bytes landed, bytes in the set)`, a pack whose download failed this session counted
+    /// as landed, since waiting on it changes nothing. `(0, 0)` before the set is known.
+    pub fn world_entry_progress(&self) -> (u64, u64) {
+        let Some(ids) = self.entry_set.get() else {
+            return (0, 0);
+        };
+        let mut landed = self
+            .entry_landed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (mut done, mut total) = (0u64, 0u64);
+        for &id in ids {
+            let Some(meta) = self.index.pack(id) else {
+                continue;
+            };
+            let size = u64::from(meta.size_wire);
+            total += size;
+            if landed.contains(&id) || self.cached(id, &meta).is_some() || self.has_failed(id) {
+                landed.insert(id);
+                done += size;
+            }
+        }
+        (done, total)
+    }
+
+    /// fork: desktop — move every pack of the world-entry set not yet on disk to the head of the
+    /// warm queue: Enter World waits on them ([`Self::world_entry_progress`]).
+    pub fn promote_world_entry(self: &Arc<Self>) {
+        let Some(ids) = self.entry_set.get() else {
+            return;
+        };
+        for &id in ids {
+            if let Some(meta) = self.index.pack(id) {
+                if self.cached(id, &meta).is_none() && !self.has_failed(id) {
+                    self.queue_with(id, crate::web::PRIORITY_TERRAIN_NEAR, true);
+                }
+            }
+        }
+    }
+
+    /// fork: desktop — [`Self::prefetch`] ahead of everything queued, the world-entry set
+    /// included: what is on screen now waits on it (the loading screen's backdrop).
+    pub fn prefetch_first(self: &Arc<Self>, name: &str) {
+        if let Some((at, meta)) = self.locate(name) {
+            if self.cached(at.pack_id, &meta).is_none() && !self.has_failed(at.pack_id) {
+                self.queue_with(at.pack_id, crate::web::PRIORITY_TERRAIN_FOCUS, true);
             }
         }
     }
@@ -418,6 +483,12 @@ impl NetPackStore {
 
     /// Hand `pack_id` to the warm threads, starting them on first use.
     fn queue(self: &Arc<Self>, pack_id: u32, priority: u8) {
+        self.queue_with(pack_id, priority, false);
+    }
+
+    /// [`Self::queue`]; with `again`, a pack already queued is queued once more at `priority`, so
+    /// a promotion overtakes its earlier place (the later pop finds it cached and moves on).
+    fn queue_with(self: &Arc<Self>, pack_id: u32, priority: u8, again: bool) {
         if self.origin.is_none() {
             return;
         }
@@ -426,7 +497,7 @@ impl NetPackStore {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if !q.queued.insert(pack_id) {
+        if !q.queued.insert(pack_id) && !again {
             return;
         }
         q.seq += 1;
@@ -532,6 +603,18 @@ impl SolidCache {
                 }
             }
         }
+    }
+}
+
+/// fork: desktop — report a read on the frame thread (the one named `main`) that waited
+/// [`FRAME_WAIT_REPORT`] or longer for its pack: the instrument that names every caller still
+/// fetching on the frame thread.
+fn report_frame_wait(waited: std::time::Duration, pack_id: u32, name: &str) {
+    if waited >= FRAME_WAIT_REPORT && std::thread::current().name() == Some("main") {
+        eprintln!(
+            "benilla: netpack: main thread waited {} ms for pack {pack_id} ({name})",
+            waited.as_millis()
+        );
     }
 }
 

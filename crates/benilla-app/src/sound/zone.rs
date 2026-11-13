@@ -1263,11 +1263,11 @@ fn bed_opening(zone: &ZoneAudio) -> bool {
 #[cfg(not(target_arch = "wasm32"))]
 fn open_bed(chain: &Mutex<Chain>, path: &str) -> anyhow::Result<StreamingSoundData<FromFileError>> {
     let locked = chain.lock_recover();
-    if locked.is_packed() {
+    if let Some(packs) = locked.packed_reader() {
         // fork: desktop — a container has no archive to stream from: the bed is read whole (a
-        // pack frame, a few MB at most) and streamed out of memory.
-        let bytes = locked.read(path)?;
+        // pack frame, a few MB at most) and streamed out of memory, its download outside the lock.
         drop(locked);
+        let bytes = packs.read(path)?;
         let len = bytes.len() as u64;
         return Ok(mixer::stream_from_source(std::io::Cursor::new(bytes), len)?.loop_region(..));
     }

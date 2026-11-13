@@ -162,18 +162,43 @@ fn fill_segments() -> Vec<&'static str> {
     out
 }
 
+/// Every container opened this process.
+fn open_stores() -> Vec<Arc<NetPackStore>> {
+    STORES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .map(|m| m.values().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// How much of the world-entry pack set every open container's version pointer lists is on disk:
+/// `(bytes landed, bytes in the sets)` ([`NetPackStore::world_entry_progress`]), or `None` when
+/// this process reads an install. Enter World holds the pick until it is whole, as the reference
+/// holds `CMSG_PLAYER_LOGIN` until its async file loader drains.
+pub fn world_entry_progress() -> Option<(u64, u64)> {
+    origin()?;
+    Some(
+        open_stores()
+            .iter()
+            .map(|s| s.world_entry_progress())
+            .fold((0, 0), |(d, t), (sd, st)| (d + sd, t + st)),
+    )
+}
+
+/// Move every open container's world-entry packs not yet on disk to the head of its warm queue.
+pub fn promote_world_entry() {
+    for store in open_stores() {
+        store.promote_world_entry();
+    }
+}
+
 /// Whether a read or a warm is fetching, or a warm waits, in any open container.
 fn foreground_active() -> bool {
     if crate::netpack::foreground_busy() {
         return true;
     }
-    let stores: Vec<Arc<NetPackStore>> = STORES
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .as_ref()
-        .map(|m| m.values().cloned().collect())
-        .unwrap_or_default();
-    stores.iter().any(|s| s.warm_pending())
+    open_stores().iter().any(|s| s.warm_pending())
 }
 
 /// The fill thread: wait for [`FILL_QUIET`], fetch the next pack the first incomplete container

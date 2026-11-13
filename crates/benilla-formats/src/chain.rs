@@ -100,9 +100,24 @@ pub struct Chain {
     locale: Locale,
 }
 
+/// fork: desktop — [`Chain::packed_reader`]'s handle: the chain's containers, read as
+/// [`Chain::read`] reads them, a download blocking only the reading thread.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+pub struct PackedReader(Packs);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PackedReader {
+    /// [`Chain::read`] over the containers.
+    pub fn read(&self, name: &str) -> Result<Vec<u8>> {
+        self.0.read_or_bundled(name)
+    }
+}
+
 /// A native chain's containers: the base corpus and the HD layer over it, the web chain's
 /// priority law ([`crate::layers::pick_layer`]) between them.
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
 struct Packs {
     base: std::sync::Arc<crate::netpack::NetPackStore>,
     hd: Option<std::sync::Arc<crate::netpack::NetPackStore>>,
@@ -149,6 +164,16 @@ impl Packs {
     fn read(&self, name: &str) -> Result<Vec<u8>> {
         let (store, alias) = self.pick(name);
         store.read(alias.as_deref().unwrap_or(name))
+    }
+
+    /// [`Chain::read`]'s container half: the bundled addons answer a name no container holds.
+    fn read_or_bundled(&self, name: &str) -> Result<Vec<u8>> {
+        if !self.contains(name) {
+            if let Some(bytes) = crate::bundled_addons::read(name) {
+                return Ok(bytes);
+            }
+        }
+        self.read(name)
     }
 
     /// The base container, and the origin's HD layer over it when `hd_models` asks; a layer that
@@ -400,6 +425,14 @@ impl Chain {
         self.packs.is_some()
     }
 
+    /// fork: desktop — a handle that reads this chain's container with no lock held: a caller
+    /// holding the chain behind a lock takes it under the lock and reads after releasing it, as
+    /// [`Self::archive_for`] hands out an archive, so a pack's download never holds the lock.
+    /// `None` for an MPQ chain. No I/O.
+    pub fn packed_reader(&self) -> Option<PackedReader> {
+        self.packs.clone().map(PackedReader)
+    }
+
     /// Whether the updated character models are mounted over this chain's container.
     pub fn hd_character_models(&self) -> bool {
         self.packs.as_ref().is_some_and(|p| p.hd.is_some())
@@ -424,12 +457,7 @@ impl Chain {
     /// Read a file by internal path (`/` or `\`) from its winning archive.
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
         if let Some(packs) = &self.packs {
-            if !packs.contains(name) {
-                if let Some(bytes) = crate::bundled_addons::read(name) {
-                    return Ok(bytes);
-                }
-            }
-            return packs.read(name);
+            return packs.read_or_bundled(name);
         }
         if self.resolve(name).is_none() {
             if let Some(bytes) = crate::bundled_addons::read(name) {
@@ -535,6 +563,15 @@ impl Chain {
         if let Some(packs) = &self.packs {
             let (store, alias) = packs.pick(name);
             store.prefetch(alias.as_deref().unwrap_or(name));
+        }
+    }
+
+    /// fork: desktop — [`Self::prefetch`] ahead of everything queued: something on screen now
+    /// waits on `name`. A plain prefetch where nothing is fetched.
+    pub fn prefetch_first(&self, name: &str) {
+        if let Some(packs) = &self.packs {
+            let (store, alias) = packs.pick(name);
+            store.prefetch_first(alias.as_deref().unwrap_or(name));
         }
     }
 
@@ -882,6 +919,11 @@ impl Chain {
         let mounts = Mounts::now();
         let (store, alias) = self.pick(name, &mounts);
         store.prefetch(alias.as_deref().unwrap_or(name));
+    }
+
+    /// fork: desktop — the native chain's head-of-queue prefetch; here a plain [`Self::prefetch`].
+    pub fn prefetch_first(&self, name: &str) {
+        self.prefetch(name);
     }
 
     /// [`Chain::read`] for a caller that can await — the Bevy `AssetReader`

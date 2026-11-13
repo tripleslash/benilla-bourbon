@@ -12,6 +12,8 @@ use benilla_dbc::{DbcParser, FieldType, Schema, SchemaField};
 pub use benilla_blp::{full_mip_count, BlpTexels};
 
 mod chain;
+#[cfg(not(target_arch = "wasm32"))]
+pub use chain::PackedReader;
 pub use chain::{Chain, ChainEntry, StoredBlob, TryRead};
 /// The optional content layers a chain may carry — today the updated character models. Paired with
 /// [`Chain`]: this says *whether*, that mounts it.

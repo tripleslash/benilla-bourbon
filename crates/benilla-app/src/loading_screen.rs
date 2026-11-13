@@ -52,6 +52,21 @@ const FILL_BOTTOM: f32 = 0.0625; // 0.075 − 0.025·0.5
 const FILL_HEIGHT: f32 = 0.025;
 const FILL_MAX_WIDTH: f32 = 0.525; // halfW; fill width = progress · FILL_MAX_WIDTH
 
+/// fork: desktop — the bar's share a world entry gives the world-entry pack download when that
+/// download is still under way at the raise ([`LoadingScreen::arm_download`]): the first half of
+/// the bar is the download, the second the world's own load.
+const DOWNLOAD_SHARE: f32 = 0.5;
+
+/// fork: desktop — `(bytes landed, bytes in the set)` of the world-entry packs a client with no
+/// install downloads ([`benilla_formats::remote::world_entry_progress`]); `None` reading an install
+/// and on the page, whose own boot script shows that prefetch.
+fn world_entry_download() -> Option<(u64, u64)> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return benilla_formats::remote::world_entry_progress();
+    #[cfg(target_arch = "wasm32")]
+    return None;
+}
+
 /// The factor `0x41ad10` applies to the display aspect (`0x8012cc`): the picture is authored 4:3, so
 /// `a = 0.75 · width/height` is 1.0 at 4:3 and the fit below turns on it.
 const ASPECT_TO_FIT: f32 = 0.75;
@@ -232,6 +247,12 @@ pub(crate) struct LoadingScreen {
     ready_frames: u32,
     /// Bar fill, 0..1, monotonic within a load: the raw residency ratio dips as the view moves.
     displayed: f32,
+    /// fork: desktop — the bar's share the world-entry download takes this load, 0 when nothing
+    /// was downloading at the raise ([`Self::arm_download`]).
+    download_weight: f32,
+    /// fork: desktop — the download's bytes landed at the raise, so its share of the bar runs over
+    /// what was still to come.
+    download_from: u64,
     /// Decoded backdrop art by BLP path.
     art_cache: HashMap<String, Handle<Image>>,
     /// Which tip the next raise carries, taken by [`crate::game_tip::drive_game_tip`].
@@ -317,11 +338,46 @@ impl LoadingScreen {
         self.map = map;
         self.ready_frames = 0;
         self.displayed = 0.0; // restart the fill for the new load
+        self.download_weight = 0.0;
         self.active_since = now;
         self.last_wait_log = now;
         // `0x406808`: every raise hides the layers below again.
         self.see_through = false;
         info!("loading screen: up ({reason}, map {map:?})");
+    }
+
+    /// fork: desktop — a world entry raised while the world-entry packs are still downloading
+    /// (`progress`, [`world_entry_download`]): the bar's first [`DOWNLOAD_SHARE`] is the bytes
+    /// still to come, so the player sees the download move rather than a bar parked at zero.
+    fn arm_download(&mut self, progress: Option<(u64, u64)>) {
+        self.download_weight = 0.0;
+        if let Some((done, total)) = progress.filter(|(done, total)| done < total) {
+            self.download_from = done;
+            self.download_weight = DOWNLOAD_SHARE;
+            info!(
+                "loading screen: world data still downloading — {:.1}/{:.1} MB",
+                done as f64 / 1e6,
+                total as f64 / 1e6
+            );
+        }
+    }
+
+    /// The bar's target: the download's share by the bytes landed since the raise, the rest by
+    /// `world` (the world's own load, 0..1). An entry with nothing to download is `world` alone.
+    fn bar_fraction(&self, progress: Option<(u64, u64)>, world: f32) -> f32 {
+        let w = self.download_weight;
+        if w == 0.0 {
+            return world;
+        }
+        let download = match progress {
+            Some((done, total)) if total > self.download_from => {
+                (done.saturating_sub(self.download_from) as f32
+                    / (total - self.download_from) as f32)
+                    .clamp(0.0, 1.0)
+            }
+            _ => 1.0,
+        };
+        w * download + (1.0 - w) * world
     }
 
     /// The destination snap (`SMSG_NEW_WORLD` or `SMSG_LOGIN_VERIFY_WORLD`) landed: it ends the
@@ -738,6 +794,11 @@ fn drive_loading_screen(
         let map = roster.as_ref().and_then(|r| r.pending_map());
         screen.raise("world entry", true, map, now);
         screen.entry_snap = true;
+        // fork: desktop — what the world's first frames read is the set still downloading: it
+        // goes to the head of the queue, and the bar shows it.
+        #[cfg(not(target_arch = "wasm32"))]
+        benilla_formats::remote::promote_world_entry();
+        screen.arm_download(world_entry_download());
         // The tip rides this edge alone: the reference's setter `0x406630` has one caller, in
         // `CGlueMgr::EnterWorld`, which neither `SMSG_TRANSFER_PENDING` arm reaches.
         screen.tip_edge = Some(TipEdge::Pick);
@@ -918,7 +979,7 @@ fn drive_loading_screen(
                 info!(
                     "loading screen: waiting {:.1}s — {}/{} resident, {} placements pending, \
                      {} colliders pending, {} merges pending, awaiting_snap={}, \
-                     awaiting_arrival={}, settling={}, warm={}, ui_pending={}",
+                     awaiting_arrival={}, settling={}, warm={}, ui_pending={}, bar={:.2}",
                     now - screen.active_since,
                     progress.ready,
                     progress.total,
@@ -930,6 +991,7 @@ fn drive_loading_screen(
                     player_settling,
                     warm.satisfied(),
                     entry_ui_pending.is_some(),
+                    screen.displayed,
                 );
             }
         }
@@ -986,6 +1048,20 @@ fn drive_loading_screen(
                 .loading_screen_id(map_id)
                 .and_then(|id| screens.0.path(id))
                 .map(str::to_string);
+            // fork: desktop — art whose pack is still downloading is waited for, black, a frame at
+            // a time, at the head of the queue: fetching it on this thread froze the window.
+            let downloading = path.as_deref().is_some_and(|path| {
+                if screen.art_cache.contains_key(path) {
+                    return false;
+                }
+                let chain = assets.chain.lock_recover();
+                let ready = chain.ready(path);
+                if !ready {
+                    chain.prefetch_first(path);
+                }
+                !ready
+            });
+            let path = path.filter(|_| !downloading);
             let handle = path.and_then(|path| match screen.art_cache.get(&path) {
                 Some(h) => Some(h.clone()),
                 // `ResolveLoadingArt` opens the art with file flag 0 (`0x406eba`, `0x406ef1`).
@@ -999,6 +1075,7 @@ fn drive_loading_screen(
                     }),
             });
             match (handle, backdrop.single_mut()) {
+                _ if downloading => {}
                 (Some(handle), Ok((mut img, _))) => {
                     img.image = handle;
                     img.color = Color::WHITE; // untint to reveal the art
@@ -1014,16 +1091,22 @@ fn drive_loading_screen(
         }
     }
 
-    // --- Progress bar: zero until the snap lands (residency is still the old place's). ---
-    if !screen.awaiting_snap {
+    // --- Progress bar: the world's share zero until the snap lands (residency is still the old
+    // place's); a world entry's download share moves from the raise. ---
+    {
         // The sliced in-game UI load is part of what the screen waits for (its clear condition
         // above), so it is part of what the bar shows: while it is pending, residency fills the
         // first 80 % and the load's own steps the last 20 %; once it is gone, residency alone —
         // and the monotonic max below keeps that hand-over from ever moving the bar backwards.
-        let fraction = match entry_ui_pending.as_deref() {
-            Some(ui) => 0.8 * progress.fraction() + 0.2 * ui.fraction(),
-            None => progress.fraction(),
+        let world = if screen.awaiting_snap {
+            0.0
+        } else {
+            match entry_ui_pending.as_deref() {
+                Some(ui) => 0.8 * progress.fraction() + 0.2 * ui.fraction(),
+                None => progress.fraction(),
+            }
         };
+        let fraction = screen.bar_fraction(world_entry_download(), world);
         screen.displayed = screen.displayed.max(fraction);
     }
     let frac = screen.displayed;
@@ -1035,6 +1118,32 @@ fn drive_loading_screen(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// fork: desktop — one bar for a world entry that is still downloading: the download's share
+    /// runs over the bytes outstanding at the raise, then the world's own load fills the rest; an
+    /// entry with nothing to download is the world's load alone.
+    #[test]
+    fn a_downloading_entry_fills_one_bar_download_then_world() {
+        let mut screen = LoadingScreen::default();
+        screen.arm_download(Some((40, 140)));
+        assert_eq!(screen.download_weight, DOWNLOAD_SHARE);
+        assert_eq!(screen.bar_fraction(Some((40, 140)), 0.0), 0.0);
+        assert_eq!(screen.bar_fraction(Some((90, 140)), 0.0), 0.25);
+        assert_eq!(screen.bar_fraction(Some((140, 140)), 0.0), 0.5);
+        assert_eq!(screen.bar_fraction(Some((140, 140)), 1.0), 1.0);
+        // The world can run ahead of the download; both shares add.
+        assert_eq!(screen.bar_fraction(Some((90, 140)), 0.5), 0.5);
+
+        // Nothing outstanding, or no origin at all: the bar is the world's load, as before.
+        screen.arm_download(Some((140, 140)));
+        assert_eq!(screen.bar_fraction(Some((140, 140)), 0.3), 0.3);
+        screen.arm_download(None);
+        assert_eq!(screen.bar_fraction(None, 0.3), 0.3);
+        // Every raise starts without a download share; only the world entry arms one.
+        screen.arm_download(Some((0, 10)));
+        screen.raise("worldport", false, None, 0.0);
+        assert_eq!(screen.bar_fraction(Some((0, 10)), 0.3), 0.3);
+    }
 
     /// A backdrop decoded under one flavor's chain is not the other's: the chain change drops it.
     #[test]
