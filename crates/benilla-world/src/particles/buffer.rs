@@ -39,6 +39,11 @@ pub enum EffectBlend {
     Multiply,
     /// `2·src·dst` as `(Dst, Src)`: rain's state.
     Mod2x,
+    /// fork: modern weather — `add + mul·dst` as `(One, SrcAlpha)`: a modern frame's rain, part of
+    /// Mod2x's multiply plus the streak lit at the air's level, so a drop over dark ground still
+    /// shows (`wow_effect.wesl`, `BLEND_RAIN_LIGHT`). An 8-bit target, which clamps `mul` to 1,
+    /// draws it as [`EffectBlend::Mod2x`].
+    RainLight,
 }
 
 impl From<ParticleBlend> for EffectBlend {

@@ -18,6 +18,7 @@ use benilla_formats::Atmosphere;
 use bevy::prelude::*;
 
 use crate::lighting::{LightingConsumeSet, WowLighting};
+use crate::particles::buffer::EffectBlend;
 use crate::weather::{WeatherKind, WeatherState};
 
 use super::volumetrics::media;
@@ -112,6 +113,18 @@ pub fn streak_near() -> f32 {
         STREAK_NEAR_YD
     } else {
         0.0
+    }
+}
+
+/// fork: **rain reads over dark ground.** The reference draws streaks and splashes as Mod2x,
+/// `2·src·dst`: a streak's mark scales with what is behind it, so it glares over a bright sky and
+/// vanishes over a dark trunk. A modern frame draws them as [`EffectBlend::RainLight`], most of
+/// that multiply plus the drop lit at a share of the air's brightness; a classic one keeps Mod2x.
+pub fn rain_blend() -> EffectBlend {
+    if super::frame_is_modern() {
+        EffectBlend::RainLight
+    } else {
+        EffectBlend::Mod2x
     }
 }
 

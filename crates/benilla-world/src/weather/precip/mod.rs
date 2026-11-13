@@ -500,19 +500,21 @@ fn push_precip(
         // fall slowly enough for the camera's reprojection.
         motion: crate::particles::buffer::EffectMotion::Static,
     };
+    // fork: modern weather — a modern frame lights the drops over dark ground.
+    let rain_blend = crate::modern::weather::rain_blend();
     let start = quads.begin_points();
     push_streaks(&mut quads.points, &precip.rain.drops);
     quads.commit_points(
         start,
         streak_shape(wind.tilt, crate::modern::weather::streak_near()),
-        spec(&assets.streak, EffectBlend::Mod2x, EffectFog::Rain),
+        spec(&assets.streak, rain_blend, EffectFog::Rain),
     );
     let start = quads.begin_points();
     push_patters(&mut quads.points, &precip.rain.patters);
     quads.commit_points(
         start,
         PATTER_SHAPE,
-        spec(&assets.splash, EffectBlend::Mod2x, EffectFog::Rain),
+        spec(&assets.splash, rain_blend, EffectFog::Rain),
     );
     // The live viewport only gates whether this camera draws: flakes are sized in era pixels.
     if camera.physical_viewport_size().is_some_and(|vp| vp.y > 0) {

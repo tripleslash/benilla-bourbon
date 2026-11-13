@@ -10,6 +10,8 @@
 // - BLEND_MULTIPLY: (rgb·α, α) under (Dst, 1−srcα) = `dst·lerp(1, rgb, α)`, the blob shadow's
 //   modulate-with-fade and ModelBlend::Mod at α = 1.
 // - BLEND_MOD2X:    (rgb, 1) under (Dst, Src) = `2·src·dst`, rain's state; reads no alpha.
+// - BLEND_RAIN_LIGHT: fork: modern weather — (add, mul) under (One, SrcAlpha) = `add + mul·dst`,
+//   a modern frame's rain: part multiply, part light (float targets keep `mul` above 1).
 
 // fork: modern lighting (FORK.md)
 import benilla_world::shaders::modern::color as colorspace;
@@ -86,6 +88,15 @@ struct ParticlePool {
 
 // The rain pass's forced fog colour: 0x80808080 → grey (render-state 0x0d).
 const RAIN_FOG_GREY: vec3<f32> = vec3<f32>(0.50196078, 0.50196078, 0.50196078);
+
+// fork: modern weather — BLEND_RAIN_LIGHT (`EffectBlend::RainLight`): a streak changes the pixel by
+// `excess·(MUL·dst + ADD·air)`, where Mod2x's `excess·dst` vanishes over dark ground and glares
+// over bright sky. MUL keeps most of the reference's multiply; ADD lights the drop at a share of
+// the air's brightness, so a streak over a dark trunk reads about as plainly as one over the sky.
+const RAIN_LIGHT_MUL: f32 = 0.8;
+const RAIN_LIGHT_ADD: f32 = 0.15;
+// Rec. 709 luma weights (linear).
+const LUMA: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
 
 @if(EFFECT_POINTS) {
 // fork: perf — a point draw: one instance a point, its corner picked by vertex index
@@ -439,6 +450,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 @if(BLEND_MOD2X) {
         rgb = rgb * 2.295;
 }
+@if(BLEND_RAIN_LIGHT) {
+        rgb = rgb * 2.295;
+}
         // P4: the per-vertex froxel fog, by the draw's fog policy — scene, black (fade out), white and the
         // rain grey (the Mod/Mod2x identities).
         if (wow_light.fog_color.w > 0.5 && wow_params.fog.x > 0.5) {
@@ -470,7 +484,23 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 @if(BLEND_MOD2X) {
     return vec4<f32>(rgb, 1.0);
 } @else {
+@if(BLEND_RAIN_LIGHT) {
+    // `2·rgb` is the multiply Mod2x would apply; its excess over 1 is the streak.
+    let excess = 2.0 * rgb - vec3<f32>(1.0);
+    if (wow_light.point_count.y < 0.5) {
+        // A classic frame never asks for this state; if one does, it gets Mod2x on the streak's luma.
+        return vec4<f32>(vec3<f32>(0.0), 1.0 + dot(excess, LUMA));
+    }
+    // A share of the multiply, plus the streak lit at the air's own level: the decoded fog colour,
+    // in the scene's units before the post exposure.
+    let air = colorspace::srgb_to_linear(wow_light.fog_color.xyz);
+    return vec4<f32>(
+        RAIN_LIGHT_ADD * max(excess, vec3<f32>(0.0)) * air,
+        1.0 + RAIN_LIGHT_MUL * dot(excess, LUMA),
+    );
+} @else {
     return vec4<f32>(rgb, c.a);
+}
 }
 }
 }

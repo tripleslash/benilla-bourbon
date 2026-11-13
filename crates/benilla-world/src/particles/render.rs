@@ -420,7 +420,12 @@ impl SpecializedRenderPipeline for EffectPipeline {
                 ],
             )
         };
-        let (blend, depth_write, blend_def) = match key.blend {
+        let blend = match key.blend {
+            // `mul` exceeds 1, which an 8-bit target clamps.
+            EffectBlend::RainLight if !key.hdr => EffectBlend::Mod2x,
+            blend => blend,
+        };
+        let (blend, depth_write, blend_def) = match blend {
             EffectBlend::Add => (
                 Some(BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                 false,
@@ -457,6 +462,22 @@ impl SpecializedRenderPipeline for EffectPipeline {
                 }),
                 false,
                 "BLEND_MOD2X",
+            ),
+            EffectBlend::RainLight => (
+                Some(BlendState {
+                    color: BlendComponent {
+                        src_factor: BlendFactor::One,
+                        dst_factor: BlendFactor::SrcAlpha,
+                        operation: BlendOperation::Add,
+                    },
+                    alpha: BlendComponent {
+                        src_factor: BlendFactor::Zero,
+                        dst_factor: BlendFactor::One,
+                        operation: BlendOperation::Add,
+                    },
+                }),
+                false,
+                "BLEND_RAIN_LIGHT",
             ),
         };
         let mut shader_defs = vec![blend_def.into()];
@@ -678,6 +699,18 @@ fn queue_effects(
                         ..key
                     },
                 );
+                // fork: modern weather — and a modern frame's rain state beside Mod2x.
+                if key.blend == EffectBlend::Mod2x {
+                    pipelines.specialize(
+                        &pipeline_cache,
+                        &effect_pipeline,
+                        EffectPipelineKey {
+                            points: true,
+                            blend: EffectBlend::RainLight,
+                            ..key
+                        },
+                    );
+                }
             }
             // The material path's metric: the sort point's view z plus the rung. Bevy's
             // `recalculate_sort_keys` recomputes `distance` from `sorting_info` before the sort.

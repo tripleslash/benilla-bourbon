@@ -205,6 +205,17 @@ mod tests {
         bevy::shader::ShaderCache<naga::Module, ()>,
         AssetId<bevy::shader::Shader>,
     ) {
+        embedded_cache(libraries, "benilla_assets/shaders/liquid_cata.wesl")
+    }
+
+    /// A `ShaderCache` over `libraries`, and the id in it of the embedded shader at `path`.
+    fn embedded_cache(
+        libraries: Libraries,
+        path: &str,
+    ) -> (
+        bevy::shader::ShaderCache<naga::Module, ()>,
+        AssetId<bevy::shader::Shader>,
+    ) {
         use bevy::shader::{Shader, ShaderCache};
         let app = crate::game_plugins::schedule_tests::headless_client_unrun();
         let server = app.world().resource::<AssetServer>();
@@ -218,12 +229,12 @@ mod tests {
 
         let mut cache: ShaderCache<naga::Module, ()> = ShaderCache::new((), naga_module);
         // The world's plugins embed the material's shader with the libraries it imports.
-        let water = files
+        let target = files
             .iter()
-            .position(|(path, _)| path == "benilla_assets/shaders/liquid_cata.wesl")
-            .expect("liquid_cata.wesl is embedded");
-        let water = AssetId::<Shader>::Uuid {
-            uuid: bevy::asset::uuid::Uuid::from_u128(water as u128 + 1),
+            .position(|(p, _)| p == path)
+            .unwrap_or_else(|| panic!("{path} is embedded"));
+        let target = AssetId::<Shader>::Uuid {
+            uuid: bevy::asset::uuid::Uuid::from_u128(target as u128 + 1),
         };
         for (i, (path, text)) in files.into_iter().enumerate() {
             let id = AssetId::<Shader>::Uuid {
@@ -231,7 +242,7 @@ mod tests {
             };
             cache.set_shader(id, shader_of(text, &path));
         }
-        (cache, water)
+        (cache, target)
     }
 
     /// The material pipeline's defs for the cata water over a liquid mesh's vertex layout: plain,
@@ -327,6 +338,31 @@ mod tests {
             .unwrap_or_else(|e| {
                 panic!("colors {colors}: liquid_cata.wesl does not validate on the web: {e:?}")
             });
+        }
+    }
+
+    /// fork: modern weather — the effect lane's rain point draws (`benilla_world`'s
+    /// `wow_effect.wesl`), as `EffectPipeline::specialize` builds them: `EFFECT_POINTS` under the
+    /// reference's `BLEND_MOD2X` and a modern frame's `BLEND_RAIN_LIGHT`, over this platform's
+    /// libraries and the browser's.
+    #[test]
+    fn the_rain_point_draws_compose() {
+        use bevy::shader::ShaderDefVal;
+        for libraries in [Libraries::Here, Libraries::Web] {
+            let (mut cache, effect) =
+                embedded_cache(libraries, "benilla_world/shaders/wow_effect.wesl");
+            for blend in ["BLEND_MOD2X", "BLEND_RAIN_LIGHT"] {
+                let defs: Vec<ShaderDefVal> = vec![blend.into(), "EFFECT_POINTS".into()];
+                let module = cache
+                    .get(0, effect, &defs)
+                    .unwrap_or_else(|e| panic!("{blend}: wow_effect.wesl does not compose: {e:?}"));
+                naga::valid::Validator::new(
+                    naga::valid::ValidationFlags::all(),
+                    naga::valid::Capabilities::default(),
+                )
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{blend}: wow_effect.wesl does not validate: {e:?}"));
+            }
         }
     }
 

@@ -992,7 +992,10 @@ pub(super) fn prepare_effect_velocity(
     });
     let mut draws = Vec::new();
     for merged in meta.merged_for(main) {
-        if matches!(merged.blend, EffectBlend::Multiply | EffectBlend::Mod2x) {
+        if matches!(
+            merged.blend,
+            EffectBlend::Multiply | EffectBlend::Mod2x | EffectBlend::RainLight
+        ) {
             continue;
         }
         // fork: perf — a GPU-expanded pool has no vertices here; it exists only while no camera
