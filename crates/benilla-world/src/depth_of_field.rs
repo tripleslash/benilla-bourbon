@@ -11,8 +11,8 @@
 //!
 //! The chain runs on the world camera only, at render resolution, between the main pass and the
 //! upscaler, and draws its composite over the resolved main texture with an alpha blend, so the
-//! main texture stays the main texture. Off (the `depthOfField` CVar, "0" by default) it runs
-//! nothing and the frame is the frame a build without it renders.
+//! main texture stays the main texture. Off (the `depthOfField` CVar at "0"; "1" by default) it
+//! runs nothing and the frame is the frame a build without it renders.
 
 use bevy::core_pipeline::{Core3d, Core3dSystems, FullscreenShader};
 use bevy::prelude::*;
@@ -35,16 +35,16 @@ use bevy::shader::ShaderDefVal;
 
 use crate::view::WorldCamera;
 
-/// The `depthOfField` CVar: the far-field blur on or off. Off by default, as 1.12 has none.
+/// The `depthOfField` CVar: the far-field blur on or off. On by default (asked); 1.12 has none.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, ExtractResource)]
 #[extract_app(bevy::render::RenderApp)]
 pub struct DepthOfField(pub bool);
 
 impl Default for DepthOfField {
-    /// `$WOW_DOF` (`1`/`0`) overrides the shipped off, session-only: the A/B lever, and the way
-    /// `benilla-worldview`, which has no CVar host, turns it on.
+    /// `$WOW_DOF` (`1`/`0`) overrides the shipped on, session-only: the A/B lever, and the way
+    /// `benilla-worldview`, which has no CVar host, turns it off.
     fn default() -> Self {
-        Self(crate::launch_env::var("WOW_DOF").is_some_and(|v| v.trim() == "1"))
+        Self(crate::launch_env::var("WOW_DOF").is_none_or(|v| v.trim() != "0"))
     }
 }
 
@@ -473,11 +473,11 @@ impl Plugin for DepthOfFieldPlugin {
 mod tests {
     use super::*;
 
-    /// Off out of the box: 1.12 has no depth of field.
+    /// On out of the box (asked), though 1.12 has no depth of field.
     #[test]
-    fn the_blur_ships_off() {
+    fn the_blur_ships_on() {
         if crate::launch_env::var("WOW_DOF").is_none() {
-            assert!(!DepthOfField::default().0);
+            assert!(DepthOfField::default().0);
         }
     }
 
