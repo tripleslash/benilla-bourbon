@@ -234,6 +234,44 @@ pub fn froxel_tier(quality: LightingQuality) -> FroxelTier {
     }
 }
 
+/// fork: **the near froxels are fine and even.** The slices were quadratic in depth (`range * s^2`):
+/// on the 96-slice grid 2.3 yd deep at 20 yd and 4.5 at 75, so the air the player stands in was cut
+/// coarsely along the view and its banks and shafts crawled as the camera moved. The first
+/// [`FINE_SHARE`] of the slices now lie evenly over the first [`FINE_YD`] (0.83 yd each on 96), and
+/// past it they grow exponentially, with no kink, to the range: 1.3 yd at 30, 3.6 at 75, about 30 at
+/// 600 (asked: very detailed and steady to 20 yd, and finer than before out to 75). The froxel count
+/// is unchanged; the far slices pay for it.
+const FINE_YD: f32 = 20.0;
+const FINE_SHARE: f32 = 0.25;
+
+/// The slice layout of a grid reaching `range` (planar yd), as `froxelfog.wesl`'s `depth_of_slice`
+/// reads it: x = the fine segment's depth, y = its share of the slices, z = the tail's scale `a` (yd),
+/// w = its rate `b`. Over slice coordinate `s` in [0, 1] the depth is `x * s / y` up to `y`, then
+/// `x + a * (exp(b * (s - y)) - 1)`, with `a * b = x / y` (one slope across the seam) and the tail
+/// ending at `range`. A range too short for a tail to grow is one even segment.
+pub fn slice_curve(range: f32) -> Vec4 {
+    let fine = FINE_YD.min(0.5 * range);
+    let slope = fine / FINE_SHARE;
+    let tail = 1.0 - FINE_SHARE;
+    let reach = range - fine;
+    // The tail's depth at rate `b` with the seam's slope: rising in `b` from `slope * tail`.
+    let depth = |b: f32| slope / b * (b * tail).exp_m1();
+    let (mut lo, mut hi) = (1e-3_f32, 32.0_f32);
+    if depth(lo) >= reach {
+        return Vec4::new(range, 1.0, 1.0, 1.0);
+    }
+    for _ in 0..64 {
+        let mid = 0.5 * (lo + hi);
+        if depth(mid) < reach {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let rate = 0.5 * (lo + hi);
+    Vec4::new(fine, FINE_SHARE, slope / rate, rate)
+}
+
 /// The CPU mirror of `froxelfog.wesl`'s `FroxelFog` (field order and meaning documented there).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FroxelFog {
@@ -276,9 +314,9 @@ pub struct FroxelFog {
     pub ambient_open: Vec4,
     /// fork: [`Self::ambient_open`] for the room's air; w free.
     pub room_open: Vec4,
-    /// Free: keeps [`FOG_BYTES`] at the size that puts the block's later sections on 256-byte offsets
-    /// (`lights::node::LIGHT_OFFSET`).
-    pub pad: Vec4,
+    /// fork: the slices' layout ([`slice_curve`]). Also keeps [`FOG_BYTES`] at the size that puts the
+    /// block's later sections on 256-byte offsets (`lights::node::LIGHT_OFFSET`).
+    pub slices: Vec4,
 }
 
 impl FroxelFog {
@@ -317,7 +355,7 @@ impl FroxelFog {
             self.light_ambient,
             self.ambient_open,
             self.room_open,
-            self.pad,
+            self.slices,
         ] {
             out.extend_from_slice(bytemuck::cast_slice(&v.to_array()));
         }
@@ -477,8 +515,9 @@ fn arm_fog_depth(active: Res<ActiveLighting>, mut cams: Query<&mut Camera3d, Wit
 struct VolumeHistory {
     prev_clip: Option<Mat4>,
     prev_camera: Vec3,
-    prev_forward: Vec3,
     prev_grid: UVec3,
+    /// The far plane the history was laid out over ([`slice_curve`]).
+    prev_range: f32,
     frame: u32,
     reference_height: Option<f32>,
     /// The ground under the camera the night's banks lie on, eased like the reference.
@@ -548,7 +587,6 @@ fn update_volume(
     let clip_from_view = projection.get_clip_from_view();
     let clip_from_world = clip_from_view * view_from_world;
     let cam = camera.translation();
-    let forward = camera.forward().as_vec3();
     let to_light = (-l.sun_dir).normalize_or(Vec3::Y);
 
     // **The open air and the room, solved apart.** The scene's fog is the air outside; the
@@ -691,12 +729,15 @@ fn update_volume(
     }
 
     let grid = tier.grid;
-    // A hard cut (no history, a new grid, a jump) drops the whole volume's history. A quick turn only
-    // the near froxels': far air reprojects exactly under a rotation, and what the turn brings on screen
-    // fails the reprojection's bounds test anyway (`froxel_scatter.wesl`'s depth ramp).
-    let cut =
-        hist.prev_clip.is_none() || hist.prev_grid != grid || hist.prev_camera.distance(cam) > 12.0;
-    let turned = hist.prev_forward.dot(forward) < 0.9;
+    // A hard cut (no history, a new grid or slice layout, a jump) drops the whole volume's history.
+    // fork: a quick turn keeps it, near froxels too: the air is still in the world and the volume has
+    // no occlusion, so every froxel the last frame held reprojects exactly under a turn or an orbit, and
+    // what the turn brings on screen fails the reprojection's bounds test anyway. Dropped, the near
+    // froxels showed one frame's jittered sample on every flick of the camera.
+    let cut = hist.prev_clip.is_none()
+        || hist.prev_grid != grid
+        || hist.prev_range != tier.range
+        || hist.prev_camera.distance(cam) > 12.0;
     let prev_clip = hist.prev_clip.unwrap_or(clip_from_world);
     hist.frame = hist.frame.wrapping_add(1);
     let jitter = halton(hist.frame % 16 + 1, 2);
@@ -740,12 +781,7 @@ fn update_volume(
             media.noise,
             // fork: the zone look's ground-bank billow share (`froxel_scatter.wesl`'s `ground_banks`).
             look.0.bank_billow.max(0.0),
-            // Negative on a quick turn: the shader drops only the near froxels' history.
-            match (cut, turned) {
-                (true, _) => 0.0,
-                (false, true) => -HISTORY_WEIGHT,
-                (false, false) => HISTORY_WEIGHT,
-            },
+            if cut { 0.0 } else { HISTORY_WEIGHT },
         ),
         ambient: Vec3::from(media.ambient_in).extend(0.0),
         sun: Vec3::from(media.key_in).extend(media.forward_share),
@@ -820,12 +856,12 @@ fn update_volume(
             .map(open_in)
             .unwrap_or_default()
             .extend(0.0),
-        pad: Vec4::ZERO,
+        slices: slice_curve(tier.range),
     };
     hist.prev_clip = Some(clip_from_world);
     hist.prev_camera = cam;
-    hist.prev_forward = forward;
     hist.prev_grid = grid;
+    hist.prev_range = tier.range;
 
     out.mode = tier.mode;
     out.grid = grid;
@@ -1171,5 +1207,68 @@ mod tests {
         // A valley keeps its regional reference, and no local height changes nothing.
         assert_eq!(held_to_local_ground(40.0, Some(60.0)), 40.0);
         assert_eq!(held_to_local_ground(543.0, None), 543.0);
+    }
+
+    /// `froxelfog.wesl`'s `depth_of_slice` over a [`slice_curve`].
+    fn depth_of_slice(c: Vec4, s: f32) -> f32 {
+        if s <= c.y {
+            c.x * s / c.y
+        } else {
+            c.x + c.z * (c.w * (s - c.y)).exp_m1()
+        }
+    }
+
+    /// `froxelfog.wesl`'s `slice_of_depth` over a [`slice_curve`].
+    fn slice_of_depth(c: Vec4, d: f32) -> f32 {
+        if d <= c.x {
+            c.y * d / c.x
+        } else {
+            c.y + (1.0 + (d - c.x) / c.z).ln() / c.w
+        }
+    }
+
+    /// Every tier's slices, on both platforms' grids: even to [`FINE_YD`], one slope across the
+    /// seam, rising to the range, read back by the inverse, and thinner than the old quadratic
+    /// layout's from 10 to 75 yd.
+    #[test]
+    fn the_near_slices_are_fine_and_even() {
+        let platforms = [UVec3::new(192, 108, 96), UVec3::new(160, 90, 64)];
+        for quality in [
+            LightingQuality::Low,
+            LightingQuality::Medium,
+            LightingQuality::High,
+            LightingQuality::Ultra,
+            LightingQuality::Cinematic,
+        ] {
+            let tier = froxel_tier(quality);
+            let c = slice_curve(tier.range);
+            assert_eq!(c.x, FINE_YD, "{quality:?}");
+            assert_eq!(depth_of_slice(c, 0.0), 0.0);
+            let end = depth_of_slice(c, 1.0);
+            assert!((end - tier.range).abs() < 0.05, "{quality:?}: ends at {end}");
+            let eps = 1e-3;
+            let below = (depth_of_slice(c, c.y) - depth_of_slice(c, c.y - eps)) / eps;
+            let above = (depth_of_slice(c, c.y + eps) - depth_of_slice(c, c.y)) / eps;
+            assert!((above / below - 1.0).abs() < 0.01, "{quality:?}: {below} / {above}");
+            for alloc in platforms {
+                let n = tier.grid.min(alloc).z;
+                let mut last = 0.0;
+                for k in 1..=n {
+                    let s = k as f32 / n as f32;
+                    let d = depth_of_slice(c, s);
+                    assert!(d > last, "{quality:?} slice {k}");
+                    assert!((slice_of_depth(c, d) - s).abs() < 1e-4, "{quality:?} slice {k}");
+                    let quadratic = 2.0 * (tier.range * d).sqrt() / n as f32;
+                    if (10.0..=75.0).contains(&d) {
+                        assert!(
+                            d - last < quadratic,
+                            "{quality:?} n {n}: {} yd at {d} against {quadratic}",
+                            d - last
+                        );
+                    }
+                    last = d;
+                }
+            }
+        }
     }
 }

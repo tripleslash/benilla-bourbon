@@ -43,16 +43,17 @@ fn shaft_phase(phase: f32) -> f32 {
     return mix(phase, 1.0, SHAFT_ISOTROPIC);
 }
 
-// fork: **the banks thin at the eye.** The first slices are a fraction of a yard deep and jittered
-// every frame, and a camera standing in a bank (the sea fog, the ground banks) saw them swim and band
-// across the whole screen. A bank is clear at the eye and whole `NEAR_CLEAR_YD.y` out (planar yd), so
-// it begins a few yards off and is seen, not stood in. The zone's thin air and a room's own keep
+// fork: **the banks clear around the eye.** A camera standing in a bank (the sea fog, the ground
+// banks) saw it swim and band across the whole screen, and close by it veiled what the player looks
+// at. A bank is whole `BANK_CLEAR_YD` from the eye and thins gradually to nothing at it (asked: from
+// 30 yd; it was whole 10 yd out), by the eye's distance to the froxel's unjittered centre: the same
+// every frame, and a turn of the camera leaves it as it lay. The zone's thin air and a room's own keep
 // their density: neither is dense enough to swim, and a small room's air lies mostly within it.
-const NEAR_CLEAR_YD: vec2<f32> = vec2<f32>(0.5, 10.0);
+const BANK_CLEAR_YD: f32 = 30.0;
 
-// The share of the medium kept at planar depth `d`.
-fn near_clear(d: f32) -> f32 {
-    return smoothstep(NEAR_CLEAR_YD.x, NEAR_CLEAR_YD.y, d);
+// The share of the banks kept `dist` yd from the eye.
+fn near_clear(dist: f32) -> f32 {
+    return smoothstep(0.0, BANK_CLEAR_YD, dist);
 }
 
 // fork: **ground fog.** Overnight (and by day in the dark zones) the air near the ground gathers into
@@ -86,6 +87,36 @@ fn terrain_under(f: froxelfog::FroxelFog, p: vec3<f32>) -> vec2<f32> {
     if (d <= 0.0) {
         return vec2<f32>(-1e9, 0.0);
     }
+    return vec2<f32>(f.ground.y + d * f.ground.z, select(0.0, 1.0, all(raw == uv)));
+}
+
+// fork: **the banks' floor is read smoothly.** The heightfield is 1.5 yd a texel, and read at the
+// nearest texel the floor under a froxel stepped by up to a yard on a slope whenever the froxel slid
+// onto the next texel with the camera: a bank a couple of yards deep popped. `terrain_under`, filtered
+// over the drawn texels around `p`; where the nearest texel is undrawn there is no ground, as there.
+fn terrain_under_smooth(f: froxelfog::FroxelFog, p: vec3<f32>) -> vec2<f32> {
+    let q = vec4<f32>(p, 1.0);
+    let raw = vec2<f32>(dot(f.ground_x, q), dot(f.ground_y, q));
+    let uv = clamp(raw, vec2<f32>(0.0), vec2<f32>(1.0));
+    let n = f.ground.w;
+    let nearest = vec2<i32>(clamp(uv * n, vec2<f32>(0.0), vec2<f32>(n - 1.0)));
+    if (textureLoad(ground_map, nearest, 0) <= 0.0) {
+        return vec2<f32>(-1e9, 0.0);
+    }
+    let t = clamp(uv * n - vec2<f32>(0.5), vec2<f32>(0.0), vec2<f32>(n - 1.0));
+    let lo = vec2<i32>(floor(t));
+    let hi = min(lo + vec2<i32>(1), vec2<i32>(i32(n) - 1));
+    let w = t - floor(t);
+    let h = vec4<f32>(
+        textureLoad(ground_map, lo, 0),
+        textureLoad(ground_map, vec2<i32>(hi.x, lo.y), 0),
+        textureLoad(ground_map, vec2<i32>(lo.x, hi.y), 0),
+        textureLoad(ground_map, hi, 0),
+    );
+    // The nearest texel is one of the four and weighs at least a quarter, so the sum never vanishes.
+    let drawn = select(vec4<f32>(0.0), vec4<f32>(1.0), h > vec4<f32>(0.0));
+    let k = vec4<f32>((1.0 - w.x) * (1.0 - w.y), w.x * (1.0 - w.y), (1.0 - w.x) * w.y, w.x * w.y) * drawn;
+    let d = dot(h, k) / max(dot(k, vec4<f32>(1.0)), 1e-6);
     return vec2<f32>(f.ground.y + d * f.ground.z, select(0.0, 1.0, all(raw == uv)));
 }
 
@@ -279,20 +310,19 @@ fn cell_in_scatter(cell: vec4<u32>, p: vec3<f32>, to_eye: vec3<f32>, room: f32, 
 }
 
 // fork: the history's extinction is held within this share of the froxel's own this frame, its radiance
-// scaled with it. The history is fetched at the nearest texel of its reprojection, which on a quick
-// turn is a neighbour up to half a froxel off; near the eye, where a bank's edge crosses a few froxels,
-// that neighbour's density outweighed the froxel's own nineteen to one and the bank jumped. The density
-// this frame barely jitters (the banks are slice means), so the hold costs the light's averaging nothing.
+// scaled with it. The reprojected history blends in its neighbours wherever the camera moved by part
+// of a froxel; near the eye, where a bank's edge crosses a few froxels, a neighbour's density outweighed
+// the froxel's own nineteen to one and the bank jumped. The density this frame barely jitters (the
+// banks are slice means), so the hold costs the light's averaging nothing.
 const HISTORY_SIGMA_SLACK: f32 = 0.25;
 
-// fork: **the history by depth.** The near froxels keep the tight hold above and drop their history on
-// a quick turn; the far ones are the opposite trade. A far slice is ten yards and more deep and a froxel
-// there many yards across, so the jitter swings its sample through a sea bank's height and billows and
-// its density by far more than the hold's quarter: held, the history followed every swing and the
-// distant banks shimmered. So past `STABLE_NEAR_YD` the hold widens to `FAR_SIGMA_SLACK`, the weight
-// rises to `FAR_HISTORY_WEIGHT` (the jitter's sixteen-frame cycle averaged several times over), and a
-// turn keeps the history, since distant air reprojects exactly under a rotation; at `STABLE_FAR_YD`
-// the froxel is all far.
+// fork: **the history by depth.** The near froxels keep the tight hold above; the far ones are the
+// opposite trade. A far slice is ten yards and more deep and a froxel there many yards across, so the
+// jitter swings its sample through a sea bank's height and billows and its density by far more than
+// the hold's quarter: held, the history followed every swing and the distant banks shimmered. So past
+// `STABLE_NEAR_YD` the hold widens to `FAR_SIGMA_SLACK` and the weight rises to `FAR_HISTORY_WEIGHT`
+// (the jitter's sixteen-frame cycle averaged several times over); at `STABLE_FAR_YD` the froxel is
+// all far.
 const STABLE_NEAR_YD: f32 = 40.0;
 const STABLE_FAR_YD: f32 = 160.0;
 const FAR_SIGMA_SLACK: f32 = 4.0;
@@ -313,6 +343,19 @@ fn froxel_jitter(id: vec3<u32>, frame: f32) -> vec2<f32> {
     return r - vec2<f32>(0.5);
 }
 
+// fork: **each froxel walks its slice on its own.** The depth jitter (`phase.z`) was one phase for the
+// whole volume, so every froxel stepped through its slice together and the air pulsed as one at the
+// sequence's sixteen-frame period: a shaft or a bank breathed. This offset in [0, 1) per froxel keeps
+// each froxel's walk through its slice even over the period, and leaves what is left of the beat as a
+// fine grain the history and the volume's filtering average away.
+fn froxel_phase(id: vec3<u32>) -> f32 {
+    var h = (id.x * 73856093u) ^ (id.y * 19349663u) ^ (id.z * 83492791u);
+    h = (h ^ (h >> 16u)) * 0x7feb352du;
+    h = (h ^ (h >> 15u)) * 0x846ca68bu;
+    h = h ^ (h >> 16u);
+    return f32(h >> 8u) / 16777216.0;
+}
+
 @compute @workgroup_size(4, 4, 4)
 fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     let f = modern_block.fog;
@@ -321,13 +364,14 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let n = f.grid.xyz;
     let uv = (vec2<f32>(id.xy) + vec2<f32>(0.5) + froxel_jitter(id, f.phase.w) * 0.5) / n.xy;
-    let s = (f32(id.z) + f.phase.z) / n.z;
+    let s = (f32(id.z) + fract(f.phase.z + froxel_phase(id))) / n.z;
     let d = max(froxelfog::depth_of_slice(f, s), f.proj.x);
     let p = froxel_point(f, uv, d);
     // fork: the froxel's own stretch of its centre ray, unjittered: the ground banks are its mean.
     let uv_c = (vec2<f32>(id.xy) + vec2<f32>(0.5)) / n.xy;
     let slab_a = froxel_point(f, uv_c, max(froxelfog::depth_of_slice(f, f32(id.z) / n.z), f.proj.x));
     let slab_b = froxel_point(f, uv_c, max(froxelfog::depth_of_slice(f, f32(id.z + 1u) / n.z), f.proj.x));
+    let slab_c = 0.5 * (slab_a + slab_b);
 
     // Extinction: the fog, a height fog, and the shaft haze (amendment A1), both per yard of the view ray.
     let noise = textureSampleLevel(noise_tex, repeat_samp, (p + f.wind.xyz) / NOISE_SCALE, 0.0).r;
@@ -343,11 +387,11 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     // fork: the terrain under the froxel's centre, read for the ground banks only when they lie.
     var terrain = vec2<f32>(-1e9, 0.0);
     if (f.ground.x > 0.5 && f.night.x > 0.0) {
-        terrain = terrain_under(f, 0.5 * (slab_a + slab_b));
+        terrain = terrain_under_smooth(f, slab_c);
     }
-    // fork: the ground banks and the sea fog (outside rooms: a building's air is its own), thinning
-    // toward the eye (`near_clear`).
-    let clear = near_clear(d);
+    // fork: the ground banks and the sea fog (outside rooms: a building's air is its own), clearing
+    // around the eye (`near_clear`).
+    let clear = near_clear(length(slab_c - f.camera.xyz));
     let sigma_bank = ground_banks(f, slab_a, slab_b, terrain, noise) * (1.0 - room) * clear;
     let sigma_sea = sea_fog(f, p, noise) * (1.0 - room) * clear;
     let sigma = sigma_fog + sigma_haze + sigma_night + sigma_bank + sigma_sea;
@@ -372,8 +416,7 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     );
     // Two taps a quarter froxel apart along the view ray: a beam's edge crossing a froxel then reads as
     // a partial value instead of flipping on and off with the per-frame jitter.
-    // Slices are quadratic in depth (d = far * s^2), so a slice is 2 * sqrt(far * d) / n deep.
-    let along = normalize(p - f.camera.xyz) * max(0.5 * sqrt(f.grid.w * d) / n.z, 0.1);
+    let along = normalize(p - f.camera.xyz) * max(0.25 * froxelfog::slice_depth_yd(f, d), 0.1);
 @if(RT_FROXEL) {
     // fork: F — the tap is the cascade tap (the entities, and the static world where the cascades
     // still draw it) times one ray to the sun through the scene. One of the two taps a froxel and
@@ -463,19 +506,15 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
         sigma,
     );
 
-    // History: this froxel's world point in last frame's grid. Clip w is the planar depth. `medium.w` is the
-    // steady weight, 0 on a hard cut and negative on a quick turn; the depth ramp sets this froxel's share.
-    let far_share = smoothstep(
-        STABLE_NEAR_YD,
-        STABLE_FAR_YD,
-        froxelfog::depth_of_slice(f, (f32(id.z) + 0.5) / n.z),
-    );
-    let steady = abs(f.medium.w);
-    let near_weight = select(steady, 0.0, f.medium.w < 0.0);
-    let weight = select(mix(near_weight, max(steady, FAR_HISTORY_WEIGHT), far_share), 0.0, steady <= 0.0);
+    // History: this froxel's centre in last frame's grid. Clip w is the planar depth. `medium.w` is the
+    // steady weight, 0 on a hard cut; the depth ramp sets this froxel's share.
+    let mid_d = max(froxelfog::depth_of_slice(f, (f32(id.z) + 0.5) / n.z), f.proj.x);
+    let far_share = smoothstep(STABLE_NEAR_YD, STABLE_FAR_YD, mid_d);
+    let steady = f.medium.w;
+    let weight = select(mix(steady, max(steady, FAR_HISTORY_WEIGHT), far_share), 0.0, steady <= 0.0);
     let slack = mix(HISTORY_SIGMA_SLACK, FAR_SIGMA_SLACK, far_share);
     if (weight > 0.0) {
-        let prev = f.prev_clip_from_world * vec4<f32>(p, 1.0);
+        let prev = f.prev_clip_from_world * vec4<f32>(froxel_point(f, uv_c, mid_d), 1.0);
         if (prev.w > f.proj.x && prev.w < f.grid.w) {
             let pn = prev.xy / prev.w;
             let puv = vec2<f32>(pn.x * 0.5 + 0.5, 0.5 - pn.y * 0.5);
@@ -486,12 +525,15 @@ fn scatter(@builtin(global_invocation_id) id: vec3<u32>) {
                     half_texel,
                     vec3<f32>(1.0) - half_texel,
                 );
-                // fork: fetched at its texel, not filtered: a history re-sampled trilinearly every frame
-                // is blurred again every frame, so a lamp's glow diffused out of its froxels (the mean
-                // drifted with the history weight) and the jitter's beat survived the blend — the
-                // Darkshire town hall pulsed at the Halton period.
-                let texel = min(vec3<u32>(uvw * n), vec3<u32>(f.grid.xyz) - vec3<u32>(1u));
-                var hist = textureLoad(history_tex, texel, 0);
+                // fork: **the froxel's centre, filtered.** Filtered at the jittered sample's reprojection,
+                // the history was re-blurred every frame, still camera and all: a lamp's glow diffused
+                // out of its froxels and the jitter's beat survived the blend (the Darkshire town hall
+                // pulsed at the Halton period). Fetched at that sample's nearest texel instead, a moving
+                // camera picked one neighbour or the other at random each frame, and the near air
+                // shimmered as the player walked. The unjittered centre lands on its own texel exactly
+                // while the camera holds still, and in motion blends its neighbours by how far the
+                // camera moved, the same every frame.
+                var hist = textureSampleLevel(history_tex, repeat_samp, uvw, 0.0);
                 let held = clamp(hist.a, cur.a * max(1.0 - slack, 0.0), cur.a * (1.0 + slack));
                 if (hist.a > 1e-7) {
                     hist = vec4<f32>(hist.rgb * (held / hist.a), held);

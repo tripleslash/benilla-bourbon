@@ -262,8 +262,9 @@ impl ZoneLook {
         contrast: 1.25,
         // Half the air the look was tuned with (asked in the client): since the air scatters the light
         // that reaches it under one exposure, Brill's 181 yd fog end at the default reach (0.0177/yd)
-        // and this haze at 0.0034 hid the town 60 yd off in a lit green wash.
-        haze: 0.0017,
+        // and this haze at 0.0034 hid the town 60 yd off in a lit green wash. Halved again (asked:
+        // still too hazy at 0.0017).
+        haze: 0.00085,
         fog_reach: 1.0,
         vignette: 0.38,
         // The volume's banks lying faintly over all the ground, lit and shadowed in depth (approved in
@@ -281,10 +282,10 @@ impl ZoneLook {
 
     /// fork: **Tirisfal Glades**, the eerie look tinted greener (asked in the viewer): the sun,
     /// shafts, fog and sky lean further from red and blue toward green, through a thinner haze than
-    /// the eerie look's 0.0017, day and night (asked), keeping the full 1.3 day banks the other dark
-    /// zones thinned (asked).
+    /// the eerie look's, day and night (asked), halved with it from 0.0012 (asked: too hazy),
+    /// keeping the full 1.3 day banks the other dark zones thinned (asked).
     pub const TIRISFAL: Self = Self {
-        haze: 0.0012,
+        haze: 0.0006,
         ground_fog: 1.3,
         glow: [0.58, 1.0, 0.62],
         fog_tint: [0.7, 1.05, 0.7],
@@ -376,10 +377,11 @@ impl ZoneLook {
         // The volume's banks lying faintly over all the ground at every hour, into the sea fog, as the
         // eerie looks' lie (approved in the viewer, `worldview_pose=6405.2,492.5,13.9,4310.7,-8.1`, 18:20),
         // softer, fainter and closer to the ground than theirs (asked: 1.3, at the default height
-        // and billow, stood as lumpy mounds over the shore).
-        ground_fog: 1.1,
-        night_banks: 1.1,
-        bank_height: 0.6,
+        // and billow, stood as lumpy mounds over the shore), then at 60 % and lower still (asked:
+        // 1.1 at 0.6 of the height drew too strong).
+        ground_fog: 0.66,
+        night_banks: 0.66,
+        bank_height: 0.45,
         bank_billow: 0.4,
         // The night's banks whole: ground fog, not the haze's share.
         bank_moon: 1.0,

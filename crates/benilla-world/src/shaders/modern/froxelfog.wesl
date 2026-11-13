@@ -28,7 +28,7 @@ struct FroxelFog {
     media: vec4<f32>,
     // x = shaft haze extinction (1/yd); y = noise amount; z = the ground banks' billow share (the zone
     // look's `bank_billow`, `froxel_scatter::ground_banks`);
-    // w = scatter history weight: 0 on a hard cut, negative on a quick turn (near froxels drop theirs).
+    // w = scatter history weight: 0 on a hard cut.
     medium: vec4<f32>,
     // rgb = the air's ambient in-scatter from the sky above it: albedo x the dome's light (linear),
     // which a canopy hides (the sky map); `ambient_open` the rest. w free.
@@ -83,8 +83,10 @@ struct FroxelFog {
     ambient_open: vec4<f32>,
     // fork: rgb = `ambient_open` for the room's air.
     room_open: vec4<f32>,
-    // Free: keeps the block's later sections on 256-byte offsets (`lights::node::LIGHT_OFFSET`).
-    pad: vec4<f32>,
+    // fork: the slices' layout (`volumetrics::slice_curve`, `depth_of_slice`): x = the fine segment's
+    // depth (yd), y = its share of the slices, z = the tail's scale (yd), w = its rate. Also keeps the
+    // block's later sections on 256-byte offsets (`lights::node::LIGHT_OFFSET`).
+    slices: vec4<f32>,
 }
 
 // fork: **the air a lamp's halo stands in** — `f` with the open air's medium swapped for its
@@ -300,13 +302,43 @@ fn view_depth(f: FroxelFog, p: vec3<f32>) -> f32 {
     return -(dot(f.view_row.xyz, p) + f.view_row.w);
 }
 
-// Slices are quadratic in depth — dense near the eye, where shafts start.
-fn slice_of_depth(f: FroxelFog, d: f32) -> f32 {
-    return sqrt(clamp(d / f.grid.w, 0.0, 1.0));
+// fork: **the near slices are fine and even** (`volumetrics::slice_curve`): the first share
+// `slices.y` of the slices lie evenly to `slices.x` yd, and past it they grow exponentially with no
+// kink to the far plane: the air the player stands in is cut finely along the view. A block with no
+// layout (`slices.y` 0) keeps the old quadratic one.
+fn depth_of_slice(f: FroxelFog, s: f32) -> f32 {
+    let c = f.slices;
+    if (c.y <= 0.0) {
+        return f.grid.w * s * s;
+    }
+    if (s <= c.y) {
+        return c.x * s / c.y;
+    }
+    return c.x + c.z * (exp(c.w * (s - c.y)) - 1.0);
 }
 
-fn depth_of_slice(f: FroxelFog, s: f32) -> f32 {
-    return f.grid.w * s * s;
+fn slice_of_depth(f: FroxelFog, d: f32) -> f32 {
+    let c = f.slices;
+    let x = clamp(d, 0.0, f.grid.w);
+    if (c.y <= 0.0) {
+        return sqrt(x / f.grid.w);
+    }
+    if (x <= c.x) {
+        return c.y * x / c.x;
+    }
+    return min(c.y + log(1.0 + (x - c.x) / c.z) / c.w, 1.0);
+}
+
+// How deep (planar yd) a slice is at planar depth `d`.
+fn slice_depth_yd(f: FroxelFog, d: f32) -> f32 {
+    let c = f.slices;
+    if (c.y <= 0.0) {
+        return 2.0 * sqrt(f.grid.w * max(d, 0.0)) / f.grid.z;
+    }
+    if (d <= c.x) {
+        return c.x / (c.y * f.grid.z);
+    }
+    return (c.z + d - c.x) * c.w / f.grid.z;
 }
 
 // Density scale at height `y`: exponential falloff above the reference height, at most x3 below it.
