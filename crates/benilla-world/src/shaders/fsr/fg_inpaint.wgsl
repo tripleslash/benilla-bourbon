@@ -22,7 +22,7 @@
 
 @group(0) @binding(1) var interp_tex: texture_2d<f32>;
 @group(0) @binding(2) var color_pyramid: texture_2d<f32>;
-@group(0) @binding(3) var output: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(3) var output: texture_storage_2d<FG_IMAGE_FMT, write>;
 
 /// The number of levels the reference's falloff is written against. Kept at the
 /// reference's constant rather than tied to the pyramid's actual height, so the

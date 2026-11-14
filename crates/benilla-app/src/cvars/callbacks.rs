@@ -65,6 +65,8 @@ pub(crate) struct ForkKnobs<'w> {
     reflex: Option<ResMut<'w, benilla_world::dlss::ReflexSetting>>,
     time_offset: Option<ResMut<'w, crate::net::TimeOffset>>,
     hd_models: Option<ResMut<'w, crate::hd_models::HdModelsAsk>>,
+    // fork: native HDR output — `hdrOutput`, `hdrPeakNits` and `hdrMidGreyNits`'s knob.
+    hdr_output: Option<ResMut<'w, benilla_world::hdr_output::HdrOutputSetting>>,
 }
 
 impl CvarCallbacks<'_> {
@@ -168,6 +170,9 @@ impl CvarCallbacks<'_> {
         }
         if let Some(k) = fork.hd_models.as_mut() {
             crate::hd_models::on_cvar(ev, k.reborrow());
+        }
+        if let Some(k) = fork.hdr_output.as_mut() {
+            crate::ui_gamma::hdr_on_cvar(ev, k.reborrow());
         }
         if let Some(k) = self.shadows.as_mut() {
             crate::blob_shadow::on_cvar(ev, k.reborrow());

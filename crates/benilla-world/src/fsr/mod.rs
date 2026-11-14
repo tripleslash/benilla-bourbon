@@ -180,6 +180,9 @@ pub struct FsrShaders {
     /// `disocclusion`, `interpolate`, `color_pyramid_seed`, the colour pyramid's reduce, `inpaint`,
     /// and the present copy.
     pub framegen: [Handle<Shader>; 10],
+    /// fork: native HDR output — `interpolate` and `inpaint` writing float images
+    /// ([`FG_HDR_PASSES`]), queued only once an HDR frame asks for them.
+    pub framegen_hdr: [Handle<Shader>; 2],
     /// Model parts' motion (`velocity.wesl`).
     pub velocity: Handle<Shader>,
     /// The effect lane's motion (`effect_velocity.wesl`).
@@ -274,9 +277,18 @@ pub fn motion_only_source(formats: caps::Formats) -> String {
     source.replace(STORE, "textureStore(mv_out, p, vec4<f32>(mv, 0.0, 0.0));")
 }
 
+/// fork: native HDR output — the passes that write the interpolated image, built a second time to
+/// store it as float for an HDR frame.
+pub const FG_HDR_PASSES: [&str; 2] = ["fg_interpolate", "fg_inpaint"];
+
 /// One frame-generation pass's full source, by its [`FG_PASSES`] name: the frame-generation
 /// prelude, then the pass, every placeholder resolved.
 pub fn fg_pass_source(name: &str, formats: caps::Formats) -> String {
+    fg_pass_source_for(name, formats, false)
+}
+
+/// [`fg_pass_source`], its interpolated image stored as float when `hdr`.
+pub fn fg_pass_source_for(name: &str, formats: caps::Formats, hdr: bool) -> String {
     let (_, pass) = FG_PASSES
         .iter()
         .find(|(n, _)| *n == name)
@@ -289,7 +301,10 @@ pub fn fg_pass_source(name: &str, formats: caps::Formats) -> String {
             "false"
         },
     );
-    formats.preprocess(&format!("{FG_COMMON}\n{pass}"))
+    formats.preprocess(&format!("{FG_COMMON}\n{pass}")).replace(
+        "FG_IMAGE_FMT",
+        if hdr { "rgba16float" } else { "rgba8unorm" },
+    )
 }
 
 /// Advance each FSR camera's jitter by one phase, once per world frame, and put it on the camera
@@ -562,6 +577,12 @@ impl Plugin for FsrPlugin {
                 format!("benilla_fsr/{name}.wgsl"),
             ))
         });
+        let framegen_hdr = FG_HDR_PASSES.map(|name| {
+            shaders.add(Shader::from_wgsl(
+                fg_pass_source_for(name, formats, true),
+                format!("benilla_fsr/{name}_hdr.wgsl"),
+            ))
+        });
         let motion_only = shaders.add(Shader::from_wgsl(
             motion_only_source(formats),
             "benilla_fsr/motion_only.wgsl",
@@ -580,6 +601,7 @@ impl Plugin for FsrPlugin {
             upscaler,
             motion_only,
             framegen,
+            framegen_hdr,
             velocity,
             effect_velocity,
             residual,
@@ -694,6 +716,9 @@ mod tests {
             }
             for (name, _) in FG_PASSES {
                 validate(name, &fg_pass_source(name, formats));
+            }
+            for name in FG_HDR_PASSES {
+                validate(name, &fg_pass_source_for(name, formats, true));
             }
             validate("residual", &pass_source(RESIDUAL, formats));
             validate("motion_only", &motion_only_source(formats));

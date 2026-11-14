@@ -129,6 +129,8 @@ pub mod fsr;
 // fork: dlss (FORK.md)
 pub mod dlss;
 pub mod ground_fx;
+// fork: native HDR output — the scRGB swapchain and how the frame is placed on it.
+pub mod hdr_output;
 pub mod horizon;
 pub mod instance_tint;
 pub mod interact;

@@ -344,6 +344,8 @@ fn plugin(app: &mut App) {
         (wade_probe::auto_spawn_probe, wade_probe::drive_probe),
     );
 
+    // fork: native HDR output — `WOW_HDR=1`, the client's `hdrOutput`, with no login.
+    app.add_systems(Startup, hdr_from_env);
     // fork: fsr (FORK.md) — the FSR mode, when its knobs are set.
     fsr_view::plugin(app);
     // fork: perf — a scripted flight (`WOW_WORLDVIEW_FLY`), when its waypoints are set.
@@ -509,6 +511,36 @@ fn start_pose() -> (Vec3, f32, f32) {
         deg("WOW_WORLDVIEW_FACE"),
         deg("WOW_WORLDVIEW_PITCH"),
     )
+}
+
+/// fork: native HDR output — `WOW_HDR=1` presents in scRGB as the client's `hdrOutput` does, at
+/// `WOW_HDR_PEAK_NITS` (default 1000) and `WOW_HDR_MID_GREY_NITS` (default 37).
+fn hdr_from_env(mut setting: ResMut<crate::hdr_output::HdrOutputSetting>) {
+    let var = |name| crate::launch_env::var(name);
+    let nits = |name, range: std::ops::RangeInclusive<f32>| {
+        var(name)
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite())
+            .map(|v| v.clamp(*range.start(), *range.end()))
+    };
+    let enabled = var("WOW_HDR").is_some_and(|v| v.trim() != "0");
+    if !enabled {
+        return;
+    }
+    setting.enabled = true;
+    if let Some(v) = nits("WOW_HDR_PEAK_NITS", crate::hdr_output::PEAK_NITS_RANGE) {
+        setting.peak_nits = v;
+    }
+    if let Some(v) = nits(
+        "WOW_HDR_MID_GREY_NITS",
+        crate::hdr_output::MID_GREY_NITS_RANGE,
+    ) {
+        setting.mid_grey_nits = v;
+    }
+    info!(
+        "worldview: HDR output asked for, peak {} nits, mid grey {} nits",
+        setting.peak_nits, setting.mid_grey_nits
+    );
 }
 
 fn spawn_view_camera(mut commands: Commands, msaa: Res<crate::view::MsaaSetting>) {

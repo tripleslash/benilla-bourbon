@@ -22,7 +22,9 @@
 //
 // See `common.wgsl` for the full table and why it exists. One more,
 // `FG_PYRAMID_REDUCE_MV`, becomes `true` or `false` and picks which pyramid
-// `fg_pyramid_reduce.wgsl` is building.
+// `fg_pyramid_reduce.wgsl` is building. fork: native HDR output —
+// `FG_IMAGE_FMT`, the interpolated image's storage format, is `rgba8unorm` for
+// the 8-bit frames it carries, `rgba16float` while the window presents in HDR.
 //
 // A placeholder resolves to a reserved word or a WGSL enumerant, never to a name
 // declared in one of these files.

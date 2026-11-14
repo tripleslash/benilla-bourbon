@@ -137,6 +137,8 @@ fn spawn_backdrop(
             decode: true,
         },
         PresentsHeldFrames,
+        // fork: native HDR output — float while the window presents in scRGB.
+        crate::hdr_output::HdrOutputTarget,
         Camera {
             order: 1,
             clear_color: ClearColorConfig::Custom(Color::BLACK),

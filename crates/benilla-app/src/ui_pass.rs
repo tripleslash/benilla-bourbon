@@ -519,6 +519,9 @@ fn spawn_ui_camera(mut commands: Commands) {
         benilla_world::ffx_glow::FfxBackdrop::default(),
         // fork: fsr (FORK.md) — it presents every frame, a held one of frame generation included.
         benilla_world::fsr::PresentsHeldFrames,
+        // fork: native HDR output — `Hdr` while the window presents in scRGB, so the world's
+        // highlights above white survive the interface's composite.
+        benilla_world::hdr_output::HdrOutputTarget,
         // Bevy UI (the glue and loading screens) renders here, in the gamma lane; unmarked, it
         // would take the highest-order camera, the egui overlay.
         bevy::ui::IsDefaultUiCamera,

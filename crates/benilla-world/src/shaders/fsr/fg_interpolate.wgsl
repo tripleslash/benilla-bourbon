@@ -49,7 +49,7 @@
 @group(0) @binding(5) var<storage, read> field_y: array<u32>;
 @group(0) @binding(6) var mv_pyramid: texture_2d<f32>;
 @group(0) @binding(7) var linear_clamp: sampler;
-@group(0) @binding(8) var interp_out: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(8) var interp_out: texture_storage_2d<FG_IMAGE_FMT, write>;
 
 /// One of the two source fetches: the colour, and how much of the bilinear
 /// footprint stayed inside the image. That second number is what tells the blend

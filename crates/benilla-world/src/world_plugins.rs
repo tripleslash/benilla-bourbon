@@ -122,6 +122,8 @@ impl PluginGroup for WorldPlugins {
             // Water foam decals (`CWater0Ripple`): wake, ring and step-in splash.
             .add(crate::water_fx::WaterFxPlugin)
             .add(crate::ffx_glow::FfxGlowPlugin)
+            // fork: native HDR output — off by default, and inert while off.
+            .add(crate::hdr_output::HdrOutputPlugin)
             // Screen-space indirect lighting (AO + one bounce of colour bleed) — the frame's other
             // full-screen pass, and the one before FFXGlow in the graph. Its two strengths are
             // player sliders and both halves are exact no-ops at zero.

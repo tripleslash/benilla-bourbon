@@ -6,8 +6,9 @@ import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
 
 @group(0) @binding(0) var screen_texture: texture_2d<f32>;
 @group(0) @binding(1) var screen_sampler: sampler;
-// `.x` = the `gamma` CVar, `.y` = the `brightness` lift (`DisplayBrightness::lift`); the rest is
-// padding (a uniform is 16-byte aligned).
+// `.x` = the `gamma` CVar, `.y` = the `brightness` lift (`DisplayBrightness::lift`); fork: native
+// HDR output — `.z` = paper white and `.w` = the peak, in scRGB units (`HdrDisplay::decode_params`),
+// read only under `HDR_OUT`, padding otherwise (a uniform is 16-byte aligned).
 @group(0) @binding(2) var<uniform> ramp: vec4<f32>;
 
 // sRGB to linear (IEC 61966-2-1), the exact inverse of `ui_quad.wesl`'s `linear_to_srgb`.
@@ -28,10 +29,31 @@ fn fs_decode(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     }
     // benilla's Brightness, after the ramp: a positive lift raises black toward it with white
     // held, a negative one dims white by it with black held. Zero is an exact identity.
-    if (ramp.y > 0.0) {
-        rgb = rgb + (vec3<f32>(1.0) - rgb) * ramp.y;
-    } else if (ramp.y < 0.0) {
-        rgb = rgb * (1.0 + ramp.y);
-    }
+    rgb = brighten(rgb);
+@if(HDR_OUT) {
+    // fork: native HDR output — onto the scRGB swapchain: paper white at the OS's SDR white level,
+    // the world's highlights above it up to the peak.
+    return vec4<f32>(min(srgb_to_linear(rgb) * ramp.z, vec3<f32>(ramp.w)), ui.a);
+} @else {
     return vec4<f32>(srgb_to_linear(rgb), ui.a);
+}
+}
+
+// benilla's Brightness on the byte range; fork: native HDR output — under `HDR_OUT` the surplus
+// above white rides through unlifted, so a raised black does not pull the highlights down.
+fn brighten(rgb: vec3<f32>) -> vec3<f32> {
+@if(HDR_OUT) {
+    return lift(min(rgb, vec3<f32>(1.0))) + max(rgb - vec3<f32>(1.0), vec3<f32>(0.0));
+} @else {
+    return lift(rgb);
+}
+}
+
+fn lift(rgb: vec3<f32>) -> vec3<f32> {
+    if (ramp.y > 0.0) {
+        return rgb + (vec3<f32>(1.0) - rgb) * ramp.y;
+    } else if (ramp.y < 0.0) {
+        return rgb * (1.0 + ramp.y);
+    }
+    return rgb;
 }

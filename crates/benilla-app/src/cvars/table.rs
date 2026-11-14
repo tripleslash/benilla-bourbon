@@ -1144,6 +1144,29 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "benilla's own — 1.12 has no hardware ray tracing",
     ),
     // ── end fork-owned block ──
+    // ── fork-owned block: native HDR output ──
+    // `hdrOutput` — 1 presents in scRGB where the window's surface offers it (a native client
+    // only; the web build never asks), 0 (the default) the 8-bit sRGB swapchain 1.12's picture is.
+    // `hdrPeakNits` — the brightest highlight, 400..4000 nits. `hdrMidGreyNits` — where the
+    // world's 18% grey lands, 10..100 nits; the interface sits at the OS's SDR white level. The
+    // knob is `benilla_world::hdr_output::HdrOutputSetting` (its defaults welded below). All three
+    // apply to the next frame; the surface is reconfigured when `hdrOutput` moves.
+    ours(
+        "hdrOutput",
+        "0",
+        "benilla's own — 1.12 presents an 8-bit backbuffer and has no HDR",
+    ),
+    ours(
+        "hdrPeakNits",
+        "1000",
+        "benilla's own — the peak of `hdrOutput`'s picture",
+    ),
+    ours(
+        "hdrMidGreyNits",
+        "37",
+        "benilla's own — where `hdrOutput` places the world's 18% grey: 18% of BT.2408's          203-nit reference white",
+    ),
+    // ── end fork-owned block ──
     // ── fork-owned block: the Everwood port (FORK.md) ──
     // `foliageWind` — 0 off (no vertex displacement, the reference's still image), 1 grass, 2
     // grass and classified tree and bush foliage (the default). `foliageWindStrength` — the sway

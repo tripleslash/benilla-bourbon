@@ -137,6 +137,9 @@ impl SpecializedRenderPipeline for UiGammaPipeline {
     type Key = TextureFormat;
 
     fn specialize(&self, format: Self::Key) -> RenderPipelineDescriptor {
+        // fork: native HDR output — the scRGB swapchain, which the window has only while HDR
+        // output is on (`benilla_world::hdr_output`); never built otherwise.
+        let hdr = format == TextureFormat::Rgba16Float;
         RenderPipelineDescriptor {
             label: Some("ui_gamma_decode".into()),
             layout: vec![self.layout.clone()],
@@ -144,10 +147,13 @@ impl SpecializedRenderPipeline for UiGammaPipeline {
             fragment: Some(FragmentState {
                 constants: Default::default(),
                 shader: self.shader.clone(),
-                shader_defs: vec![],
+                shader_defs: if hdr { vec!["HDR_OUT".into()] } else { vec![] },
                 entry_point: Some("fs_decode".into()),
                 // An 8-bit sRGB target either way (the swapchain, or a `Write` camera's non-`Hdr`
                 // main texture), so the lane clamps at every blend like the reference.
+                // Deviation (native HDR output, opt-in): the scRGB swapchain is float, and so is
+                // the lane camera's target then, where blends no longer clamp at white: the world's
+                // highlights above it must survive the interface's composite to reach the display.
                 targets: vec![Some(ColorTargetState {
                     format,
                     blend: None,
@@ -233,6 +239,7 @@ fn ui_gamma_decode(
     pipelines: Res<UiGammaPipeline>,
     pipeline_cache: Res<PipelineCache>,
     queue: Res<RenderQueue>,
+    hdr: Option<Res<benilla_world::hdr_output::HdrDisplay>>,
     mut ctx: RenderContext,
 ) {
     let (view_target, lane, camera, pipeline) = view.into_inner();
@@ -240,11 +247,15 @@ fn ui_gamma_decode(
         // Still compiling: the UI stays undecoded, over-bright, for a frame or two.
         return;
     };
-    // This frame's exponent and lift as `[g, lift, 0, 0]`; the shader reads `.x` and `.y`.
+    // This frame's exponent and lift as `[g, lift, paper, peak]`; the SDR shader reads `.x` and
+    // `.y`, the HDR one all four (fork: native HDR output).
+    let [paper, peak] = hdr
+        .filter(|h| h.active)
+        .map_or([1.0, 1.0], |h| h.decode_params());
     queue.write_buffer(
         &pipelines.ramp,
         0,
-        bytemuck::cast_slice(&[lane.gamma, lane.lift, 0.0, 0.0]),
+        bytemuck::cast_slice(&[lane.gamma, lane.lift, paper, peak]),
     );
     // The swapchain for the `Skip` player-UI camera, the ping-pong target for a `Write` one.
     let Some(out) = FinalPassTarget::resolve(camera, view_target) else {
@@ -310,6 +321,26 @@ pub(crate) fn on_cvar(
         gamma.0 = ev.num().clamp(*GAMMA_RANGE.start(), *GAMMA_RANGE.end());
     } else if ev.is(CVAR_BRIGHTNESS) {
         brightness.0 = ev.num().clamp(0.0, 1.0);
+    }
+}
+
+/// fork: native HDR output — `hdrOutput`'s, `hdrPeakNits`'s and `hdrMidGreyNits`'s callback, the
+/// two levels clamped to their sliders' ranges.
+pub(crate) fn hdr_on_cvar(
+    ev: &crate::cvars::CvarChanged,
+    mut hdr: bevy::prelude::Mut<'_, benilla_world::hdr_output::HdrOutputSetting>,
+) {
+    use benilla_world::hdr_output::{MID_GREY_NITS_RANGE, PEAK_NITS_RANGE};
+    if ev.is("hdrOutput") {
+        hdr.enabled = ev.num() != 0.0;
+    } else if ev.is("hdrPeakNits") {
+        hdr.peak_nits = ev
+            .num()
+            .clamp(*PEAK_NITS_RANGE.start(), *PEAK_NITS_RANGE.end());
+    } else if ev.is("hdrMidGreyNits") {
+        hdr.mid_grey_nits = ev
+            .num()
+            .clamp(*MID_GREY_NITS_RANGE.start(), *MID_GREY_NITS_RANGE.end());
     }
 }
 

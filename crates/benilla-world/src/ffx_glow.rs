@@ -5,6 +5,7 @@
 //! the player-UI camera claims ([`FfxBackdrop`]) runs only the filter passes, and the UI camera
 //! draws its combine.
 
+use bevy::camera::NormalizedRenderTarget;
 use bevy::core_pipeline::core_2d::{main_opaque_pass_2d, main_transparent_pass_2d, Transparent2d};
 use bevy::core_pipeline::tonemapping::tonemapping;
 use bevy::core_pipeline::{Core2d, Core2dSystems, Core3d, Core3dSystems, FullscreenShader};
@@ -387,6 +388,23 @@ struct FfxCombineKey {
     inside_2d: Option<u32>,
     /// The underwater entry (`fs_combine_wave`), its own pipeline so a dry frame pays nothing.
     wave: bool,
+    /// fork: native HDR output — an exit bound for the scRGB window (`HDR_OUT`, [`hdr_exit`]):
+    /// highlights above white kept and the world placed in nits. Never built while HDR output is
+    /// off.
+    hdr: bool,
+}
+
+/// fork: native HDR output — whether a combine's exit is bound for the window while it presents
+/// in scRGB: HDR is active and the exit lands in a float target on the way to the window (the
+/// player-UI camera's or a backdrop's, `Hdr` only then, [`crate::hdr_output::HdrOutputTarget`]; a
+/// window camera's own main texture; frame generation's and DLSS-G's copies of a backdrop's).
+fn hdr_exit(active: bool, format: TextureFormat, to_window: bool) -> bool {
+    active && to_window && format == TextureFormat::Rgba16Float
+}
+
+/// Whether HDR output is active this frame (`crate::hdr_output::HdrDisplay`).
+fn hdr_active(display: Option<&crate::hdr_output::HdrDisplay>) -> bool {
+    display.is_some_and(|d| d.active)
 }
 
 impl SpecializedRenderPipeline for FfxCombinePipeline {
@@ -405,10 +423,11 @@ impl SpecializedRenderPipeline for FfxCombinePipeline {
             fragment: Some(FragmentState {
                 constants: Default::default(),
                 shader: self.shader.clone(),
-                shader_defs: if key.gamma_out {
-                    vec!["GAMMA_OUT".into()]
-                } else {
-                    vec![]
+                shader_defs: match (key.gamma_out, key.hdr) {
+                    (true, true) => vec!["GAMMA_OUT".into(), "HDR_OUT".into()],
+                    (true, false) => vec!["GAMMA_OUT".into()],
+                    (false, true) => vec!["HDR_OUT".into()],
+                    (false, false) => vec![],
                 },
                 entry_point: Some(entry.into()),
                 targets: vec![Some(ColorTargetState {
@@ -592,6 +611,8 @@ struct FfxCombinePair {
     format: TextureFormat,
     /// 1 for the combine's own pass, the view's count for a backdrop draw inside a 2D main pass.
     samples: u32,
+    /// fork: native HDR output — the `HDR_OUT` pair.
+    hdr: bool,
 }
 
 impl FfxCombinePair {
@@ -615,8 +636,8 @@ struct CombineSpecializer<'w> {
 
 impl CombineSpecializer<'_> {
     /// The combine's own pass: colour only, the decode at its exit.
-    fn pair(&mut self, format: TextureFormat) -> FfxCombinePair {
-        self.pair_for(format, false, None)
+    fn pair(&mut self, format: TextureFormat, hdr: bool) -> FfxCombinePair {
+        self.pair_for(format, false, None, hdr)
     }
 
     /// The backdrop draw inside a 2D main pass: the gamma-lane exit (or the decode, for a
@@ -626,8 +647,9 @@ impl CombineSpecializer<'_> {
         format: TextureFormat,
         samples: u32,
         decode: bool,
+        hdr: bool,
     ) -> FfxCombinePair {
-        self.pair_for(format, !decode, Some(samples))
+        self.pair_for(format, !decode, Some(samples), hdr)
     }
 
     fn pair_for(
@@ -635,6 +657,7 @@ impl CombineSpecializer<'_> {
         format: TextureFormat,
         gamma_out: bool,
         inside_2d: Option<u32>,
+        hdr: bool,
     ) -> FfxCombinePair {
         let mut key = |wave| {
             self.cache.specialize(
@@ -645,6 +668,7 @@ impl CombineSpecializer<'_> {
                     wave,
                     gamma_out,
                     inside_2d,
+                    hdr,
                 },
             )
         };
@@ -653,6 +677,7 @@ impl CombineSpecializer<'_> {
             wave: key(true),
             format,
             samples: inside_2d.unwrap_or(1),
+            hdr,
         }
     }
 }
@@ -664,6 +689,7 @@ fn prepare_textures(
     render_device: Res<RenderDevice>,
     mut specializer: CombineSpecializer,
     claims: Res<FfxBackdropClaims>,
+    hdr: Option<Res<crate::hdr_output::HdrDisplay>>,
     views: Query<
         (
             Entity,
@@ -678,6 +704,7 @@ fn prepare_textures(
         With<FfxGlow>,
     >,
 ) {
+    let active = hdr_active(hdr.as_deref());
     for (entity, camera, target, existing, fsr, fg, hudless) in &views {
         let Some(vp) = camera.physical_viewport_size else {
             continue;
@@ -688,14 +715,20 @@ fn prepare_textures(
         let compose = fg
             .map(|fg| (fg.format(), fg.decode()))
             .or(hudless.map(|h| (h.format, h.decode)))
-            .map(|(format, decode)| specializer.pair_for(format, !decode, None));
+            .map(|(format, decode)| {
+                // fork: native HDR output — a backdrop's copy, float only while HDR is.
+                let hdr = hdr_exit(active, format, true);
+                specializer.pair_for(format, !decode, None, hdr)
+            });
         // Specialised even while claimed: a claim is per frame and drops whenever the UI camera
         // loses its `ViewTarget` (a minimize, a surface reconfigure), when a cold pair would
         // compile synchronously on the render thread. Keeping it warm is a cached lookup.
         let Some(format) = FinalPassTarget::format(&camera.output_mode, target) else {
             continue;
         };
-        let own = specializer.pair(format);
+        // fork: native HDR output — a window camera's own combine.
+        let to_window = matches!(camera.target, Some(NormalizedRenderTarget::Window(_)));
+        let own = specializer.pair(format, hdr_exit(active, format, to_window));
         let combine = (!claims.0.contains(&entity)).then_some(own);
         // ¼ of the viewport, each side at least 8, as the reference sizes its targets (`0x6cdb40`).
         let mut tex = |label: &'static str, w: u32, h: u32| {
@@ -723,8 +756,10 @@ fn prepare_textures(
         if existing.is_some_and(|t| {
             t.quarter_a.texture.id() == quarter_a.texture.id()
                 && t.quarter_b.texture.id() == quarter_b.texture.id()
-                && t.combine.as_ref().map(|c| c.format) == combine.as_ref().map(|c| c.format)
-                && t.compose.as_ref().map(|c| c.format) == compose.as_ref().map(|c| c.format)
+                && t.combine.as_ref().map(|c| (c.format, c.hdr))
+                    == combine.as_ref().map(|c| (c.format, c.hdr))
+                && t.compose.as_ref().map(|c| (c.format, c.hdr))
+                    == compose.as_ref().map(|c| (c.format, c.hdr))
         }) {
             continue;
         }
@@ -774,8 +809,9 @@ fn dither_armed() -> f32 {
     }
 }
 
-/// The combine uniform's floats: the reference's 8, then the fork's grade row.
-const COMBINE_FLOATS: usize = 12;
+/// The combine uniform's floats: the reference's 8, then the fork's grade row and its HDR row
+/// (read only by the `HDR_OUT` variant).
+const COMBINE_FLOATS: usize = 16;
 /// [`COMBINE_FLOATS`] in bytes, the buffer's and the layout's size.
 const COMBINE_BYTES: u64 = (COMBINE_FLOATS * 4) as u64;
 
@@ -1057,6 +1093,13 @@ fn live_combine(world: &World, glow: &FfxGlow) -> ([f32; COMBINE_FLOATS], bool) 
         uniform[7] = crate::modern::look::exposure();
         uniform[8..12].copy_from_slice(&crate::modern::look::grade());
     }
+    // fork: native HDR output
+    if let Some(hdr) = world
+        .get_resource::<crate::hdr_output::HdrDisplay>()
+        .filter(|h| h.active)
+    {
+        uniform[12..16].copy_from_slice(&hdr.combine_params());
+    }
     (uniform, wave_armed(glow.state, wave, player))
 }
 
@@ -1099,7 +1142,9 @@ fn prepare_backdrops(
         Option<&FfxBackdropView>,
     )>,
     rendered: RenderedWorldViews,
+    hdr: Option<Res<crate::hdr_output::HdrDisplay>>,
 ) {
+    let active = hdr_active(hdr.as_deref());
     claims.0.clear();
     for (entity, backdrop, target, msaa, existing) in &views {
         let source = backdrop.source.and_then(|main| {
@@ -1110,11 +1155,14 @@ fn prepare_backdrops(
         });
         claims.0.extend(source);
         let (format, samples) = (target.main_texture_format(), msaa.samples());
-        let fresh =
-            |view: &FfxBackdropView| view.pair.format == format && view.pair.samples == samples;
+        // fork: native HDR output — a backdrop camera is float only while HDR is.
+        let hdr = hdr_exit(active, format, true);
+        let fresh = |view: &FfxBackdropView| {
+            view.pair.format == format && view.pair.samples == samples && view.pair.hdr == hdr
+        };
         let pair = match existing {
             Some(view) if fresh(view) => view.pair,
-            _ => specializer.backdrop_pair(format, samples, backdrop.decode),
+            _ => specializer.backdrop_pair(format, samples, backdrop.decode, hdr),
         };
         if existing.is_some_and(|view| view.source == source && fresh(view)) {
             continue;

@@ -59,6 +59,18 @@ const COLOR_PYRAMID_MAX_LEVELS: u32 = 10;
 const PYRAMID: TextureFormat = TextureFormat::Rgba16Float;
 /// The interpolated image and the inpainted result: what the sources carry, bytes.
 const IMAGE: TextureFormat = TextureFormat::Rgba8Unorm;
+/// fork: native HDR output — the same, for the float frames an HDR window composes, whose values
+/// above white must survive the interpolation.
+const IMAGE_HDR: TextureFormat = TextureFormat::Rgba16Float;
+
+/// The interpolated image's format for frames composed in `format`.
+fn image_format(format: TextureFormat) -> TextureFormat {
+    if format == TextureFormat::Rgba16Float {
+        IMAGE_HDR
+    } else {
+        IMAGE
+    }
+}
 
 /// Per-frame constants; `FgParams` in `shaders/fsr/fg_common.wgsl`.
 #[repr(C)]
@@ -253,14 +265,14 @@ impl Targets {
             field_y: scatter("fsr_fg_vector_field_y"),
             disocclusion: image("fsr_fg_disocclusion", formats.rg8, render),
             mv_pyramid: Pyramid::new(device, "fsr_fg_mv_pyramid", render, MV_PYRAMID_MAX_LEVELS),
-            interp: image("fsr_fg_interpolated", IMAGE, display),
+            interp: image("fsr_fg_interpolated", image_format(format), display),
             color_pyramid: Pyramid::new(
                 device,
                 "fsr_fg_color_pyramid",
                 display,
                 COLOR_PYRAMID_MAX_LEVELS,
             ),
-            output: image("fsr_fg_output", IMAGE, display),
+            output: image("fsr_fg_output", image_format(format), display),
         }
     }
 }
@@ -333,6 +345,43 @@ pub struct FgPipelines {
     color_pyramid_reduce: CachedComputePipelineId,
     inpaint: CachedComputePipelineId,
     sampler: Sampler,
+    /// fork: native HDR output — the image passes for float frames, queued by the first HDR frame
+    /// ([`prepare_framegen`]); `None` while HDR output has never been on.
+    hdr: Option<FgImagePasses>,
+}
+
+/// fork: native HDR output — `interpolate` and `inpaint` writing [`IMAGE_HDR`], with their layouts.
+pub struct FgImagePasses {
+    interpolate_layout: BindGroupLayoutDescriptor,
+    inpaint_layout: BindGroupLayoutDescriptor,
+    interpolate: CachedComputePipelineId,
+    inpaint: CachedComputePipelineId,
+}
+
+impl FgImagePasses {
+    fn queue(shaders: &FsrShaders, pipeline_cache: &PipelineCache) -> Self {
+        let interpolate_layout = FgLayouts::interpolate(IMAGE_HDR);
+        let inpaint_layout = FgLayouts::inpaint(IMAGE_HDR);
+        let queue = |label: &'static str, layout: &BindGroupLayoutDescriptor, shader| {
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                constants: Default::default(),
+                label: Some(label.into()),
+                layout: vec![layout.clone()],
+                immediate_size: 0,
+                shader,
+                shader_defs: vec![],
+                entry_point: Some("main".into()),
+                zero_initialize_workgroup_memory: true,
+            })
+        };
+        let [interpolate, inpaint] = shaders.framegen_hdr.clone();
+        Self {
+            interpolate: queue("fsr_fg_interpolate_hdr", &interpolate_layout, interpolate),
+            inpaint: queue("fsr_fg_inpaint_hdr", &inpaint_layout, inpaint),
+            interpolate_layout,
+            inpaint_layout,
+        }
+    }
 }
 
 impl FgPipelines {
@@ -420,35 +469,52 @@ impl FgLayouts {
                     ),
                 ),
             ),
-            interpolate: BindGroupLayoutDescriptor::new(
-                "fsr_fg_interpolate_layout",
-                &BindGroupLayoutEntries::sequential(
-                    c,
-                    (
-                        uniform(),
-                        tex(true),
-                        tex(true),
-                        tex(true),
-                        ro(),
-                        ro(),
-                        tex(true),
-                        lin(),
-                        out(IMAGE),
-                    ),
-                ),
-            ),
+            interpolate: Self::interpolate(IMAGE),
             color_pyramid_seed: BindGroupLayoutDescriptor::new(
                 "fsr_fg_color_pyramid_seed_layout",
                 &BindGroupLayoutEntries::sequential(c, (uniform(), tex(true), out(PYRAMID))),
             ),
-            inpaint: BindGroupLayoutDescriptor::new(
-                "fsr_fg_inpaint_layout",
-                &BindGroupLayoutEntries::sequential(
-                    c,
-                    (uniform(), tex(true), tex(true), out(IMAGE)),
+            inpaint: Self::inpaint(IMAGE),
+        }
+    }
+
+    /// The interpolation's layout, writing an `image` format image.
+    fn interpolate(image: TextureFormat) -> BindGroupLayoutDescriptor {
+        let tex = |filterable| texture_2d(TextureSampleType::Float { filterable });
+        let ro = || storage_buffer_read_only_sized(false, None);
+        BindGroupLayoutDescriptor::new(
+            "fsr_fg_interpolate_layout",
+            &BindGroupLayoutEntries::sequential(
+                ShaderStages::COMPUTE,
+                (
+                    uniform_buffer_sized(false, std::num::NonZero::new(PARAMS_SIZE)),
+                    tex(true),
+                    tex(true),
+                    tex(true),
+                    ro(),
+                    ro(),
+                    tex(true),
+                    sampler(SamplerBindingType::Filtering),
+                    texture_storage_2d(image, StorageTextureAccess::WriteOnly),
                 ),
             ),
-        }
+        )
+    }
+
+    /// The inpaint's layout, writing an `image` format image.
+    fn inpaint(image: TextureFormat) -> BindGroupLayoutDescriptor {
+        BindGroupLayoutDescriptor::new(
+            "fsr_fg_inpaint_layout",
+            &BindGroupLayoutEntries::sequential(
+                ShaderStages::COMPUTE,
+                (
+                    uniform_buffer_sized(false, std::num::NonZero::new(PARAMS_SIZE)),
+                    texture_2d(TextureSampleType::Float { filterable: true }),
+                    texture_2d(TextureSampleType::Float { filterable: true }),
+                    texture_storage_2d(image, StorageTextureAccess::WriteOnly),
+                ),
+            ),
+        )
     }
 }
 
@@ -540,6 +606,7 @@ pub(super) fn init_pipelines(
         color_pyramid_seed: queue("fsr_fg_color_pyramid_seed", &l.color_pyramid_seed, &s[6]),
         color_pyramid_reduce: queue("fsr_fg_color_pyramid_reduce", &l.pyramid_reduce, &s[7]),
         inpaint: queue("fsr_fg_inpaint", &l.inpaint, &s[8]),
+        hdr: None,
         layouts,
         sampler: device.create_sampler(&SamplerDescriptor {
             label: Some("fsr_fg_linear_clamp"),
@@ -589,6 +656,7 @@ pub(super) fn prepare_framegen(
     solo: Res<FgSolo>,
     shaders: Option<Res<FsrShaders>>,
     present: Option<Res<FgPresentPipeline>>,
+    fg_pipelines: Option<ResMut<FgPipelines>>,
     pipeline_cache: Res<PipelineCache>,
     mut present_pipelines: ResMut<SpecializedRenderPipelines<FgPresentPipeline>>,
     mut views: Query<(
@@ -604,6 +672,7 @@ pub(super) fn prepare_framegen(
     let (Some(shaders), Some(present)) = (shaders, present) else {
         return;
     };
+    let mut fg_pipelines = fg_pipelines;
     for (entity, main, fsr, view, fsr_state, fg) in &mut views {
         // The claiming backdrop's target: the format the compose writes and the present reads.
         let claim = backdrops
@@ -618,6 +687,12 @@ pub(super) fn prepare_framegen(
             }
             continue;
         };
+        // fork: native HDR output — the first float frame queues the float image passes.
+        if image_format(format) == IMAGE_HDR {
+            if let Some(p) = fg_pipelines.as_mut().filter(|p| p.hdr.is_none()) {
+                p.hdr = Some(FgImagePasses::queue(&shaders, &pipeline_cache));
+            }
+        }
         let (render, display) = (fsr_state.render_size(), fsr_state.display_size());
         let keep = fg.as_ref().is_some_and(|s| {
             s.targets.render == render
@@ -727,6 +802,27 @@ pub(super) fn fsr_framegen_pass(
         return; // the upscaler did not run: nothing to compose
     };
     let get = |id| pipeline_cache.get_compute_pipeline(id);
+    // fork: native HDR output — a float frame's image passes, and their layouts.
+    let l = &pipelines.layouts;
+    let (interpolate_id, inpaint_id, interpolate_layout, inpaint_layout) =
+        if image_format(state.targets.format) == IMAGE_HDR {
+            let Some(hdr) = pipelines.hdr.as_ref() else {
+                return; // not yet queued: the backdrop falls back to the combine this frame
+            };
+            (
+                hdr.interpolate,
+                hdr.inpaint,
+                &hdr.interpolate_layout,
+                &hdr.inpaint_layout,
+            )
+        } else {
+            (
+                pipelines.interpolate,
+                pipelines.inpaint,
+                &l.interpolate,
+                &l.inpaint,
+            )
+        };
     let (
         Some(reconstruct_depth),
         Some(game_vector_field),
@@ -743,10 +839,10 @@ pub(super) fn fsr_framegen_pass(
         get(pipelines.mv_pyramid_seed),
         get(pipelines.mv_pyramid_reduce),
         get(pipelines.disocclusion),
-        get(pipelines.interpolate),
+        get(interpolate_id),
         get(pipelines.color_pyramid_seed),
         get(pipelines.color_pyramid_reduce),
-        get(pipelines.inpaint),
+        get(inpaint_id),
     )
     else {
         return; // still compiling: the backdrop falls back to the combine this frame
@@ -769,7 +865,6 @@ pub(super) fn fsr_framegen_pass(
     let p = state.parity;
     let (dilated_mv, depths, prev_depth) = fsr.shared();
     let device = render_context.render_device().clone();
-    let l = &pipelines.layouts;
     let layout = |d: &BindGroupLayoutDescriptor| pipeline_cache.get_bind_group_layout(d);
     let params = state.params.as_entire_binding();
     let smp = &pipelines.sampler;
@@ -825,7 +920,7 @@ pub(super) fn fsr_framegen_pass(
     );
     let g_interpolate = device.create_bind_group(
         "fsr_fg_interpolate",
-        &layout(&l.interpolate),
+        &layout(interpolate_layout),
         &BindGroupEntries::sequential((
             params.clone(),
             prev_final,
@@ -845,7 +940,7 @@ pub(super) fn fsr_framegen_pass(
     );
     let g_inpaint = device.create_bind_group(
         "fsr_fg_inpaint",
-        &layout(&l.inpaint),
+        &layout(inpaint_layout),
         &BindGroupEntries::sequential((
             params.clone(),
             &t.interp,

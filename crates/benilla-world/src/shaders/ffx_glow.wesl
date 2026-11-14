@@ -24,6 +24,10 @@ struct FfxCombine {
     // fork: modern lighting — the zone look's cinematic grade: x = contrast, y = saturation,
     // z = vignette, w = toe (gamma on the encoded picture; > 1 deepens the shadows). All 0 = off.
     grade: vec4<f32>,
+    // fork: native HDR output — read only under `HDR_OUT`: x = the world's gain over paper white,
+    // y = the peak over paper white, z = the tonemap's white in scene units, w = paper white in
+    // scRGB units (`HdrDisplay::combine_params`).
+    hdr: vec4<f32>,
 }
 @group(0) @binding(3) var<uniform> ffx: FfxCombine;
 // The 128×128 wave LUT and its repeat sampler: bound on every combine, sampled only underwater.
@@ -96,14 +100,25 @@ fn screen_space_dither(frag_coord: vec2<f32>) -> vec3<f32> {
 }
 
 // fork: modern lighting — the P1b tonemap: identity below the knee (so ordinary pixels keep their
-// classic value), an exponential shoulder above it that approaches white without clipping.
+// classic value), an exponential shoulder above it that approaches `white` without clipping.
+// `white` is 1 in SDR; fork: native HDR output — the peak in scene units under `HDR_OUT`.
 const MODERN_BLOOM: f32 = 0.35;
 const MODERN_KNEE: f32 = 0.8;
-fn modern_tonemap(x: vec3<f32>) -> vec3<f32> {
+fn modern_tonemap(x: vec3<f32>, white: f32) -> vec3<f32> {
     let k = MODERN_KNEE;
+    let span = white - k;
     let over = max(x - vec3<f32>(k), vec3<f32>(0.0));
-    let rolled = vec3<f32>(k) + (1.0 - k) * (vec3<f32>(1.0) - exp(-over / (1.0 - k)));
+    let rolled = vec3<f32>(k) + span * (vec3<f32>(1.0) - exp(-over / span));
     return select(x, rolled, x > vec3<f32>(k));
+}
+
+// The shoulder's white: 1, or under `HDR_OUT` the peak in scene units.
+fn tonemap_white() -> f32 {
+@if(HDR_OUT) {
+    return ffx.hdr.z;
+} @else {
+    return 1.0;
+}
 }
 
 // fork: modern lighting — the cinematic grade on the encoded, tonemapped picture: saturation about
@@ -126,16 +141,61 @@ fn cinematic_grade(g: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
 // The combine's one exit: dither (when armed) in GAMMA space — the space the present-encode
 // rounds in — then the frame's single decode, or, under `GAMMA_OUT`, no decode at all.
 fn combine_out(outg: vec3<f32>, alpha: f32, frag_coord: vec2<f32>) -> vec4<f32> {
-    let dithered = clamp(
-        outg + screen_space_dither(frag_coord) * step(0.5, ffx.lane.w),
-        vec3<f32>(0.0),
-        vec3<f32>(1.0),
-    );
+    let dithered = dither_exit(outg, frag_coord);
 @if(GAMMA_OUT) {
     // The UI camera's ground pass stores premultiplied bytes like `ui_quad.wesl`; the lane decodes.
     return vec4<f32>(dithered * alpha, alpha);
 } @else {
-    return vec4<f32>(srgb_to_linear(dithered), alpha);
+    return vec4<f32>(srgb_to_linear(dithered) * exit_scale(), alpha);
+}
+}
+
+// The decode exit's scale onto its target: 1, or under `HDR_OUT` paper white in scRGB units, the
+// exit then writing the scRGB window's own values.
+fn exit_scale() -> f32 {
+@if(HDR_OUT) {
+    return ffx.hdr.w;
+} @else {
+    return 1.0;
+}
+}
+
+// The exit value, dithered when armed: clamped to the byte framebuffer's range; fork: native HDR
+// output — under `HDR_OUT`, placed for the scRGB swapchain and kept above white.
+fn dither_exit(outg: vec3<f32>, frag_coord: vec2<f32>) -> vec3<f32> {
+    let dither = screen_space_dither(frag_coord) * step(0.5, ffx.lane.w);
+@if(HDR_OUT) {
+    return max(hdr_place(outg) + dither, vec3<f32>(0.0));
+} @else {
+    return clamp(outg + dither, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+}
+
+// fork: native HDR output — the world on the interface's scale: its gamma value decoded, raised
+// by the world's gain over paper white (so 18% grey lands on the chosen nits), capped at the peak,
+// and encoded again, past 1, for the gamma lane the interface composites in.
+fn hdr_place(g: vec3<f32>) -> vec3<f32> {
+    let lin = srgb_to_linear(max(g, vec3<f32>(0.0))) * ffx.hdr.x;
+    return colorspace::linear_to_srgb(min(lin, vec3<f32>(ffx.hdr.y)));
+}
+
+// The ceiling on the combine's sum: the byte framebuffer's 1, none in HDR, where the highlights
+// above white are the point; the glow and haze terms keep their byte-bounded blur either way.
+fn sum_ceiling() -> f32 {
+@if(HDR_OUT) {
+    return 3.0e38;
+} @else {
+    return 1.0;
+}
+}
+
+// The cinematic grade; fork: native HDR output — under `HDR_OUT` on the part of the picture an
+// SDR one has, the surplus above white carried through.
+fn grade_hdr(g: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+@if(HDR_OUT) {
+    return cinematic_grade(min(g, vec3<f32>(1.0)), uv) + max(g - vec3<f32>(1.0), vec3<f32>(0.0));
+} @else {
+    return cinematic_grade(g, uv);
 }
 }
 
@@ -161,11 +221,12 @@ fn combine_body(uv: vec2<f32>, frag_coord: vec2<f32>) -> vec4<f32> {
         // it carries no surplus into the bloom below or the `blur²` glow term.
         let blur_hdr = select(blur_x, min(blur_x, vec3<f32>(1.0)), ffx.lane.y > 0.0);
         let bloom = max(blur_hdr - vec3<f32>(1.0), vec3<f32>(0.0)) * MODERN_BLOOM;
-        sg = colorspace::linear_to_srgb(modern_tonemap(scene_x + bloom));
+        let white = tonemap_white();
+        sg = colorspace::linear_to_srgb(modern_tonemap(scene_x + bloom, white));
         if (ffx.grade.x > 0.0) {
-            sg = cinematic_grade(sg, uv);
+            sg = grade_hdr(sg, uv);
         }
-        bg = colorspace::linear_to_srgb(modern_tonemap(blur_hdr));
+        bg = colorspace::linear_to_srgb(modern_tonemap(blur_hdr, white));
     }
     // The scene alpha rides through untouched: the window surface ignores it and the opaque-clear
     // booths hold 1 everywhere — only the transparent-clear create booth reads it, to composite
@@ -182,8 +243,9 @@ fn combine_body(uv: vec2<f32>, frag_coord: vec2<f32>) -> vec4<f32> {
     }
     // The haze fades toward the blur before the glow add; z is the larger of the drunk fraction
     // and 84/255 while submerged.
-    let hazed = mix(sg, min(bg, vec3<f32>(1.0)), ffx.lane.z);
-    let outg = min(hazed + ffx.lane.x * bg * bg, vec3<f32>(1.0));
+    let bg1 = min(bg, vec3<f32>(1.0));
+    let hazed = mix(sg, bg1, ffx.lane.z);
+    let outg = min(hazed + ffx.lane.x * bg1 * bg1, vec3<f32>(sum_ceiling()));
     return combine_out(outg, scene.a, frag_coord);
 }
 

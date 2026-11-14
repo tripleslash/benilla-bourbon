@@ -1938,6 +1938,11 @@ mod tests {
             d["rcasSharpness"],
             benilla_world::fsr::RCAS_SHARPNESS_DEFAULT
         );
+        // fork: native HDR output — off, at the engine's own peak and middle grey.
+        let hdr = benilla_world::hdr_output::HdrOutputSetting::default();
+        assert_eq!(d["hdrOutput"] != 0.0, hdr.enabled);
+        assert_eq!(d["hdrPeakNits"], hdr.peak_nits);
+        assert_eq!(d["hdrMidGreyNits"], hdr.mid_grey_nits);
         assert_eq!(
             d["serverTimeOffset"] as i32,
             crate::net::TimeOffset::default().0
@@ -2425,6 +2430,26 @@ mod tests {
         assert_eq!(res::<benilla_world::fsr::RcasSharpness>(&app).0, 0.5);
         apply(&mut app, "rcassharpness", "7");
         assert_eq!(res::<benilla_world::fsr::RcasSharpness>(&app).0, 1.0);
+        // fork: native HDR output
+        apply(&mut app, "hdrOutput", "1");
+        assert!(res::<benilla_world::hdr_output::HdrOutputSetting>(&app).enabled);
+        apply(&mut app, "hdrPeakNits", "1600");
+        assert_eq!(
+            res::<benilla_world::hdr_output::HdrOutputSetting>(&app).peak_nits,
+            1600.0
+        );
+        apply(&mut app, "hdrPeakNits", "99999");
+        assert_eq!(
+            res::<benilla_world::hdr_output::HdrOutputSetting>(&app).peak_nits,
+            4000.0
+        );
+        apply(&mut app, "hdrMidGreyNits", "2");
+        assert_eq!(
+            res::<benilla_world::hdr_output::HdrOutputSetting>(&app).mid_grey_nits,
+            10.0
+        );
+        apply(&mut app, "hdroutput", "0");
+        assert!(!res::<benilla_world::hdr_output::HdrOutputSetting>(&app).enabled);
         // fork: dlss (FORK.md)
         apply(&mut app, "upscaler", "fsr");
         assert_eq!(
@@ -3738,6 +3763,8 @@ mod tests {
             .init_resource::<benilla_world::fsr::cadence::FgMultiplier>()
             .init_resource::<benilla_world::dlss::ReflexSetting>()
             .init_resource::<crate::net::TimeOffset>()
+            // fork: native HDR output
+            .init_resource::<benilla_world::hdr_output::HdrOutputSetting>()
             // Literal for the same reason: LightingSettings::default() reads $WOW_LIGHTING /
             // $WOW_LIGHTING_QUALITY, IndirectLighting::default() $WOW_SSAO / $WOW_SSGI, and
             // WaterDetail::default() $WOW_WATER_DETAIL.
