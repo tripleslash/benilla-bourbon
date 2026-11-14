@@ -143,7 +143,7 @@ session here:
   NGX headers and needs libclang; without it the build quietly falls back to the mock (a
   `dlss_wgpu: … building the mock (no DLSS)` warning) and ships a client with no DLSS. Here it is
   Visual Studio's LLVM: set
-  `LIBCLANG_PATH="C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/Llvm/x64/bin"`
+  `LIBCLANG_PATH="C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/Llvm/x64/bin"`
   before `scripts/build-desktop.sh` or any native build meant to run DLSS, and grep the build
   log for that warning before calling it done. The DLSS runtime DLLs themselves are not built:
   they are NVIDIA's, vendored in `third_party/nvidia-dlss` (`lib/Windows_x86_64/rel/`,
