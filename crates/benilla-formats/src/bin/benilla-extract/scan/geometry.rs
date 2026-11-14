@@ -78,6 +78,49 @@ pub fn bbfacescan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Every texture a billboard batch draws (a card, or geometry welded to a billboard bone), one
+/// per line: the texture path, its batch count, and the first model naming it. A batch with a
+/// replaceable texture (no file name in the model) is counted, not listed.
+pub fn bbtexscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
+    let names = super::m2_names(chain, prefix)?;
+    let (mut scanned, mut batches, mut replaceable) = (0u32, 0u32, 0u32);
+    // Keyed by the lowercased path, so one texture named in two casings is one row.
+    let mut textures: BTreeMap<String, (String, u32, String)> = BTreeMap::new();
+    for name in names {
+        let Ok(bytes) = chain.read_file(&name) else {
+            continue;
+        };
+        scanned += 1;
+        let dir = name.rsplit_once('\\').map(|(d, _)| d).unwrap_or("");
+        let Ok(subs) = benilla_formats::parse_m2_render_submeshes(&bytes, dir, &[]) else {
+            continue;
+        };
+        for s in subs
+            .iter()
+            .filter(|s| s.billboard.is_some() || s.welded_billboard)
+        {
+            batches += 1;
+            let Some(tex) = s.texture.as_deref() else {
+                replaceable += 1;
+                continue;
+            };
+            let row = textures
+                .entry(tex.to_ascii_lowercase())
+                .or_insert_with(|| (tex.to_string(), 0, name.clone()));
+            row.1 += 1;
+        }
+    }
+    for (tex, count, model) in textures.values() {
+        println!("{tex}\t{count}\t{model}");
+    }
+    eprintln!(
+        "{scanned} models scanned, {batches} billboard batch(es), {} distinct texture(s), \
+         {replaceable} batch(es) with a replaceable texture",
+        textures.len()
+    );
+    Ok(())
+}
+
 /// The X of a batch's first-triangle unit winding normal, WoW model space; `None` if degenerate.
 fn facet_x(s: &benilla_formats::RenderSubmesh) -> Option<f32> {
     let tri = s.indices.get(..3)?;

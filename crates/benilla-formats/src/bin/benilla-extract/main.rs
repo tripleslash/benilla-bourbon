@@ -199,6 +199,12 @@ enum Command {
         /// Internal-path prefix filter (e.g. `world\generic`), case-insensitive; all if omitted.
         prefix: Option<String>,
     },
+    /// List every texture a billboard batch draws (cards and welded billboard geometry): path,
+    /// batch count, first model, tab-separated.
+    Bbtexscan {
+        /// Internal-path prefix filter (e.g. `world`), case-insensitive; all models if omitted.
+        prefix: Option<String>,
+    },
     /// Sweep every `.m2` for flat ground-plane batches (every vertex at model-space z≈0), which
     /// sloped terrain buries; `QUAD-1BONE` is Battle Shout's crescent shape, a quad on one bone.
     Groundscan {
@@ -701,6 +707,7 @@ fn main() -> Result<()> {
         Command::Blendscan { prefix } => scan::blendscan(&mut chain, prefix.as_deref())?,
         Command::Bbscan { prefix } => scan::bbscan(&mut chain, prefix.as_deref())?,
         Command::Bbfacescan { prefix } => scan::bbfacescan(&mut chain, prefix.as_deref())?,
+        Command::Bbtexscan { prefix } => scan::bbtexscan(&mut chain, prefix.as_deref())?,
         Command::Groundscan { prefix } => scan::groundscan(&mut chain, prefix.as_deref())?,
         Command::Normalscan { prefix } => scan::normalscan(&mut chain, prefix.as_deref())?,
         Command::Animboundscan { prefix } => scan::animboundscan(&mut chain, prefix.as_deref())?,

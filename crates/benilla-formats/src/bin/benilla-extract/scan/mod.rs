@@ -12,7 +12,9 @@ mod sequence;
 mod skeleton;
 mod world;
 
-pub use geometry::{animboundscan, bbfacescan, bbscan, geosetscan, groundscan, normalscan};
+pub use geometry::{
+    animboundscan, bbfacescan, bbscan, bbtexscan, geosetscan, groundscan, normalscan,
+};
 pub use lighting::{darkpropscan, m2lightscan, shadeat};
 pub use material::{
     alphascan, blendscan, entityuvscan, envmapscan, fxuvscan, texmodescan, uvslotscan, uvwrapscan,
