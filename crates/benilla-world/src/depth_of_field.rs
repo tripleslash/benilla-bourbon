@@ -55,7 +55,7 @@ const START_YD: f32 = 22.0;
 const END_YD: f32 = 170.0;
 /// The share of the blur in the farthest pixel: well short of whole, so distance softens
 /// rather than smears.
-const STRENGTH: f32 = 0.39;
+const STRENGTH: f32 = 0.3;
 /// The composite's desaturation of the blur (`DepthOfField2`'s third term), a touch of haze.
 const DESATURATION: f32 = 0.1;
 /// The render height the reference's texel offsets are taken at; a taller frame spreads the
