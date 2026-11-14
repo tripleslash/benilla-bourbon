@@ -118,7 +118,7 @@ The mechanics are the `probe` skill.
 
 ## This fork
 
-This tree is a fork of benilla, kept current by merging upstream's `main`. These bind every
+This tree is benilla-bourbon, a fork of benilla kept current by merging upstream's `main`. These bind every
 session here:
 
 - **A merge or a port evaluates, every time, which approach is better.** Where upstream, or
@@ -129,7 +129,7 @@ session here:
   it is already here, and the incoming one is never dropped only because the fork already has a
   fix: "we already solve this" opens the comparison, it never ends it. An upstream change that
   contradicts a decision the fork made is listed for the maintainer, never merged in silently.
-  The steps are the `merge-upstream` skill.
+  `FORK.md` says what the fork changes.
 - **A full disk is cleared of stale build artifacts, and of nothing else.** When a build fails
   for want of space, remove the build artifacts under `target/`'s profile folders that no build
   touched today and run it again. Free space is read with `df`, never `du`, which walks the whole

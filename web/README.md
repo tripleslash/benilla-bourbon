@@ -158,33 +158,31 @@ you point them at to anyone who can reach the socket, with no login, so the bind
 `127.0.0.1` — the files are Blizzard's, and whoever serves them is distributing them. The public
 shape is the gateway below, which serves no files at all.
 
-## Staging to a static host
+## Staging for a static host
 
-The hosted tree is static assets and **no Worker script** — no invocations, no request billing.
-`scripts/stage-packs.sh` (run after `trunk build`; the build scripts run it themselves) assembles `web/site/` out of the two things
-that must not be in the same directory:
+The served tree is static files and **no server-side logic**: any static host or object store with
+the two cross-origin isolation headers can serve it. `scripts/stage-packs.sh` (run after `trunk
+build`; the build scripts run it themselves) assembles `web/site/` out of the two things that must
+not be in the same directory:
 
 ```
 web/dist/     Trunk's output           cleared on every build
 web/packs/    benilla-pack's output    3.3 GiB, rebuilt only when the game files change
-web/site/   what a static host serves    hardlinks to dist/, plus data -> ../packs
+web/site/     what a static host serves  hardlinks to dist/, plus data -> ../packs
 ```
 
-One file does not survive the trip as itself. A static host refuses any static asset over **25 MiB**
+`web/_headers` holds the response headers in the common `_headers` format; a host that does not read
+that file needs the same COOP/COEP pair and cache rules configured its own way.
+
+One file may not survive the trip as itself. Many static hosts refuse any asset over **25 MiB**
 and `wow_bg.wasm` is 77 MB — already `-O3 --strip-debug`'d down from ~90 MB, with one 184-byte
 custom section left, so there is nothing in it to cut. `stage-packs.sh` splits it into 24 MiB
 `wow.part*.wasm` and writes `wow.parts.json` naming them (`scripts/split-parts.sh`, which splits the
 desktop client's `wow-reforged.exe` the same way); `parts.js` fetches every part at once and
 concatenates them into one stream, so the browser still compiles the module while it downloads. `web/dist` keeps the whole file — `trunk serve` and `wenilla-host --www` have no such
 limit — and the manifest's presence is how the page knows which layout it is on. The staging script
-fails the build if any other asset crosses the cap.
-
-```bash
-an upload to the static host      # reads the host's config
-```
-
-[`site/README.md`](../site/README.md) is the end-to-end runbook for both halves: this upload,
-and the gateway + vmangos containers on the box it points at.
+fails the build if any other asset crosses the cap. Upload `web/site/` with whatever tool the host
+provides; the gateway below runs on the realm's own machine.
 
 ### `web/config.json` — the site's whole configuration
 
@@ -214,7 +212,7 @@ Which box the gateway relays *to* is its own decision, not the page's:
 wenilla-host --bind 127.0.0.1:8090                                  # gateway only: loopback realm
 wenilla-host --www web/dist --packs web/packs                       # + the page and the data
 wenilla-host --bind 127.0.0.1:8090 \
-  --upstream 10.0.0.5 --allow-remote-realms                          # a realm somewhere else
+  --upstream 192.0.2.10 --allow-remote-realms                       # a realm somewhere else
 ```
 
 With no `--www`/`--packs`/`--data` there are no routes but `/ws/{port}`, which is the whole of what

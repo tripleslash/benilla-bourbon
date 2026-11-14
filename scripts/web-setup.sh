@@ -66,10 +66,6 @@ else
   echo "  no binaryen release for this host — Trunk's own wasm-opt still runs"
 fi
 
-echo "== the upload tool (the site; optional until you have somewhere to site to)"
-command -v the upload tool >/dev/null || command -v npx >/dev/null || \
-  echo "  neither the upload tool nor npx found — install Node, then \an upload to the static host\`"
-
 cat <<'EOF'
 
 ready. The build is now:

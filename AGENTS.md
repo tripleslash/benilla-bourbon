@@ -16,7 +16,7 @@ address up at `https://samwhosung.github.io/benilla-re/?0x5e6853`. `docs/CONTRIB
 reference", says how to read it and what to do when it has a gap.
 
 Procedures with steps are skills in `.claude/skills/`: `probe` (an unattended run against the
-local server) and `merge-upstream` (bringing upstream benilla into this fork).
+local server).
 
 The rest of the root is code and data: `crates/` the workspace, `reference/` benilla-re's
 tables vendored at a pinned commit, which the tests check against, `scripts/` the gates and

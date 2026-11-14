@@ -1,21 +1,51 @@
 <div align="center">
-  <h1>benilla</h1>
-  <p><b>A complete World of Warcraft 1.12.1 client, written from scratch in Rust and <a href="https://bevy.org">Bevy</a></b></p>
-  <p>
-    <a href="https://discord.gg/wJSJx467G4"><img src="https://img.shields.io/discord/1529280129518538922?style=for-the-badge&logo=discord&logoColor=white&label=discord&color=5865F2" alt="Discord"></a>
-    <a href="https://www.youtube.com/playlist?list=PLdCnpZNKxyb8"><img src="https://img.shields.io/badge/devlog-youtube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube devlog"></a>
-    <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue?style=for-the-badge" alt="License"></a>
-  </p>
+  <h1>benilla-bourbon</h1>
+  <p><b>A fork of <a href="https://github.com/samwhosung/benilla">benilla</a>, the from-scratch World of Warcraft 1.12.1 client in Rust and Bevy, with a modern renderer, Turtle WoW support and a browser build</b></p>
 </div>
 
-## wenilla — this fork: benilla in a browser tab
+## What this fork changes
 
-This fork's `web` branch adds **wenilla**: the same client compiled to WebAssembly, so a 1.12.1
-server can be played from a browser with nothing installed — login, character select and the
-world, with the full FrameXML/Lua UI, over a WebSocket. Nothing is rewritten: raw TCP becomes a
-WebSocket through a small host (`wenilla-host`), the MPQ chain becomes a content-addressed
-container the browser streams from any static object store, and the C Lua 5.1 VM is compiled for
-wasm with the wasi-sdk sysroot. WebGPU is required for the world.
+benilla-bourbon follows upstream benilla's `main` by merge, so everything in upstream's README
+below still holds. On top of it, the fork adds the following. [`FORK.md`](FORK.md) describes each
+change in full, why each vendored library is vendored, and where the fork deviates from 1.12.1.
+
+- **Modern lighting** (optional; Classic stays the reference client): linear HDR, sun shadow
+  cascades, probe GI, froxel volumetrics, SSILVB ambient occlusion, auto-exposure, per-zone
+  looks, point lights and lamps, a night sky with a moon, stars and clouds; on native, hardware
+  ray tracing (sun and lamp shadows, probe GI, volumetric light), HDR output and depth of field.
+- **Water and weather:** a port of the Cataclysm client's water and lava with reflections,
+  ripples and shoreline foam, and an experimental ray-traced tier; rain, storms, lightning, mist
+  and wet surfaces.
+- **Culling and LOD:** the client's terrain horizon occlusion and chunk LOD, animation LOD, and a
+  90° Hor+ field of view.
+- **Engine:** Bevy 0.20.1 on a vendored wgpu 30, Vulkan by default and DX12 on native, NVIDIA
+  DLSS 4.5 (Super Resolution and Frame Generation) on native and FSR 3.1.5 everywhere, an async
+  compute queue, GPU-driven bindless static geometry with Hi-Z occlusion culling and mesh-shader
+  meshlets, GPU particle pools, and measured CPU and GPU performance work.
+- **Asset loading:** BLP, ADT, M2 and WMO decode off the main thread, streaming ahead of the
+  player under an upload budget, optional updated (HD) and reforged model layers, and a
+  content-addressed container for the game data.
+- **Turtle WoW 1.18.1:** its patch archives and data, realm detection with a live data switch,
+  its races (Goblin and High Elf included), its GlueXML and its options window.
+- **Browser build (wenilla):** the whole client compiled to WebAssembly with worker threads and a
+  render worker, streaming game data from a static host and reaching the realm through a
+  WebSocket gateway.
+- **Desktop client:** a self-contained Windows build that streams its game data from a static
+  host and updates itself.
+- **Gameplay and UI:** transport riding fixes, retail macro options (`[@mouseover]`,
+  `#showtooltip`), an AddOns options page, a server time offset, fidelity fixes, and bundled
+  addons: pfQuest, pfUI, ClassicAPI 1.20.6's API surface and Nampower 3's.
+- **Settings:** a Graphics Preset ladder and the fork's own rows in both options windows; every
+  default that differs from 1.12.1 is listed in [`docs/DEVIATIONS.md`](docs/DEVIATIONS.md).
+- **Vendored libraries:** patched copies of wgpu, five Bevy crates and a few support crates under
+  `third_party/`, each with a note saying why.
+
+### Running it in a browser
+
+The browser build needs nothing installed on the player's machine: raw TCP becomes a WebSocket
+through a small host (`wenilla-host`), the MPQ chain becomes a content-addressed container the
+browser streams from any static file host, and the C Lua 5.1 VM is compiled for wasm with the
+wasi-sdk sysroot. WebGPU is required for the world.
 
 ```bash
 scripts/web-setup.sh                                   # once: wasm target, Trunk, wasi-sdk (no sudo)
@@ -24,26 +54,34 @@ scripts/stage-packs.sh                                 # → web/site/ (.ps1 and
 scripts/web-build-threads.sh                           # …or the same build WITH worker threads, staged
 
 # once per install: 6.3 GiB of MPQ → a 3.3 GiB container of ~4,700 static objects
-cargo run --release -p benilla-packer --bin benilla-pack -- \
-    build --data /path/to/WoW/Data --out web/packs
+cargo run --release -p benilla-packer --bin benilla-pack --     build --data /path/to/WoW/Data --out web/packs
 # optional, if the install has patch-A.MPQ: the updated character models, own container
 #   (extract -> scripts/upscale-hd-textures.py -> build --replace-from; see web/README.md)
-cargo run --release -p benilla-packer --bin benilla-pack -- \
-    build --data /path/to/WoW/Data/patch-A.mpq --out web/packs-hd --replace-from /tmp/hd-char
+cargo run --release -p benilla-packer --bin benilla-pack --     build --data /path/to/WoW/Data/patch-A.mpq --out web/packs-hd --replace-from /tmp/hd-char
 cargo run --release -p wenilla-host -- --www web/dist --packs web/packs --packs-hd web/packs-hd
 # open http://127.0.0.1:8090/
 ```
 
 That command is the *local* shape: page, game data and net proxy from one process. A run that
-serves files has no login, so keep it on loopback or a private network. A site splits in two —
-the static tree (`web/site/`) goes to any object store, and the same binary runs on the realm box
-as a **gateway and nothing else** (`wenilla-host --bind …`, no `--www`/`--packs`), relaying
-`/ws/3724` and `/ws/8085` to realmd and mangosd on loopback. [`site/README.md`](site/README.md)
-is that hosting end to end — A static host on one side, docker compose with vmangos on the other;
-[`web/README.md`](web/README.md) has the how and the porting notes. Everything else
-below is upstream benilla's README, unchanged; upstream is
-[samwhosung/benilla](https://github.com/samwhosung/benilla), and the web work is meant to be
-upstreamable piece by piece.
+serves files has no login, so keep it on loopback or a private network. Hosted for others it
+splits in two: the static tree (`web/site/`) goes to any static file host, and the same binary
+runs on the realm's machine as a **gateway and nothing else** (`wenilla-host --bind …`, no
+`--www`/`--packs`), relaying `/ws/3724` and `/ws/8085` to realmd and mangosd on loopback.
+[`web/README.md`](web/README.md) has the how and the porting notes.
+
+---
+
+*Everything below is upstream benilla's README.*
+
+<div align="center">
+  <h1>benilla</h1>
+  <p><b>A complete World of Warcraft 1.12.1 client, written from scratch in Rust and <a href="https://bevy.org">Bevy</a></b></p>
+  <p>
+    <a href="https://discord.gg/wJSJx467G4"><img src="https://img.shields.io/discord/1529280129518538922?style=for-the-badge&logo=discord&logoColor=white&label=discord&color=5865F2" alt="Discord"></a>
+    <a href="https://www.youtube.com/playlist?list=PLdCnpZNKxyb8"><img src="https://img.shields.io/badge/devlog-youtube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube devlog"></a>
+    <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue?style=for-the-badge" alt="License"></a>
+  </p>
+</div>
 
 benilla plays the whole game: character creation, questing and professions, dungeons and raids,
 battlegrounds and honor, groups, guilds, trade, mail and the auction house, on the stock 1.12
@@ -134,7 +172,7 @@ does the same (`ln -s /path/to/WoW WoW`, or on Windows a junction, which needs n
 `New-Item -ItemType Junction -Path WoW -Target C:\path\to\WoW`). The server defaults to
 `localhost:3724`, the stock auth port. Point `WOW_HOST` at another (`WOW_HOST=play.example.com`, or
 `play.example.com:5000` for a remapped port), or set the `realmList` CVar in `config.toml`; this
-fork has no Realmlist button, and the browser build takes the address from the hosting's
+fork has no Realmlist button, and the browser build takes the address from the site's
 `/config.json`. Credentials go in at the login screen, or set `WOW_USER` and `WOW_PASS` to skip it.
 A PIN-protected account answers the keypad from `WOW_PIN` (the digits) or `WOW_PIN_TOTP` (the
 authenticator's base32 secret), as [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md), "Running it

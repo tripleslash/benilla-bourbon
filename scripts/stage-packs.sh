@@ -28,7 +28,7 @@
 # the inode and not the path.
 #
 #   STAGE_PACKS_LINK=hardlink   link every pack individually instead of linking the directory.
-#                               The fallback if the upload tool's asset walker will not traverse a
+#                               The fallback if a host's upload tool will not traverse a
 #                               junction/symlink — still seconds, still no extra disk.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -187,7 +187,7 @@ fi
 bash scripts/stage-desktop.sh
 
 # The class of bug, not the instance: anything else that grows past the cap fails the same way, and
-# it fails inside an upload to the static host minutes into an upload rather than here. `-maxdepth 1` on
+# it fails minutes into an upload rather than here. `-maxdepth 1` on
 # purpose — the packs under `data/` are capped by the packer (measured max 9.49 MiB) and walking a
 # junction over 4,700 files to re-prove that is not worth the seconds.
 oversize=$(find "${SITE}" -maxdepth 1 -type f -size +"${PART_MAX}"c)

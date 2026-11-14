@@ -46,7 +46,7 @@ trace-*.json
 /tools/binaryen/
 
 # The BENPACK container (`benilla-pack build`) — ~3 GiB of repackaged Blizzard data,
-# regenerated from the install, and the input to an upload to the static host. `packs-hd` is the same thing
+# regenerated from the install, and what the static tree serves under `/data`. `packs-hd` is the same thing
 # for the optional updated-character-model layer, built from `patch-A.MPQ` alone and hosted
 # beside the corpus at `/data-hd` — a separate tree so a player with the option off downloads none
 # of it.
@@ -59,8 +59,6 @@ trace-*.json
 /web/packs*/
 /web/site/
 
-# the upload tool local state (account id cache) — machine-local, not the project.
-/.host-cache/
 
 # Claude Code: share the project hooks + settings + slash commands + skills, ignore per-machine state.
 /.claude/*

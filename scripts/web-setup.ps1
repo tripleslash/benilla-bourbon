@@ -109,11 +109,6 @@ if ([IO.File]::Exists((Resolve-Repo 'tools/binaryen/bin/wasm-opt')) -or [IO.File
     Write-Host '  no binaryen release for this host - Trunk''s own wasm-opt still runs'
 }
 
-Write-Host '== the upload tool (the site; optional until you have somewhere to site to)'
-if (-not (Get-Command the upload tool -ErrorAction SilentlyContinue) -and -not (Get-Command npx -ErrorAction SilentlyContinue)) {
-    Write-Host '  neither the upload tool nor npx found - install Node, then an upload to the static host'
-}
-
 Write-Host @'
 
 ready. The build is now:

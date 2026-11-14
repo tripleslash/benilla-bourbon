@@ -1,4 +1,4 @@
-//! `WOW_FSR_DEBUG=residual` — the plan's motion-vector check (`FORK.md`, Verification 3):
+//! `WOW_FSR_DEBUG=residual` — the plan's motion-vector check (`FORK.md`, FSR 3.1.5):
 //! over the pixels a moving draw wrote, the mean luma difference between each rendered frame and
 //! the last one read back through the frame's own motion vectors, against the camera's
 //! reprojection alone (`shaders/fsr/residual.wgsl`). Vectors that carry the movement make the

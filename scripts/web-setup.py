@@ -155,10 +155,6 @@ def main():
     else:
         say("  no binaryen release for this host - Trunk's own wasm-opt still runs")
 
-    say("== the upload tool (the site; optional until you have somewhere to site to)")
-    if not shutil.which("the upload tool") and not shutil.which("npx"):
-        say("  neither the upload tool nor npx found - install Node, then an upload to the static host")
-
     say(CLOSING)
     return 0
 
