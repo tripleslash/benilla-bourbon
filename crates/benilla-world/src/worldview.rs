@@ -156,6 +156,10 @@ pub fn run_with(build: BuildId, extra: impl FnOnce(&mut App)) -> AppExit {
         ),
     }
 
+    // One backend, as the client boots on `gxApi`'s (`view_backends`).
+    #[cfg(not(target_arch = "wasm32"))]
+    let backends = view_backends();
+
     // fork: dlss (FORK.md) — DLSS's boot half, as the client's: NGX's runtime path and
     // Streamline (Reflex, DLSS frame generation) from `$WOW_DLSS_PATH` or `benilla-config/dlss/`
     // under the working folder, before `RenderPlugin` creates the device. `WOW_STREAMLINE=0`
@@ -165,7 +169,6 @@ pub fn run_with(build: BuildId, extra: impl FnOnce(&mut App)) -> AppExit {
         let state = std::env::current_dir()
             .ok()
             .map(|d| d.join("benilla-config"));
-        let backends = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::all());
         let streamline =
             !crate::launch_env::live_var("WOW_STREAMLINE").is_some_and(|v| v.trim() == "0");
         crate::dlss::install_boot(
@@ -177,7 +180,7 @@ pub fn run_with(build: BuildId, extra: impl FnOnce(&mut App)) -> AppExit {
     }
 
     let background = crate::bgwin::background_run();
-    app.add_plugins(boot::tuned_default_plugins(Window {
+    let plugins = boot::tuned_default_plugins(Window {
         title: "benilla worldview".into(),
         resolution: std::env::var("WOW_WIN")
             .ok()
@@ -217,12 +220,24 @@ pub fn run_with(build: BuildId, extra: impl FnOnce(&mut App)) -> AppExit {
             bevy::window::WindowLevel::Normal
         },
         ..default()
-    }))
-    .add_plugins(thread_qos::ThreadQosPlugin)
-    .add_plugins(crate::bgwin::BgWinPlugin)
-    // macOS `Cmd+Q` is wired to `terminate:`, which leaves the event loop with no `AppExit`, and
-    // `report_check` needs one for the exit code.
-    .add_plugins(crate::mac_quit::MacQuitPlugin);
+    });
+    // The renderer on that one backend, the rest of `boot`'s settings kept.
+    #[cfg(not(target_arch = "wasm32"))]
+    let plugins = plugins.set(bevy::render::RenderPlugin {
+        render_creation: bevy::render::settings::WgpuSettings {
+            backends: Some(backends),
+            disabled_features: crate::perf_probe::gpu_stats::disabled_features(),
+            ..default()
+        }
+        .into(),
+        ..default()
+    });
+    app.add_plugins(plugins)
+        .add_plugins(thread_qos::ThreadQosPlugin)
+        .add_plugins(crate::bgwin::BgWinPlugin)
+        // macOS `Cmd+Q` is wired to `terminate:`, which leaves the event loop with no `AppExit`, and
+        // `report_check` needs one for the exit code.
+        .add_plugins(crate::mac_quit::MacQuitPlugin);
 
     // The cut line: the engine's whole plugin group, the same one the client adds.
     app.add_plugins(crate::world_plugins::WorldPlugins);
@@ -511,6 +526,32 @@ fn start_pose() -> (Vec3, f32, f32) {
         deg("WOW_WORLDVIEW_FACE"),
         deg("WOW_WORLDVIEW_PITCH"),
     )
+}
+
+/// The backends the viewer creates its renderer on: `$WGPU_BACKEND`, else Vulkan where an adapter
+/// answers for it (the backend wgpu's own pick lands on wherever both it and DX12 exist, so the
+/// viewer's measurements keep their backend), else every backend. One backend because NGX's Vulkan
+/// extensions are registered only on a Vulkan-only boot (`dlss::sr::register_vulkan_extensions`):
+/// on every backend at once, DLSS reported itself unsupported and fell back to FSR. The client
+/// boots on `gxApi`'s one backend the same way (`benilla_app::video`).
+#[cfg(not(target_arch = "wasm32"))]
+fn view_backends() -> wgpu::Backends {
+    if let Some(env) = wgpu::Backends::from_env() {
+        println!("render: backends {env:?} from $WGPU_BACKEND");
+        return env;
+    }
+    let vulkan = wgpu::Backends::VULKAN;
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: vulkan,
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    if bevy::tasks::block_on(instance.enumerate_adapters(vulkan)).is_empty() {
+        println!("render: no Vulkan adapter; wgpu picks the backend");
+        wgpu::Backends::all()
+    } else {
+        println!("render: backends {vulkan:?}");
+        vulkan
+    }
 }
 
 /// fork: native HDR output — `WOW_HDR=1` presents in scRGB as the client's `hdrOutput` does, at
