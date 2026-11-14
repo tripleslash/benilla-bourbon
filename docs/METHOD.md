@@ -121,11 +121,13 @@ The mechanics are the `probe` skill.
 This tree is a fork of benilla, kept current by merging upstream's `main`. These bind every
 session here:
 
-- **A merge or a port keeps one mechanism per problem.** Where upstream, or another fork a
-  change is ported from, and this fork both solve the same problem, the merge or port takes the
-  better approach or combines the two, in what merged cleanly as much as in the conflicts; it
-  never leaves both standing, and never keeps the fork's only because it is the fork's, nor
-  drops the incoming one only because the fork already has a fix. An upstream change that
+- **A merge or a port evaluates, every time, which approach is better.** Where upstream, or
+  another fork a change is ported from, and this fork both solve the same problem, the two are
+  compared on their merits (fidelity to the reference, correctness, performance, simplicity) and
+  the better-implemented one wins, or a combination of the two where each does part better. This
+  holds in what merged cleanly as much as in the conflicts. The fork's is never kept only because
+  it is already here, and the incoming one is never dropped only because the fork already has a
+  fix: "we already solve this" opens the comparison, it never ends it. An upstream change that
   contradicts a decision the fork made is listed for the maintainer, never merged in silently.
   The steps are the `merge-upstream` skill.
 - **A full disk is cleared of stale build artifacts, and of nothing else.** When a build fails
