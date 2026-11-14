@@ -131,6 +131,8 @@ pub mod dlss;
 pub mod ground_fx;
 // fork: native HDR output — the scRGB swapchain and how the frame is placed on it.
 pub mod hdr_output;
+// fork: native HDR output — `WOW_HDR_PROBE=1`, the frame's peak and share above white, in nits.
+pub mod hdr_probe;
 pub mod horizon;
 pub mod instance_tint;
 pub mod interact;

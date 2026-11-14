@@ -173,7 +173,10 @@ impl Plugin for HdrOutputPlugin {
         app.init_resource::<HdrOutputSetting>()
             .init_resource::<HdrDisplay>()
             .init_resource::<WindowHdrOutput>()
-            .add_plugins(ExtractResourcePlugin::<HdrDisplay>::default())
+            .add_plugins((
+                ExtractResourcePlugin::<HdrDisplay>::default(),
+                crate::hdr_probe::HdrProbePlugin,
+            ))
             .add_systems(PostUpdate, sync_hdr_output.run_if(hdr_in_play));
     }
 }
