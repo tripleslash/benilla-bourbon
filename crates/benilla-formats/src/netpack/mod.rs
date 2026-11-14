@@ -20,6 +20,14 @@
 //! With the origin unreachable the store opens on the index it holds, and reads what it has cached;
 //! with neither it fails at open, which is the one place that can say why.
 //!
+//! **A new build mid-session.** A pack's URL carries its id alone, so once the origin moves to a new
+//! build a pack the old index names comes back with another length or CRC, or not at all. Such a
+//! failure asks the version pointer again (`NetPackStore::row_superseded`, at most once per
+//! `RECHECK_EVERY`); when it names another build the store takes that build's index as at open —
+//! fetched, kept, the cache swept — and the read is made again against it. Everything kept per pack
+//! (failures, decoded bodies, the warm queue) is keyed by `(id, crc)`, so nothing recorded against
+//! the old build is mistaken for the new one's.
+//!
 //! A store with no origin reads a container built on this machine (`benilla-pack build`'s `--out`)
 //! in place, its packs at their served paths.
 //!
@@ -37,7 +45,8 @@ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError, RwLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use benilla_pack::{decode_pack_body, frame_bytes, pack_body, Index, Located, PackMeta};
@@ -57,7 +66,10 @@ const ATTEMPTS: usize = 3;
 /// fork: desktop — a read on the frame thread that waited on the network at least this long is
 /// reported ([`NetPackStore::read`]): the window draws nothing while it waits, and past ~5 s Windows
 /// calls it "Not Responding".
-const FRAME_WAIT_REPORT: std::time::Duration = std::time::Duration::from_millis(100);
+const FRAME_WAIT_REPORT: Duration = Duration::from_millis(100);
+/// fork: desktop — how often a pack failing its row may ask the origin's pointer whether a new build
+/// is out: a damaged transfer or a missing object on an unchanged build must not ask on every try.
+const RECHECK_EVERY: Duration = Duration::from_secs(10);
 /// Decoded bodies of solid packs kept in memory. A stored pack is read a frame at a time off its
 /// file, so only a solid one (one zstd stream, unreadable in parts) is held whole.
 const SOLID_CACHE_BYTES: usize = 256 * 1024 * 1024;
@@ -87,43 +99,87 @@ impl Drop for Foreground {
     }
 }
 
+/// A pack as one build's index names it: `(id, crc32)`. Two builds that give an id different bytes
+/// give it different keys.
+type PackKey = (u32, u32);
+
+fn key(pack_id: u32, meta: &PackMeta) -> PackKey {
+    (pack_id, meta.crc32)
+}
+
+/// One build of the container: its index, the version pointer that named it, and its listfile.
+struct Build {
+    index: Arc<Index>,
+    /// The pointer's text, when the origin served one for this build.
+    pointer: Option<String>,
+    listfile: OnceLock<Option<Vec<String>>>,
+}
+
+impl Build {
+    fn new(index: Index, pointer: Option<String>) -> Arc<Self> {
+        Arc::new(Self {
+            index: Arc::new(index),
+            pointer,
+            listfile: OnceLock::new(),
+        })
+    }
+
+    fn locate(&self, name: &str) -> Option<(Located, PackMeta)> {
+        let at = self.index.locate(benilla_mpq::name_key(name))?;
+        Some((at, self.index.pack(at.pack_id)?))
+    }
+
+    /// Whether this build names `pack_id` with these bytes.
+    fn names(&self, pack_id: u32, meta: &PackMeta) -> bool {
+        self.index
+            .pack(pack_id)
+            .is_some_and(|m| m.crc32 == meta.crc32 && m.size_wire == meta.size_wire)
+    }
+}
+
 /// A container, open: its index in memory, its packs on disk or a fetch away.
 pub struct NetPackStore {
     root: PathBuf,
     origin: Option<Box<dyn Fetch>>,
-    index: Index,
-    listfile: OnceLock<Option<Vec<String>>>,
+    /// The build reads answer from, replaced when the origin moves to another
+    /// ([`Self::row_superseded`]).
+    build: RwLock<Arc<Build>>,
     solid: Mutex<SolidCache>,
     /// Packs a thread is downloading now; a second asker waits on [`Self::landed`].
     loading: Mutex<HashSet<u32>>,
     landed: Condvar,
     /// Packs whose download failed this session: a `try_read` of them is a miss, not a wait.
-    failed: Mutex<HashSet<u32>>,
+    failed: Mutex<HashSet<PackKey>>,
     warm: WarmQueue,
     /// The background fill's place: every pack below it is cached or skipped.
     fill_cursor: AtomicU32,
     /// The packs the origin's version pointer lists for boot and world entry
     /// ([`Self::warm_boot_set`]), the set Enter World waits on ([`Self::world_entry_progress`]).
-    entry_set: OnceLock<Vec<u32>>,
+    entry_set: Mutex<Option<Vec<u32>>>,
     /// Members of [`Self::entry_set`] seen cached or failed, so a progress poll stats each once.
-    entry_landed: Mutex<HashSet<u32>>,
+    entry_landed: Mutex<HashSet<PackKey>>,
     /// Packs whose background download failed: the fill passes them, a read still asks.
-    fill_skipped: Mutex<HashSet<u32>>,
+    fill_skipped: Mutex<HashSet<PackKey>>,
+    /// When a failing pack last asked the origin's pointer ([`Self::row_superseded`]); held across
+    /// the ask, so a second failure waits and then finds the new build in place.
+    rechecked: Mutex<Option<Instant>>,
 }
 
 impl NetPackStore {
     /// Open the container cached at `root`, synced against `origin` when there is one.
     pub fn open(root: &Path, origin: Option<Box<dyn Fetch>>) -> Result<Self> {
         std::fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
-        let index = match &origin {
+        let (index, pointer) = match &origin {
             Some(origin) => sync_index(root, origin.as_ref())?,
-            None => read_index(root)?.ok_or_else(|| anyhow!("no {INDEX} in {}", root.display()))?,
+            None => (
+                read_index(root)?.ok_or_else(|| anyhow!("no {INDEX} in {}", root.display()))?,
+                None,
+            ),
         };
         Ok(Self {
             root: root.to_path_buf(),
             origin,
-            index,
-            listfile: OnceLock::new(),
+            build: RwLock::new(Build::new(index, pointer)),
             solid: Mutex::new(SolidCache::default()),
             loading: Mutex::new(HashSet::new()),
             landed: Condvar::new(),
@@ -131,14 +187,20 @@ impl NetPackStore {
             warm: WarmQueue::default(),
             fill_cursor: AtomicU32::new(0),
             fill_skipped: Mutex::new(HashSet::new()),
-            entry_set: OnceLock::new(),
+            entry_set: Mutex::new(None),
             entry_landed: Mutex::new(HashSet::new()),
+            rechecked: Mutex::new(None),
         })
     }
 
-    /// The index, for diagnostics and the byte total.
-    pub fn index(&self) -> &Index {
-        &self.index
+    /// The build reads answer from now.
+    fn current(&self) -> Arc<Build> {
+        Arc::clone(&self.build.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// The index reads answer from now, for diagnostics and the byte total.
+    pub fn index(&self) -> Arc<Index> {
+        Arc::clone(&self.current().index)
     }
 
     /// The folder this container is cached in.
@@ -148,27 +210,42 @@ impl NetPackStore {
 
     /// Whether the container holds `name` (`/` or `\`, any case): a binary search, no I/O.
     pub fn contains(&self, name: &str) -> bool {
-        self.index.locate(benilla_mpq::name_key(name)).is_some()
+        self.current()
+            .index
+            .locate(benilla_mpq::name_key(name))
+            .is_some()
     }
 
     fn locate(&self, name: &str) -> Option<(Located, PackMeta)> {
-        let at = self.index.locate(benilla_mpq::name_key(name))?;
-        Some((at, self.index.pack(at.pack_id)?))
+        self.current().locate(name)
     }
 
-    /// Read `name`, blocking on a download when its pack is not cached.
+    /// Read `name`, blocking on a download when its pack is not cached. A read that fails while
+    /// the store moves to a new build is made once more, against that build.
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
-        let Some((at, meta)) = self.locate(name) else {
-            // The native chain's wording: callers match on it.
-            bail!("file not in patch chain: {name}");
-        };
-        let started = std::time::Instant::now();
-        let ensured = self.ensure(at.pack_id, &meta);
-        report_frame_wait(started.elapsed(), at.pack_id, name);
-        let path = ensured.map_err(|e| pack_err(name, at.pack_id, e))?;
-        self.frame(&path, &at, &meta)
-            .and_then(|frame| frame_bytes(&frame).map_err(|e| anyhow!("{e}")))
-            .with_context(|| format!("reading {name} from pack {}", at.pack_id))
+        let mut again = true;
+        loop {
+            let build = self.current();
+            let Some((at, meta)) = build.locate(name) else {
+                // The native chain's wording: callers match on it.
+                bail!("file not in patch chain: {name}");
+            };
+            let started = Instant::now();
+            let ensured = self.ensure(at.pack_id, &meta);
+            report_frame_wait(started.elapsed(), at.pack_id, name);
+            let read = ensured
+                .map_err(|e| pack_err(name, at.pack_id, e))
+                .and_then(|path| {
+                    self.frame(&path, &at, &meta)
+                        .and_then(|frame| frame_bytes(&frame).map_err(|e| anyhow!("{e}")))
+                        .with_context(|| format!("reading {name} from pack {}", at.pack_id))
+                });
+            if read.is_err() && again && !Arc::ptr_eq(&build, &self.current()) {
+                again = false;
+                continue;
+            }
+            return read;
+        }
     }
 
     /// Read `name` without waiting on the network: a cached pack answers now, an uncached one is
@@ -178,10 +255,10 @@ impl NetPackStore {
             return TryRead::Missing;
         };
         if self.cached(at.pack_id, &meta).is_none() {
-            if self.has_failed(at.pack_id) {
+            if self.has_failed(at.pack_id, &meta) {
                 return TryRead::Missing;
             }
-            self.queue(at.pack_id, crate::web::warm_priority(name));
+            self.queue(at.pack_id, &meta, crate::web::warm_priority(name));
             return TryRead::Pending;
         }
         match self.read(name) {
@@ -196,10 +273,10 @@ impl NetPackStore {
         let Some((at, meta)) = self.locate(name) else {
             return true;
         };
-        if self.cached(at.pack_id, &meta).is_some() || self.has_failed(at.pack_id) {
+        if self.cached(at.pack_id, &meta).is_some() || self.has_failed(at.pack_id, &meta) {
             return true;
         }
-        self.queue(at.pack_id, crate::web::warm_priority(name));
+        self.queue(at.pack_id, &meta, crate::web::warm_priority(name));
         false
     }
 
@@ -207,67 +284,81 @@ impl NetPackStore {
     pub fn prefetch(self: &Arc<Self>, name: &str) {
         if let Some((at, meta)) = self.locate(name) {
             if self.cached(at.pack_id, &meta).is_none() {
-                self.queue(at.pack_id, crate::web::warm_priority(name));
+                self.queue(at.pack_id, &meta, crate::web::warm_priority(name));
             }
         }
     }
 
     /// Queue the packs the origin's version pointer lists for boot, world entry and the glue
     /// screens, so a first run's opening reads find them landing rather than start them.
+    /// The pointer is the one that named the build the store holds, read with its index, so its
+    /// pack ids are that index's.
     pub fn warm_boot_set(self: &Arc<Self>) {
-        let Some(origin) = &self.origin else {
+        let build = self.current();
+        let Some(pointer) = build.pointer.as_deref() else {
             return;
         };
-        let Ok(pointer) = origin.get(POINTER) else {
-            return;
-        };
-        let ids = boot_pack_ids(&String::from_utf8_lossy(&pointer));
+        let ids = boot_pack_ids(pointer);
         for &id in &ids {
-            if let Some(meta) = self.index.pack(id) {
+            if let Some(meta) = build.index.pack(id) {
                 if self.cached(id, &meta).is_none() {
-                    self.queue(id, crate::web::PRIORITY_NORMAL);
+                    self.queue(id, &meta, crate::web::PRIORITY_NORMAL);
                 }
             }
         }
-        let _ = self.entry_set.set(ids);
+        *self
+            .entry_set
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(ids);
     }
 
     /// fork: desktop — how much of the boot and world-entry set ([`Self::warm_boot_set`]) is on
     /// disk: `(bytes landed, bytes in the set)`, a pack whose download failed this session counted
     /// as landed, since waiting on it changes nothing. `(0, 0)` before the set is known.
     pub fn world_entry_progress(&self) -> (u64, u64) {
-        let Some(ids) = self.entry_set.get() else {
+        let Some(ids) = self.entry_ids() else {
             return (0, 0);
         };
+        let index = self.index();
         let mut landed = self
             .entry_landed
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let (mut done, mut total) = (0u64, 0u64);
-        for &id in ids {
-            let Some(meta) = self.index.pack(id) else {
+        for id in ids {
+            let Some(meta) = index.pack(id) else {
                 continue;
             };
             let size = u64::from(meta.size_wire);
             total += size;
-            if landed.contains(&id) || self.cached(id, &meta).is_some() || self.has_failed(id) {
-                landed.insert(id);
+            let k = key(id, &meta);
+            if landed.contains(&k) || self.cached(id, &meta).is_some() || self.has_failed(id, &meta)
+            {
+                landed.insert(k);
                 done += size;
             }
         }
         (done, total)
     }
 
+    fn entry_ids(&self) -> Option<Vec<u32>> {
+        self.entry_set
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// fork: desktop — move every pack of the world-entry set not yet on disk to the head of the
     /// warm queue: Enter World waits on them ([`Self::world_entry_progress`]).
     pub fn promote_world_entry(self: &Arc<Self>) {
-        let Some(ids) = self.entry_set.get() else {
+        let Some(ids) = self.entry_ids() else {
             return;
         };
-        for &id in ids {
-            if let Some(meta) = self.index.pack(id) {
-                if self.cached(id, &meta).is_none() && !self.has_failed(id) {
-                    self.queue_with(id, crate::web::PRIORITY_TERRAIN_NEAR, true);
+        let index = self.index();
+        for id in ids {
+            if let Some(meta) = index.pack(id) {
+                if self.cached(id, &meta).is_none() && !self.has_failed(id, &meta) {
+                    self.queue_with(id, &meta, crate::web::PRIORITY_TERRAIN_NEAR, true);
                 }
             }
         }
@@ -277,15 +368,16 @@ impl NetPackStore {
     /// included: what is on screen now waits on it (the loading screen's backdrop).
     pub fn prefetch_first(self: &Arc<Self>, name: &str) {
         if let Some((at, meta)) = self.locate(name) {
-            if self.cached(at.pack_id, &meta).is_none() && !self.has_failed(at.pack_id) {
-                self.queue_with(at.pack_id, crate::web::PRIORITY_TERRAIN_FOCUS, true);
+            if self.cached(at.pack_id, &meta).is_none() && !self.has_failed(at.pack_id, &meta) {
+                self.queue_with(at.pack_id, &meta, crate::web::PRIORITY_TERRAIN_FOCUS, true);
             }
         }
     }
 
     /// The container's listfile, for `Chain::list`: names only (the index is keyed by hash).
     pub fn listfile(&self) -> Result<Vec<ChainEntry>> {
-        let names = self
+        let build = self.current();
+        let names = build
             .listfile
             .get_or_init(|| {
                 let bytes = std::fs::read(self.root.join(LISTFILE)).ok()?;
@@ -325,11 +417,11 @@ impl NetPackStore {
         (len == u64::from(meta.size_wire)).then_some(path)
     }
 
-    fn has_failed(&self, pack_id: u32) -> bool {
+    fn has_failed(&self, pack_id: u32, meta: &PackMeta) -> bool {
         self.failed
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .contains(&pack_id)
+            .contains(&key(pack_id, meta))
     }
 
     /// Whether a warm waits in this store's queue.
@@ -348,18 +440,19 @@ impl NetPackStore {
     /// nothing to fill.
     pub fn next_unfilled(&self) -> Option<u32> {
         self.origin.as_ref()?;
-        let skipped = |id: u32| {
-            self.has_failed(id)
+        let skipped = |id: u32, meta: &PackMeta| {
+            self.has_failed(id, meta)
                 || self
                     .fill_skipped
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .contains(&id)
+                    .contains(&key(id, meta))
         };
+        let index = self.index();
         let mut at = self.fill_cursor.load(Ordering::Relaxed);
-        while at < self.index.pack_count() {
-            if let Some(meta) = self.index.pack(at) {
-                if self.cached(at, &meta).is_none() && !skipped(at) {
+        while at < index.pack_count() {
+            if let Some(meta) = index.pack(at) {
+                if self.cached(at, &meta).is_none() && !skipped(at, &meta) {
                     self.fill_cursor.store(at, Ordering::Relaxed);
                     return Some(at);
                 }
@@ -374,7 +467,7 @@ impl NetPackStore {
     /// skips the pack for the fill alone: a read of it later still downloads it.
     pub fn fill(&self, pack_id: u32) -> io::Result<()> {
         let meta = self
-            .index
+            .index()
             .pack(pack_id)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no pack {pack_id}")))?;
         self.ensure_as(pack_id, &meta, false).map(|_| ())
@@ -412,14 +505,15 @@ impl NetPackStore {
             loading.insert(pack_id);
         }
         let held = foreground.then(Foreground::enter);
-        let got = download(
+        let got = self.download(
             origin.as_ref(),
             &self.pack_file(pack_id, meta),
             pack_id,
             meta,
         );
         drop(held);
-        if got.is_err() {
+        // A row a new build superseded is no failure of the pack: the new build's row is asked anew.
+        if got.as_ref().is_err_and(|e| !is_superseded(e)) {
             let skip = if foreground {
                 &self.failed
             } else {
@@ -427,7 +521,7 @@ impl NetPackStore {
             };
             skip.lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .insert(pack_id);
+                .insert(key(pack_id, meta));
         }
         self.loading
             .lock()
@@ -464,7 +558,7 @@ impl NetPackStore {
             .solid
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(pack_id)
+            .get(key(pack_id, meta))
         {
             return Ok(body);
         }
@@ -477,32 +571,33 @@ impl NetPackStore {
         self.solid
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .put(pack_id, Arc::clone(&body));
+            .put(key(pack_id, meta), Arc::clone(&body));
         Ok(body)
     }
 
-    /// Hand `pack_id` to the warm threads, starting them on first use.
-    fn queue(self: &Arc<Self>, pack_id: u32, priority: u8) {
-        self.queue_with(pack_id, priority, false);
+    /// Hand `pack_id`, as `meta` names it, to the warm threads, starting them on first use.
+    fn queue(self: &Arc<Self>, pack_id: u32, meta: &PackMeta, priority: u8) {
+        self.queue_with(pack_id, meta, priority, false);
     }
 
     /// [`Self::queue`]; with `again`, a pack already queued is queued once more at `priority`, so
     /// a promotion overtakes its earlier place (the later pop finds it cached and moves on).
-    fn queue_with(self: &Arc<Self>, pack_id: u32, priority: u8, again: bool) {
+    fn queue_with(self: &Arc<Self>, pack_id: u32, meta: &PackMeta, priority: u8, again: bool) {
         if self.origin.is_none() {
             return;
         }
+        let k = key(pack_id, meta);
         let mut q = self
             .warm
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if !q.queued.insert(pack_id) && !again {
+        if !q.queued.insert(k) && !again {
             return;
         }
         q.seq += 1;
         let seq = q.seq;
-        q.heap.push(std::cmp::Reverse((priority, seq, pack_id)));
+        q.heap.push(std::cmp::Reverse((priority, seq, k)));
         if !q.started {
             q.started = true;
             for n in 0..WARM_THREADS {
@@ -515,6 +610,131 @@ impl NetPackStore {
         drop(q);
         self.warm.ready.notify_one();
     }
+
+    /// Fetch one pack and keep it at `dest` once its length, CRC32 and header check out; written
+    /// beside and renamed, so a crash mid-write leaves no file of the right name. An object that
+    /// fails its row, or is gone, first asks whether the row is still the origin's
+    /// ([`Self::row_superseded`]); when it is not, the download stops with [`Superseded`].
+    fn download(
+        &self,
+        origin: &dyn Fetch,
+        dest: &Path,
+        pack_id: u32,
+        meta: &PackMeta,
+    ) -> io::Result<()> {
+        let rel = benilla_pack::pack_path(pack_id);
+        let mut last = None;
+        for _ in 0..ATTEMPTS {
+            let refused = match origin.get(&rel) {
+                Ok(wire) => match check_pack(&wire, pack_id, meta) {
+                    Ok(()) => return write_atomic(dest, &wire),
+                    Err(e) => e,
+                },
+                Err(e) if e.kind() == io::ErrorKind::NotFound => e,
+                Err(e) => {
+                    last = Some(e);
+                    continue;
+                }
+            };
+            if self.row_superseded(pack_id, meta) {
+                return Err(io::Error::other(Superseded(pack_id)));
+            }
+            if refused.kind() == io::ErrorKind::NotFound {
+                return Err(refused);
+            }
+            last = Some(refused);
+        }
+        Err(last.unwrap_or_else(|| io::Error::other("no attempt made")))
+    }
+
+    /// fork: desktop — whether the build the store holds no longer names `pack_id` as `meta` does,
+    /// after a download of it failed its row. Asks the origin's pointer, at most once per
+    /// [`RECHECK_EVERY`]; when it names another build, the store moves onto it ([`Self::adopt`]).
+    fn row_superseded(&self, pack_id: u32, meta: &PackMeta) -> bool {
+        if !self.current().names(pack_id, meta) {
+            return true;
+        }
+        let Some(origin) = &self.origin else {
+            return false;
+        };
+        let mut last = self
+            .rechecked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // A thread that held the lock may have moved the store while this one waited on it.
+        if !self.current().names(pack_id, meta) {
+            return true;
+        }
+        if last.is_some_and(|at| at.elapsed() < RECHECK_EVERY) {
+            return false;
+        }
+        *last = Some(Instant::now());
+        let held = self.current().index.build_id();
+        let Some((pointer, wanted)) = fetch_pointer(origin.as_ref()) else {
+            return false;
+        };
+        if wanted == held {
+            return false;
+        }
+        match fetch_index(&self.root, origin.as_ref(), Some((pointer, wanted))) {
+            Ok((index, pointer)) => self.adopt(index, pointer),
+            Err(e) => {
+                eprintln!(
+                    "benilla: {} has build {wanted:016x} out, but its index would not load: {e:#}",
+                    origin.describe()
+                );
+                return false;
+            }
+        }
+        !self.current().names(pack_id, meta)
+    }
+
+    /// Answer from `index` from now on: the fill starts over, and the world-entry set becomes the
+    /// new pointer's.
+    fn adopt(&self, index: Index, pointer: Option<String>) {
+        let ids = pointer.as_deref().map(boot_pack_ids);
+        let build = Build::new(index, pointer);
+        let new_id = build.index.build_id();
+        let old = std::mem::replace(
+            &mut *self.build.write().unwrap_or_else(PoisonError::into_inner),
+            build,
+        );
+        eprintln!(
+            "benilla: {} moved from build {:016x} to {new_id:016x}",
+            self.root.display(),
+            old.index.build_id()
+        );
+        self.fill_cursor.store(0, Ordering::Relaxed);
+        let mut entry = self
+            .entry_set
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if entry.is_some() {
+            *entry = Some(ids.unwrap_or_default());
+        }
+        drop(entry);
+        self.entry_landed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+}
+
+/// fork: desktop — a download stopped because the origin serves another build than the row it
+/// was made for: the read is made again against the build the store moved to.
+#[derive(Debug)]
+struct Superseded(u32);
+
+impl std::fmt::Display for Superseded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "pack {}: the origin now serves another build", self.0)
+    }
+}
+
+impl std::error::Error for Superseded {}
+
+fn is_superseded(e: &io::Error) -> bool {
+    e.get_ref().is_some_and(|inner| inner.is::<Superseded>())
 }
 
 /// One warm thread: pop the best-priority pack, download it, repeat; ends with its store.
@@ -523,20 +743,20 @@ fn warm_loop(store: &std::sync::Weak<NetPackStore>) {
         let Some(this) = store.upgrade() else {
             return;
         };
-        let pack_id = {
+        let pack = {
             let mut q = this
                 .warm
                 .state
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             loop {
-                if let Some(std::cmp::Reverse((_, _, id))) = q.heap.pop() {
-                    break id;
+                if let Some(std::cmp::Reverse((_, _, k))) = q.heap.pop() {
+                    break k;
                 }
                 let (next, _) = this
                     .warm
                     .ready
-                    .wait_timeout(q, std::time::Duration::from_secs(5))
+                    .wait_timeout(q, Duration::from_secs(5))
                     .unwrap_or_else(PoisonError::into_inner);
                 q = next;
                 if q.heap.is_empty() && Arc::strong_count(&this) == 1 {
@@ -544,9 +764,14 @@ fn warm_loop(store: &std::sync::Weak<NetPackStore>) {
                 }
             }
         };
-        if let Some(meta) = this.index.pack(pack_id) {
+        let (pack_id, crc) = pack;
+        // A pack queued for a build the store has since left is passed: its asker queues the new
+        // build's row when it asks again.
+        if let Some(meta) = this.index().pack(pack_id).filter(|m| m.crc32 == crc) {
             if let Err(e) = this.ensure(pack_id, &meta) {
-                eprintln!("benilla: pack {pack_id} could not be fetched: {e}");
+                if !is_superseded(&e) {
+                    eprintln!("benilla: pack {pack_id} could not be fetched: {e}");
+                }
             }
         }
         this.warm
@@ -554,7 +779,7 @@ fn warm_loop(store: &std::sync::Weak<NetPackStore>) {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .queued
-            .remove(&pack_id);
+            .remove(&pack);
     }
 }
 
@@ -567,29 +792,30 @@ struct WarmQueue {
 #[derive(Default)]
 struct WarmState {
     /// `(priority, arrival, pack)`, least first: a lower priority number is wanted sooner.
-    heap: BinaryHeap<std::cmp::Reverse<(u8, u64, u32)>>,
-    queued: HashSet<u32>,
+    heap: BinaryHeap<std::cmp::Reverse<(u8, u64, PackKey)>>,
+    queued: HashSet<PackKey>,
     seq: u64,
     started: bool,
 }
 
-/// Decoded solid-pack bodies, least recently used evicted past [`SOLID_CACHE_BYTES`].
+/// Decoded solid-pack bodies by `(id, crc)`, least recently used evicted past
+/// [`SOLID_CACHE_BYTES`].
 #[derive(Default)]
 struct SolidCache {
-    bodies: HashMap<u32, Arc<[u8]>>,
-    order: VecDeque<u32>,
+    bodies: HashMap<PackKey, Arc<[u8]>>,
+    order: VecDeque<PackKey>,
     bytes: usize,
 }
 
 impl SolidCache {
-    fn get(&mut self, pack_id: u32) -> Option<Arc<[u8]>> {
+    fn get(&mut self, pack_id: PackKey) -> Option<Arc<[u8]>> {
         let body = self.bodies.get(&pack_id).cloned()?;
         self.order.retain(|&id| id != pack_id);
         self.order.push_back(pack_id);
         Some(body)
     }
 
-    fn put(&mut self, pack_id: u32, body: Arc<[u8]>) {
+    fn put(&mut self, pack_id: PackKey, body: Arc<[u8]>) {
         if let Some(old) = self.bodies.insert(pack_id, Arc::clone(&body)) {
             self.bytes -= old.len();
             self.order.retain(|&id| id != pack_id);
@@ -609,7 +835,7 @@ impl SolidCache {
 /// fork: desktop — report a read on the frame thread (the one named `main`) that waited
 /// [`FRAME_WAIT_REPORT`] or longer for its pack: the instrument that names every caller still
 /// fetching on the frame thread.
-fn report_frame_wait(waited: std::time::Duration, pack_id: u32, name: &str) {
+fn report_frame_wait(waited: Duration, pack_id: u32, name: &str) {
     if waited >= FRAME_WAIT_REPORT && std::thread::current().name() == Some("main") {
         eprintln!(
             "benilla: netpack: main thread waited {} ms for pack {pack_id} ({name})",
@@ -623,24 +849,6 @@ fn cached_name(pack_id: u32, crc32: u32) -> String {
     let served = benilla_pack::pack_path(pack_id);
     let stem = served.strip_suffix(".bpk").unwrap_or(&served);
     format!("{stem}-{crc32:08x}.bpk")
-}
-
-/// Fetch one pack and keep it at `dest` once its length, CRC32 and header check out; written
-/// beside and renamed, so a crash mid-write leaves no file of the right name.
-fn download(origin: &dyn Fetch, dest: &Path, pack_id: u32, meta: &PackMeta) -> io::Result<()> {
-    let rel = benilla_pack::pack_path(pack_id);
-    let mut last = None;
-    for _ in 0..ATTEMPTS {
-        match origin.get(&rel) {
-            Ok(wire) => match check_pack(&wire, pack_id, meta) {
-                Ok(()) => return write_atomic(dest, &wire),
-                Err(e) => last = Some(e),
-            },
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(e),
-            Err(e) => last = Some(e),
-        }
-    }
-    Err(last.unwrap_or_else(|| io::Error::other("no attempt made")))
 }
 
 fn check_pack(wire: &[u8], pack_id: u32, meta: &PackMeta) -> io::Result<()> {
@@ -684,33 +892,44 @@ fn read_index(root: &Path) -> Result<Option<Index>> {
         .map_err(|e| anyhow!("{}: {e}", root.join(INDEX).display()))
 }
 
-/// The index to open on: the cached one when it is the origin's build, else the origin's, fetched
-/// and kept with its listfile, the packs it no longer names deleted. Offline, the cached one.
-fn sync_index(root: &Path, origin: &dyn Fetch) -> Result<Index> {
+/// The origin's version pointer, its text and its build id; `None` offline, or from an origin that
+/// serves none.
+fn fetch_pointer(origin: &dyn Fetch) -> Option<(String, u64)> {
+    let text = String::from_utf8_lossy(&origin.get(POINTER).ok()?).into_owned();
+    let id = pointer_build_id(&text)?;
+    Some((text, id))
+}
+
+/// The index to open on, with the pointer that named it: the cached one when it is the origin's
+/// build, else the origin's, fetched and kept with its listfile, the packs it no longer names
+/// deleted. Offline, the cached one, with no pointer.
+fn sync_index(root: &Path, origin: &dyn Fetch) -> Result<(Index, Option<String>)> {
     // A cached index that will not parse is no index: the origin's replaces it.
     let cached = read_index(root).unwrap_or(None);
-    let wanted = origin
-        .get(POINTER)
-        .ok()
-        .and_then(|p| pointer_build_id(&String::from_utf8_lossy(&p)));
-    let Some(wanted) = wanted else {
+    let Some((pointer, wanted)) = fetch_pointer(origin) else {
         // No pointer: offline, or an origin that serves none. Hold what is cached.
         return match cached {
-            Some(index) => Ok(index),
-            None => fetch_index(root, origin),
+            Some(index) => Ok((index, None)),
+            None => fetch_index(root, origin, None),
         };
     };
     if let Some(index) = cached {
         if index.build_id() == wanted {
-            return Ok(index);
+            return Ok((index, Some(pointer)));
         }
     }
-    fetch_index(root, origin)
+    fetch_index(root, origin, Some((pointer, wanted)))
 }
 
 /// The origin's index (and listfile), kept at `root`, and the cache swept of packs it does not
-/// name.
-fn fetch_index(root: &Path, origin: &dyn Fetch) -> Result<Index> {
+/// name; with the pointer that names its build. `pointer` is the one read before the index: when
+/// the index is another build (a site landed between the two requests) the pointer is asked
+/// again, and dropped when it still names another.
+fn fetch_index(
+    root: &Path,
+    origin: &dyn Fetch,
+    pointer: Option<(String, u64)>,
+) -> Result<(Index, Option<String>)> {
     let bytes = origin
         .get(INDEX)
         .with_context(|| format!("fetching {INDEX} from {}", origin.describe()))?;
@@ -725,14 +944,19 @@ fn fetch_index(root: &Path, origin: &dyn Fetch) -> Result<Index> {
             return Err(anyhow!(
                 "fetching {LISTFILE} from {}: {e}",
                 origin.describe()
-            ))
+            ));
         }
     }
     write_atomic(&root.join(INDEX), &bytes)?;
     // The loose files the site serves beside the index (`crate::remote::loose`) turn over with it.
     let _ = std::fs::remove_dir_all(root.join("loose"));
     sweep(root, &index);
-    Ok(index)
+    let build = index.build_id();
+    let pointer = match pointer {
+        Some((_, id)) if id != build => fetch_pointer(origin).filter(|(_, id)| *id == build),
+        same => same,
+    };
+    Ok((index, pointer.map(|(text, _)| text)))
 }
 
 /// Delete every cached pack file the index does not name by `(id, crc)`, and any partial write.

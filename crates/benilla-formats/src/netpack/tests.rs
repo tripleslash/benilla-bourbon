@@ -309,3 +309,120 @@ fn a_promoted_world_entry_set_lands_and_counts_up() {
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }
+
+/// A folder origin that counts the packs fetched from it.
+struct Counting(Folder, Arc<AtomicUsize>);
+
+impl Fetch for Counting {
+    fn get(&self, rel: &str) -> io::Result<Vec<u8>> {
+        if rel.starts_with("p/") {
+            self.1.fetch_add(1, Ordering::Relaxed);
+        }
+        self.0.get(rel)
+    }
+
+    fn describe(&self) -> String {
+        self.0.describe()
+    }
+}
+
+#[test]
+fn a_repack_mid_session_moves_the_store_onto_the_new_build() {
+    let (origin, cache) = (Scratch::new("origin"), Scratch::new("cache"));
+    publish(&origin.0, &[9u8; 2048]);
+    let store = open(&cache.0, &origin.0);
+    store.read("Interface\\a.lua").unwrap();
+    let old_build = store.index().build_id();
+    let kept = cached_packs(&cache.0);
+
+    publish(&origin.0, &noise(3000, 2));
+    assert_eq!(
+        store.read("Sound\\two.wav").unwrap(),
+        noise(3000, 2),
+        "the read is made again against the new build"
+    );
+    assert_ne!(store.index().build_id(), old_build);
+    let crc1 = store.index().pack(1).unwrap().crc32;
+    assert_eq!(
+        cached_packs(&cache.0),
+        vec![kept[0].clone(), format!("0001-{crc1:08x}.bpk")],
+        "the unchanged pack is kept and the new one cached"
+    );
+    let on_disk = Index::parse(std::fs::read(cache.0.join(INDEX)).unwrap()).unwrap();
+    assert_eq!(
+        on_disk.build_id(),
+        store.index().build_id(),
+        "the new index is kept"
+    );
+    assert_eq!(
+        store.read("Interface\\a.lua").unwrap(),
+        b"print('a')".repeat(50)
+    );
+}
+
+#[test]
+fn try_read_after_a_mid_session_repack_answers_from_the_new_build() {
+    let (origin, cache) = (Scratch::new("origin"), Scratch::new("cache"));
+    publish(&origin.0, &[9u8; 2048]);
+    let store = open(&cache.0, &origin.0);
+    publish(&origin.0, &noise(3000, 2));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match store.try_read("Sound\\two.wav") {
+            TryRead::Ready(bytes) => {
+                assert_eq!(bytes, noise(3000, 2));
+                break;
+            }
+            TryRead::Pending if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            TryRead::Missing => panic!("the old build's row was recorded as a failure"),
+            TryRead::Pending => panic!("the new build's pack never landed"),
+        }
+    }
+}
+
+#[test]
+fn the_fill_after_a_mid_session_repack_fetches_nothing_it_throws_away() {
+    let (origin, cache) = (Scratch::new("origin"), Scratch::new("cache"));
+    publish(&origin.0, &[9u8; 2048]);
+    let fetched = Arc::new(AtomicUsize::new(0));
+    let store = NetPackStore::open(
+        &cache.0,
+        Some(Box::new(Counting(
+            Folder(origin.0.clone()),
+            Arc::clone(&fetched),
+        ))),
+    )
+    .unwrap();
+    store.fill(0).unwrap();
+    publish(&origin.0, &noise(3000, 2));
+
+    let mut fills = 0;
+    while let Some(id) = store.next_unfilled() {
+        let _ = store.fill(id);
+        fills += 1;
+        assert!(fills < 10, "the fill never finished");
+    }
+    assert_eq!(
+        cached_packs(&cache.0).len(),
+        2,
+        "the new build's packs are all cached"
+    );
+    // Pack 0, then pack 1 once against the old row (which moves the store) and once against the
+    // new one: no retry of a body that cannot match.
+    assert_eq!(fetched.load(Ordering::Relaxed), 3);
+}
+
+#[test]
+fn an_index_of_another_build_than_its_pointer_takes_the_pointer_that_names_it() {
+    let (origin, cache) = (Scratch::new("origin"), Scratch::new("cache"));
+    publish(&origin.0, &[9u8; 2048]);
+    let stale = (String::from("{\"build_id\":\"0000000000000001\"}"), 1);
+    let (index, pointer) = fetch_index(&cache.0, &Folder(origin.0.clone()), Some(stale)).unwrap();
+    assert_eq!(
+        pointer.as_deref().and_then(pointer_build_id),
+        Some(index.build_id()),
+        "the pointer is asked again and names the index's build"
+    );
+}
