@@ -403,6 +403,19 @@ rewritten as it changes, blinked under FSR frame generation. `prepare_assets` al
 asset that is in `added`, so an asset budgeted to the next frame was dropped. Test:
 `mesh::allocator::tests::a_render_run_without_an_extract_keeps_this_frames_meshes`.
 
+## The twentieth delta: an HDR (scRGB) swapchain on request (native)
+
+`src/view/window/mod.rs`: a main-world `WindowHdrOutput { requested, status }` resource. While
+`requested`, `create_surfaces` configures every window `Rgba16Float` in
+`SurfaceColorSpace::ExtendedSrgbLinear` where the surface's capabilities offer it, and writes into
+the shared `WindowHdrStatus` whether it did, with the display's SDR white level and peak from
+`Surface::display_hdr_info` (re-read every 120 frames while requested, so a moved Windows SDR
+brightness slider arrives). A moved request sets `ExtractedWindow::hdr_changed`, which reconfigures
+the surface like a resize. Upstream's sRGB pick is otherwise unchanged (`surface_format`), and a
+float surface is viewed as itself instead of through `add_srgb_suffix`. Absent or not requested,
+nothing differs from upstream: the resource is copied into the render world only when it changes,
+and the poll is gated on the request. The consumer is `benilla-world/src/hdr_output.rs`.
+
 ## What this does NOT do
 
 It does not make the render app single-threaded, and it is not a general fix for "wgpu on a worker".

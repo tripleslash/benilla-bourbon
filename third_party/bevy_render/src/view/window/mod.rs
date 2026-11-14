@@ -14,12 +14,97 @@ use bevy_utils::default;
 use bevy_window::{
     CompositeAlphaMode, PresentMode, PrimaryWindow, RawHandleWrapper, Window, WindowClosing,
 };
+use alloc::sync::Arc;
 use core::num::NonZero;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use wgpu::{
     SurfaceConfiguration, SurfaceTargetUnsafe, TextureFormat, TextureUsages, TextureViewDescriptor,
 };
 
 pub mod screenshot;
+
+/// **benilla fork (BENILLA.md, twentieth delta).** A request for an HDR swapchain on every
+/// window: a main-world resource; `requested` asks for `Rgba16Float` in scRGB
+/// ([`wgpu::SurfaceColorSpace::ExtendedSrgbLinear`]), which a window gets where its surface
+/// advertises it. [`WindowHdrStatus`] reports back what the surface was configured with. Absent,
+/// or not requested, every surface is configured exactly as upstream configures it.
+#[derive(Resource, Clone, Default)]
+pub struct WindowHdrOutput {
+    pub requested: bool,
+    pub status: Arc<WindowHdrStatus>,
+}
+
+/// What the render world configured for a [`WindowHdrOutput`] request, shared with the main world.
+#[derive(Default)]
+pub struct WindowHdrStatus {
+    active: AtomicBool,
+    /// `f32` bits; `0` while the display reported nothing.
+    sdr_white_nits: AtomicU32,
+    /// `f32` bits; `0` while the display reported nothing.
+    max_nits: AtomicU32,
+}
+
+impl WindowHdrStatus {
+    /// Whether a window presents in scRGB now.
+    pub fn active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+
+    /// The OS's SDR white level for the window's display, in nits, where it reports one.
+    pub fn sdr_white_nits(&self) -> Option<f32> {
+        Some(f32::from_bits(self.sdr_white_nits.load(Ordering::Acquire))).filter(|n| *n > 0.0)
+    }
+
+    /// The display's reported peak luminance, in nits, where it reports one.
+    pub fn max_nits(&self) -> Option<f32> {
+        Some(f32::from_bits(self.max_nits.load(Ordering::Acquire))).filter(|n| *n > 0.0)
+    }
+
+    fn store(&self, active: bool, info: Option<wgpu::DisplayHdrInfo>) {
+        let lum = info.and_then(|i| i.luminance);
+        let bits = |n: Option<f32>| n.filter(|n| n.is_finite()).unwrap_or(0.0).to_bits();
+        self.sdr_white_nits
+            .store(bits(lum.and_then(|l| l.sdr_white_nits)), Ordering::Release);
+        self.max_nits
+            .store(bits(lum.and_then(|l| l.max_nits)), Ordering::Release);
+        self.active.store(active, Ordering::Release);
+    }
+}
+
+/// The format and colour space a surface is configured in: scRGB where HDR is requested and the
+/// surface offers it, else upstream's sRGB pick.
+fn surface_format(
+    caps: &wgpu::SurfaceCapabilities,
+    hdr: bool,
+) -> (TextureFormat, wgpu::SurfaceColorSpace) {
+    if hdr
+        && caps
+            .color_spaces(TextureFormat::Rgba16Float)
+            .contains(wgpu::SurfaceColorSpaces::EXTENDED_SRGB_LINEAR)
+    {
+        return (
+            TextureFormat::Rgba16Float,
+            wgpu::SurfaceColorSpace::ExtendedSrgbLinear,
+        );
+    }
+    // Prefer sRGB formats for surfaces, but fall back to first available format if no sRGB formats are available.
+    let mut format = *caps.formats.first().expect("No supported formats for surface");
+    for &available_format in &caps.formats {
+        // Rgba8UnormSrgb and Bgra8UnormSrgb and the only sRGB formats wgpu exposes that we can use for surfaces.
+        if available_format == TextureFormat::Rgba8UnormSrgb
+            || available_format == TextureFormat::Bgra8UnormSrgb
+        {
+            format = available_format;
+            break;
+        }
+    }
+    (format, wgpu::SurfaceColorSpace::Auto)
+}
+
+/// The sRGB view of a non-sRGB 8-bit surface; a float surface is viewed as itself.
+fn surface_view_format(format: TextureFormat) -> Option<TextureFormat> {
+    (format.add_srgb_suffix() != format).then(|| format.add_srgb_suffix())
+}
 
 use screenshot::ScreenshotPlugin;
 
@@ -58,7 +143,13 @@ impl Plugin for WindowRenderPlugin {
                         .run_if(need_surface_configuration)
                         .before(prepare_windows),
                 )
-                .add_systems(Render, prepare_windows.in_set(RenderSystems::PrepareViews));
+                .add_systems(Render, prepare_windows.in_set(RenderSystems::PrepareViews))
+                .add_systems(
+                    Render,
+                    poll_hdr_display
+                        .run_if(hdr_requested)
+                        .before(prepare_windows),
+                );
         }
     }
 }
@@ -86,11 +177,16 @@ pub struct ExtractedWindow {
     /// On Wayland, windows must present at least once before they are shown.
     /// See <https://wayland.app/protocols/xdg-shell#xdg_surface>
     pub needs_initial_present: bool,
+    /// **benilla fork (twentieth delta).** [`WindowHdrOutput::requested`] as extracted.
+    pub hdr_requested: bool,
+    /// The request moved this frame; the surface is reconfigured.
+    pub hdr_changed: bool,
 }
 
 impl ExtractedWindow {
     fn set_swapchain_texture(&mut self, frame: wgpu::SurfaceTexture) {
-        self.swap_chain_texture_view_format = Some(frame.texture.format().add_srgb_suffix());
+        self.swap_chain_texture_view_format =
+            Some(surface_view_format(frame.texture.format()).unwrap_or(frame.texture.format()));
         let texture_view_descriptor = TextureViewDescriptor {
             format: self.swap_chain_texture_view_format,
             ..default()
@@ -124,7 +220,12 @@ fn extract_windows(
     mut removed: Extract<RemovedComponents<RawHandleWrapper>>,
     mut removed_primary: Extract<RemovedComponents<PrimaryWindow>>,
     mapper: Extract<Query<&RenderEntity>>,
+    hdr: Extract<Option<Res<WindowHdrOutput>>>,
 ) {
+    let hdr_requested = hdr.as_ref().is_some_and(|h| h.requested);
+    if let Some(hdr) = hdr.as_ref().filter(|h| h.is_changed()) {
+        commands.insert_resource(WindowHdrOutput::clone(hdr));
+    }
     for (render_entity, window, handle, is_primary) in windows.iter() {
         if is_primary {
             commands.entity(render_entity).insert(PrimaryWindow);
@@ -150,6 +251,8 @@ fn extract_windows(
                     present_mode_changed: false,
                     alpha_mode: window.composite_alpha_mode,
                     needs_initial_present: true,
+                    hdr_requested,
+                    hdr_changed: false,
                 },
                 handle.clone(),
             ));
@@ -178,6 +281,8 @@ fn extract_windows(
             || new_height != extracted_window.physical_height;
         extracted_window.present_mode_changed =
             window.present_mode != extracted_window.present_mode;
+        extracted_window.hdr_changed = hdr_requested != extracted_window.hdr_requested;
+        extracted_window.hdr_requested = hdr_requested;
 
         if extracted_window.size_changed {
             debug!(
@@ -295,7 +400,11 @@ pub fn prepare_windows(
         };
 
         // We didn't present the previous frame, so we can keep using our existing swapchain texture.
-        if window.has_swapchain_texture() && !window.size_changed && !window.present_mode_changed {
+        if window.has_swapchain_texture()
+            && !window.size_changed
+            && !window.present_mode_changed
+            && !window.hdr_changed
+        {
             continue;
         }
 
@@ -364,7 +473,11 @@ pub fn prepare_windows(
 
 pub fn need_surface_configuration(windows: Query<(&ExtractedWindow, Has<SurfaceData>)>) -> bool {
     for (window, has_surface_data) in &windows {
-        if !has_surface_data || window.size_changed || window.present_mode_changed {
+        if !has_surface_data
+            || window.size_changed
+            || window.present_mode_changed
+            || window.hdr_changed
+        {
             return true;
         }
     }
@@ -392,6 +505,7 @@ pub fn create_surfaces(
     render_instance: Res<RenderInstance>,
     render_adapter: Res<RenderAdapter>,
     render_device: Res<RenderDevice>,
+    hdr: Option<Res<WindowHdrOutput>>,
 ) {
     for (entity, mut window, handle, mut maybe_surface_data) in &mut windows {
         let Some(data) = maybe_surface_data.as_mut() else {
@@ -425,26 +539,9 @@ pub fn create_surfaces(
             });
             let caps = surface.get_capabilities(&render_adapter);
             let present_mode = present_mode(&window, &caps);
-            let formats = caps.formats;
-            // For future HDR output support, we'll need to request a format that supports HDR,
-            // but as of wgpu 0.15 that is not yet supported.
-            // Prefer sRGB formats for surfaces, but fall back to first available format if no sRGB formats are available.
-            let mut format = *formats.first().expect("No supported formats for surface");
-            for available_format in formats {
-                // Rgba8UnormSrgb and Bgra8UnormSrgb and the only sRGB formats wgpu exposes that we can use for surfaces.
-                if available_format == TextureFormat::Rgba8UnormSrgb
-                    || available_format == TextureFormat::Bgra8UnormSrgb
-                {
-                    format = available_format;
-                    break;
-                }
-            }
-
-            let texture_view_format = if !format.is_srgb() {
-                Some(format.add_srgb_suffix())
-            } else {
-                None
-            };
+            // **benilla fork (twentieth delta).** scRGB where asked for and offered.
+            let (format, color_space) = surface_format(&caps, window.hdr_requested);
+            let texture_view_format = surface_view_format(format);
             let configuration = SurfaceConfiguration {
                 format,
                 width: window.physical_width,
@@ -466,10 +563,16 @@ pub fn create_surfaces(
                     Some(format) => vec![format],
                     None => vec![],
                 },
-                color_space: wgpu::SurfaceColorSpace::Auto,
+                color_space,
             };
 
             render_device.configure_surface(&surface, &configuration);
+            if let Some(hdr) = hdr.as_ref().filter(|_| window.hdr_requested) {
+                hdr.status.store(
+                    color_space == wgpu::SurfaceColorSpace::ExtendedSrgbLinear,
+                    Some(surface.display_hdr_info(&render_adapter)),
+                );
+            }
 
             commands.entity(entity).insert(SurfaceData {
                 surface: WgpuSurface::new(surface),
@@ -479,7 +582,7 @@ pub fn create_surfaces(
             continue;
         };
 
-        if window.size_changed || window.present_mode_changed {
+        if window.size_changed || window.present_mode_changed || window.hdr_changed {
             // normally this is dropped on present but we double check here to be safe as failure to
             // drop it will cause validation errors in wgpu
             drop(window.swap_chain_texture.take());
@@ -493,9 +596,54 @@ pub fn create_surfaces(
             data.configuration.height = window.physical_height;
             let caps = data.surface.get_capabilities(&render_adapter);
             data.configuration.present_mode = present_mode(&window, &caps);
+            // **benilla fork (twentieth delta).** A moved request picks the format again.
+            if window.hdr_changed {
+                let (format, color_space) = surface_format(&caps, window.hdr_requested);
+                data.texture_view_format = surface_view_format(format);
+                data.configuration.format = format;
+                data.configuration.color_space = color_space;
+                data.configuration.view_formats = data.texture_view_format.into_iter().collect();
+            }
             render_device.configure_surface(&data.surface, &data.configuration);
+            if let Some(hdr) = hdr.as_ref() {
+                let active =
+                    data.configuration.color_space == wgpu::SurfaceColorSpace::ExtendedSrgbLinear;
+                hdr.status.store(
+                    active,
+                    active.then(|| data.surface.display_hdr_info(&render_adapter)),
+                );
+            }
         }
     }
+}
+
+/// **benilla fork (twentieth delta).** Re-reads an scRGB window's display every
+/// [`HDR_DISPLAY_POLL_FRAMES`] frames, so a moved OS SDR white level reaches the status; runs only
+/// while HDR is requested.
+fn poll_hdr_display(
+    hdr: Res<WindowHdrOutput>,
+    windows: Query<&SurfaceData>,
+    render_adapter: Res<RenderAdapter>,
+    mut frames: Local<u32>,
+) {
+    *frames += 1;
+    if *frames < HDR_DISPLAY_POLL_FRAMES {
+        return;
+    }
+    *frames = 0;
+    for data in &windows {
+        if data.configuration.color_space == wgpu::SurfaceColorSpace::ExtendedSrgbLinear {
+            hdr.status
+                .store(true, Some(data.surface.display_hdr_info(&render_adapter)));
+        }
+    }
+}
+
+/// About two seconds at 60 frames.
+const HDR_DISPLAY_POLL_FRAMES: u32 = 120;
+
+fn hdr_requested(hdr: Option<Res<WindowHdrOutput>>) -> bool {
+    hdr.is_some_and(|h| h.requested)
 }
 
 fn present_mode(window: &ExtractedWindow, caps: &wgpu::SurfaceCapabilities) -> wgpu::PresentMode {
