@@ -469,6 +469,24 @@
             "The graphics interface the game draws through. Vulkan is the default, the fastest "
             .. "here; DirectX 12 and OpenGL can help with a driver that misbehaves. One your system does not offer falls "
             .. "back to the best it does. Takes effect the next time the game starts."
+        -- fork: native HDR output — 1.12 has no HDR, and the web build, whose canvas cannot be
+        -- placed in nits, defines none of it.
+        if ( BENILLA_NATIVE ) then
+            BENILLA_TOOLTIP_HDR_OUTPUT =
+                "Shows the game in HDR on a display that supports it, so sunlight, fire and "
+                .. "glowing spells can shine brighter than white. Turn on HDR in the Windows "
+                .. "display settings first; without it this box changes nothing.\n\n"
+                .. "The interface keeps the brightness Windows gives ordinary content. Highlights "
+                .. "brighter than white come from Modern lighting. Applies when you click Apply."
+            BENILLA_TOOLTIP_HDR_PEAK_NITS =
+                "The brightest the game draws a highlight, in nits. Set it to your display's peak "
+                .. "brightness: above what the display can show, the brightest highlights clip; "
+                .. "below it, they are dimmer than they could be. Needs HDR on."
+            BENILLA_TOOLTIP_HDR_MID_GREY_NITS =
+                "How bright the world is in HDR, as the nits of an average mid-grey surface. "
+                .. "Higher brightens the whole world, lower darkens it; the interface is "
+                .. "unaffected. 37 nits is the HDR reference level. Needs HDR on."
+        end
         -- fork: native GPU — `rayTracing`; 1.12 has no such box, and the web build, which has no
         -- hardware ray tracing, defines none of it.
         if ( BENILLA_NATIVE ) then
@@ -867,6 +885,10 @@
                     table.insert(graphics, i + 2, "RowResolution")
                     table.insert(graphics, i + 3, "RowMultisample")
                     table.insert(graphics, i + 4, "RowGraphicsApi")
+                    -- fork: native HDR output — the box and its two levels.
+                    table.insert(graphics, i + 5, "RowHdrOutput")
+                    table.insert(graphics, i + 6, "RowHdrPeakNits")
+                    table.insert(graphics, i + 7, "RowHdrMidGreyNits")
                     break
                 end
             end
@@ -1266,6 +1288,10 @@
             if row.fmt == "factor" then
                 return string.format("%.1fx", value)
             end
+            -- fork: native HDR output — "nits": a luminance, `1000 nits`.
+            if row.fmt == "nits" then
+                return string.format("%d nits", math.floor(value + 0.5))
+            end
             -- fork: "hours": a signed offset, `+3 h`, `0 h`, `-5 h`.
             if row.fmt == "hours" then
                 local h = math.floor(value + 0.5)
@@ -1572,6 +1598,10 @@
                     BenillaOptionsRow_SetEnabled(getglobal(base .. "RowFrameGenerationMultiplier"), fg)
                     BenillaOptionsRow_SetEnabled(getglobal(base .. "RowNvidiaReflex"),
                         BENILLA_REFLEX ~= nil)
+                    -- fork: native HDR output — the two levels while HDR is on.
+                    local hdr = BenillaOptionsRow_Shown(getglobal(base .. "RowHdrOutput")) ~= "0"
+                    BenillaOptionsRow_SetEnabled(getglobal(base .. "RowHdrPeakNits"), hdr)
+                    BenillaOptionsRow_SetEnabled(getglobal(base .. "RowHdrMidGreyNits"), hdr)
                 end
                 return
             end
@@ -2854,6 +2884,46 @@
                                                 if ( BENILLA_NATIVE ) then this:Show() end
                                             </OnLoad></Scripts>
                                         </Frame>
+                                        <!-- fork: native HDR output (`benilla_world::hdr_output`) —
+                                             a native client's rows; the web build has no HDR
+                                             canvas to place white and peak on. -->
+                                        <Frame name="$parentRowHdrOutput" inherits="BenillaOptionsCheckboxRowTemplate" hidden="true">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowGraphicsApi" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowGraphicsApi" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "hdrOutput", "HDR",
+                                                    "BENILLA_TOOLTIP_HDR_OUTPUT")
+                                                if ( BENILLA_NATIVE ) then this:Show() end
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowHdrPeakNits" inherits="BenillaOptionsSliderRowTemplate" hidden="true">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowHdrOutput" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowHdrOutput" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "hdrPeakNits", "Peak Brightness",
+                                                    "BENILLA_TOOLTIP_HDR_PEAK_NITS", 1)
+                                                this.parentRow = "RowHdrOutput"
+                                                BenillaOptionsSliderRow_Setup(this, 400, 4000, 50, "nits")
+                                                if ( BENILLA_NATIVE ) then this:Show() end
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowHdrMidGreyNits" inherits="BenillaOptionsSliderRowTemplate" hidden="true">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowHdrPeakNits" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowHdrPeakNits" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "hdrMidGreyNits", "Mid-Grey Brightness",
+                                                    "BENILLA_TOOLTIP_HDR_MID_GREY_NITS", 1)
+                                                this.parentRow = "RowHdrOutput"
+                                                BenillaOptionsSliderRow_Setup(this, 10, 100, 1, "nits")
+                                                if ( BENILLA_NATIVE ) then this:Show() end
+                                            </OnLoad></Scripts>
+                                        </Frame>
                                         <Frame name="$parentRowFarclip" inherits="BenillaOptionsSliderRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowGamma" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-33"/></Offset></Anchor>
@@ -2863,7 +2933,7 @@
                                                 -- fork: desktop — under the display rows where they
                                                 -- show, the section gap kept.
                                                 if ( BENILLA_NATIVE ) then
-                                                    local above = this:GetParent():GetName() .. "RowGraphicsApi"
+                                                    local above = this:GetParent():GetName() .. "RowHdrMidGreyNits"
                                                     this:ClearAllPoints()
                                                     this:SetPoint("TOPLEFT", above, "BOTTOMLEFT", 0, -33)
                                                     this:SetPoint("TOPRIGHT", above, "BOTTOMRIGHT", 0, -33)
@@ -4418,6 +4488,12 @@
             -- fork: desktop
             BENILLA_MULTISAMPLE = "Multisampling"
             BENILLA_GRAPHICS_API = "Graphics API"
+            -- fork: native HDR output — a native client's rows only.
+            if ( BENILLA_NATIVE ) then
+                BENILLA_HDR_OUTPUT = "HDR"
+                BENILLA_HDR_PEAK_NITS = "HDR Peak Brightness"
+                BENILLA_HDR_MID_GREY_NITS = "HDR Mid-Grey Brightness"
+            end
             -- fork: native GPU — a native client's row only.
             if ( BENILLA_NATIVE ) then
                 BENILLA_RAY_TRACING = "Ray Tracing"
@@ -4749,6 +4825,18 @@
                     name = "BENILLA_GRAPHICS_API", desc = BENILLA_TOOLTIP_GRAPHICS_API,
                     type = "dropdown", identifier = "BenillaGraphicsApi", cvar = "gxApi",
                     restartGx = 1 } })
+                -- fork: native HDR output — the box and its two levels, greyed while it is off.
+                tinsert(rows, { category = DISPLAY, row = {
+                    name = "BENILLA_HDR_OUTPUT", desc = BENILLA_TOOLTIP_HDR_OUTPUT,
+                    type = "checkbutton", cvar = "hdrOutput" } })
+                tinsert(rows, { category = DISPLAY, row = {
+                    name = "BENILLA_HDR_PEAK_NITS", desc = BENILLA_TOOLTIP_HDR_PEAK_NITS,
+                    type = "slider", cvar = "hdrPeakNits", minval = 400, maxval = 4000, step = 50,
+                    dependency = { "hdrOutput", "1" } } })
+                tinsert(rows, { category = DISPLAY, row = {
+                    name = "BENILLA_HDR_MID_GREY_NITS", desc = BENILLA_TOOLTIP_HDR_MID_GREY_NITS,
+                    type = "slider", cvar = "hdrMidGreyNits", minval = 10, maxval = 100, step = 1,
+                    dependency = { "hdrOutput", "1" } } })
                 -- fork: native GPU — `rayTracing`, switched at run time
                 -- (`modern::RayTracingSetting`): the write applies on the next frame.
                 tinsert(rows, { category = PIXEL_SHADERS, row = {
@@ -4826,7 +4914,8 @@
                     "BENILLA_GRAPHICS_PRESET", "UI_SCALE", "BENILLA_RENDER_SCALE",
                     "BENILLA_UPSCALER", "BENILLA_RCAS_SHARPNESS", "BENILLA_FRAME_GENERATION",
                     "BENILLA_FG_MULTIPLIER", "BENILLA_REFLEX", "BENILLA_BRIGHTNESS",
-                    "GAMMA", "BENILLA_MULTISAMPLE", "BENILLA_GRAPHICS_API" } },
+                    "GAMMA", "BENILLA_MULTISAMPLE", "BENILLA_GRAPHICS_API",
+                    "BENILLA_HDR_OUTPUT", "BENILLA_HDR_PEAK_NITS", "BENILLA_HDR_MID_GREY_NITS" } },
                 { name = "World Detail", from = WORLD_APPEARANCE, rows = {
                     "FARCLIP", "BENILLA_GROUND_CLUTTER_DISTANCE", "BENILLA_GROUND_CLUTTER_DENSITY",
                     "BENILLA_GROUND_CLUTTER_SCALE", "BENILLA_HD_MODELS", "BENILLA_REFORGED_MODELS",
@@ -5038,6 +5127,9 @@
                 GAMMA = { fmt = "gamma" },
                 MAX_FOLLOW_DIST = { fmt = "yards" },
                 BENILLA_SERVER_TIME_OFFSET = { fmt = "hours" },
+                -- fork: native HDR output
+                BENILLA_HDR_PEAK_NITS = { fmt = "nits" },
+                BENILLA_HDR_MID_GREY_NITS = { fmt = "nits" },
                 SPELL_DETAIL = { stops = { "Low", "Medium", "High" } },
                 WEATHER_DETAIL = { stops = { "Minimal", "Low", "Medium", "Full" } },
             }

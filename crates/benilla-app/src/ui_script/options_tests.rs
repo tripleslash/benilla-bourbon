@@ -1919,6 +1919,49 @@ fn the_upscaler_row_offers_dlss_only_on_a_native_client() {
     }
 }
 
+/// fork: native HDR output — the HDR box and its two levels show on a native client only, the
+/// levels read in nits, and they are greyed while the box is off.
+#[test]
+fn the_hdr_rows_show_on_a_native_client_only() {
+    benilla_formats::wow_data_or_skip!();
+    const BASE: &str = "BenillaOptionsFrameContainerBodyGraphics";
+    for native in [false, true] {
+        let mut s = audio_harness();
+        if native {
+            s.lua().globals().set("BENILLA_NATIVE", 1).unwrap();
+        }
+        s.set_cvar_host("hdrOutput", "0");
+        s.set_cvar_host("hdrPeakNits", "1000");
+        s.set_cvar_host("hdrMidGreyNits", "37");
+        let s = harness_on(s);
+        s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+        s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
+            .unwrap();
+        for row in ["RowHdrOutput", "RowHdrPeakNits", "RowHdrMidGreyNits"] {
+            let shown: bool = s
+                .eval(&format!("return {BASE}{row}:IsShown() and true or false"))
+                .unwrap();
+            assert_eq!(shown, native, "{row} on native {native}");
+        }
+        if native {
+            let read: String = s
+                .eval(&format!(
+                    "return {BASE}RowHdrPeakNitsControlValue:GetText() .. '|' \
+                     .. {BASE}RowHdrMidGreyNitsControlValue:GetText()"
+                ))
+                .unwrap();
+            assert_eq!(read, "1000 nits|37 nits");
+            let live: bool = s
+                .eval(&format!(
+                    "return {BASE}RowHdrPeakNitsControlSliderThumb:IsShown() and true or false"
+                ))
+                .unwrap();
+            assert!(!live, "Peak Brightness is greyed while HDR is off");
+        }
+        assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    }
+}
+
 /// fork: fsr (FORK.md) — Render Scale's marked stops: 67% (FSR's quality ratio) and 100%
 /// carry a tick and a label on the groove, the 0.01 grid reaches 0.67, and a drag that ends
 /// within 0.03 of a mark lands on it.
