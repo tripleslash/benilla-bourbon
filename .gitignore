@@ -16,6 +16,8 @@
 /out/
 # Real client files used as test fixtures (document expected paths, do not commit).
 **/tests/fixtures/
+# Billboard textures taken from a local WoW Forever install to replace the packs' upscales.
+/billboard_upgrades/
 
 # --- benilla's own local state ---
 # The one folder benilla persists into: config.toml, macros/, bindings/, saved-variables.lua,
