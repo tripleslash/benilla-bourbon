@@ -68,12 +68,43 @@ fn resolve_texture(
     }
 }
 
-/// A visibility track's static value: `None` if time-varying, `1.0` for an empty track.
-fn track_constant(track: &benilla_m2::M2ScalarTrack) -> Option<f32> {
+/// One factor of a batch's alpha, as the static cull sees it.
+#[derive(Clone, Copy, Debug)]
+enum AlphaFactor {
+    Constant(f32),
+    /// A time-varying track's least key: the scalar sampler steps or lerps between keys
+    /// (`0x71af20`), so the factor never leaves their span.
+    Animated {
+        least: f32,
+    },
+}
+
+/// A visibility track as a cull factor: an empty track is a constant `1.0`.
+fn alpha_factor(track: &benilla_m2::M2ScalarTrack) -> AlphaFactor {
     if track.keys.is_empty() {
-        return Some(1.0);
+        return AlphaFactor::Constant(1.0);
     }
-    track.constant()
+    match track.constant() {
+        Some(c) => AlphaFactor::Constant(c),
+        None => AlphaFactor::Animated {
+            least: track.keys.iter().map(|&(_, v)| v).fold(f32::MAX, f32::min),
+        },
+    }
+}
+
+/// Whether `colorAlpha · weight ≤ 0` holds at every key, so the reference skips the batch for good
+/// (`0x707b3a`). A constant 0 beside an animated factor culls, as does a negative constant beside
+/// one that never goes negative (a `fix16` key is signed); the bake cannot hold either, as it
+/// drops a constant factor `≤ 0` (a glow card on weight 0 beside a colour fade drew at full alpha).
+fn constant_invisible(color: AlphaFactor, weight: AlphaFactor) -> bool {
+    use AlphaFactor::{Animated, Constant};
+    match (color, weight) {
+        (Constant(c), Constant(w)) => c * w <= 0.0,
+        (Constant(f), Animated { least }) | (Animated { least }, Constant(f)) => {
+            f == 0.0 || (f < 0.0 && least >= 0.0)
+        }
+        (Animated { .. }, Animated { .. }) => false,
+    }
 }
 
 /// The 4 raw `u8` weights as `f32` summing to 1; a weightless vertex binds wholly to bone 0.
@@ -470,23 +501,21 @@ pub fn parse_m2_render_submeshes(
         // `instanceAlpha · colorAlpha · transparencyWeight ≤ 0`; a constant-0 track is dropped here
         // (`OrgrimmarFloatingEmbers`' box), as instance alpha is 1 at build.
         let color_alpha = if (batch.color_index as usize) < model.color_alpha_tracks.len() {
-            track_constant(&model.color_alpha_tracks[batch.color_index as usize])
+            alpha_factor(&model.color_alpha_tracks[batch.color_index as usize])
         } else {
-            Some(1.0) // colorIndex out of range (0xffff is none): no colour factor
+            AlphaFactor::Constant(1.0) // colorIndex out of range (0xffff is none): no colour factor
         };
         let weight = if batch.texture_count != 0 {
             model
                 .transparency_lookup
                 .get(batch.weight_combo_index as usize)
                 .and_then(|&t| model.transparency_tracks.get(t as usize))
-                .map_or(Some(1.0), track_constant)
+                .map_or(AlphaFactor::Constant(1.0), alpha_factor)
         } else {
-            Some(1.0) // textureCount 0: no transparency factor
+            AlphaFactor::Constant(1.0) // textureCount 0: no transparency factor
         };
-        if let (Some(c), Some(w)) = (color_alpha, weight) {
-            if c * w <= 0.0 {
-                continue; // constant-invisible: the reference never draws it
-            }
+        if constant_invisible(color_alpha, weight) {
+            continue; // the reference never draws it
         }
         // What the static cull cannot fold away bakes to an `AlphaAnim`, one per sequence, as the
         // reference reads the playing sequence's key window each frame.
@@ -955,6 +984,80 @@ mod tests {
         }
         // The snap-up scan relies on the set ascending.
         assert!(OWNER_RUNG_BUCKETS.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    /// A constant 0 culls beside an animated factor; a negative constant only beside one that never
+    /// goes negative; two animated factors never cull statically.
+    #[test]
+    fn one_constant_zero_factor_culls_the_batch() {
+        use AlphaFactor::{Animated, Constant};
+        let fade = Animated { least: 0.0 };
+        let signed = Animated { least: -0.5 };
+        assert!(constant_invisible(Constant(1.0), Constant(0.0)));
+        assert!(!constant_invisible(Constant(-1.0), Constant(-1.0)));
+        assert!(
+            constant_invisible(fade, Constant(0.0)),
+            "weight 0 beside a colour fade"
+        );
+        assert!(
+            constant_invisible(Constant(0.0), fade),
+            "colour 0 beside a weight loop"
+        );
+        assert!(constant_invisible(signed, Constant(0.0)));
+        assert!(constant_invisible(fade, Constant(-0.5)));
+        assert!(
+            !constant_invisible(signed, Constant(-0.5)),
+            "a negative key lifts it above 0"
+        );
+        assert!(!constant_invisible(fade, Constant(0.5)));
+        assert!(!constant_invisible(fade, fade));
+    }
+
+    /// A constant-0 factor beside an animated one culls on the install: `FlameShock_Impact_Chest.m2`'s
+    /// `YELLOW_GLOW3` glows hold weight 0 beside a colour fade, `Flamestrike_Impact_Base.m2`'s gold
+    /// ribbon blur colour 0 beside a weight loop; the rest of each model still draws.
+    #[test]
+    fn a_zero_factor_beside_an_animated_one_culls_on_the_install() {
+        let data = crate::wow_data_or_skip!();
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        for (model, culled) in [
+            (
+                "Spells\\FlameShock_Impact_Chest.m2",
+                "SPELLS\\YELLOW_GLOW3.BLP",
+            ),
+            (
+                "Spells\\Flamestrike_Impact_Base.m2",
+                "SPELLS\\RIBBONBLUR1BEA_GOLD.BLP",
+            ),
+        ] {
+            let subs = load_m2_mesh(&mut chain, model).expect(model);
+            assert!(!subs.is_empty(), "{model}: the rest still draws");
+            assert!(
+                !subs.iter().any(|s| s
+                    .texture
+                    .as_deref()
+                    .is_some_and(|t| t.eq_ignore_ascii_case(culled))),
+                "{model}: {culled} is never drawn"
+            );
+        }
+    }
+
+    /// An animated track's factor carries its least key; a single-valued or empty one is constant.
+    #[test]
+    fn a_track_folds_to_its_cull_factor() {
+        let track = |keys: &[f32]| benilla_m2::M2ScalarTrack {
+            keys: keys
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| (i as u32 * 100, v))
+                .collect(),
+            ..Default::default()
+        };
+        assert!(matches!(alpha_factor(&track(&[])), AlphaFactor::Constant(c) if c == 1.0));
+        assert!(matches!(alpha_factor(&track(&[0.0, 0.0])), AlphaFactor::Constant(c) if c == 0.0));
+        assert!(
+            matches!(alpha_factor(&track(&[1.0, -0.25, 0.5])), AlphaFactor::Animated { least } if least == -0.25)
+        );
     }
 
     /// A version-0x101 model of one triangle and one unit of `texture_count` textures, shaped like
