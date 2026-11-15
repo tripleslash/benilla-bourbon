@@ -157,6 +157,17 @@ fn emits_mesh_stages(backend: wgpu::Backend) -> bool {
     matches!(backend, wgpu::Backend::Vulkan | wgpu::Backend::Dx12)
 }
 
+/// AMD's PCI vendor id.
+const AMD: u32 = 0x1002;
+
+/// fork: whether the meshlet lane is on by default on `vendor`'s driver, `asked` being
+/// `$WOW_GX_MESHLETS`. Off on AMD, where the modern static_gx frame hatches through to the sky on
+/// static geometry (RX 9070 XT, driver 26.10.1 LLPC, Vulkan; the lane off draws clean at the same
+/// frame rate); `WOW_GX_MESHLETS=1` asks for it there anyway.
+fn mesh_lane_default(vendor: u32, asked: Option<&str>) -> bool {
+    vendor != AMD || asked == Some("1")
+}
+
 /// The floor, in units of `unit` bytes, a native lane's self-growing buffer opens at: `native`
 /// where the device reported its limits ([`HwCaps::buffer_bytes`], never on wasm32) and
 /// `WOW_ALLOC_TIER=0` did not turn the tier off, else `web`, the lane's own floor. A buffer still
@@ -186,6 +197,10 @@ pub(crate) fn init(
 ) {
     let mut caps = HwCaps::from_parts(device.features(), &device.limits());
     caps.mesh_shader &= emits_mesh_stages(adapter.backend);
+    caps.mesh_shader &= mesh_lane_default(
+        adapter.vendor,
+        crate::launch_env::var("WOW_GX_MESHLETS").as_deref(),
+    );
     // The queue `async_compute::init` made, which runs first (`plugin`).
     caps.async_compute = async_queue.is_some();
     info!(
@@ -308,6 +323,18 @@ mod tests {
         assert!(emits_mesh_stages(wgpu::Backend::Vulkan));
         assert!(emits_mesh_stages(wgpu::Backend::Dx12));
         assert!(!emits_mesh_stages(wgpu::Backend::Metal));
+    }
+
+    /// The meshlet lane is off by default on AMD and on elsewhere; `WOW_GX_MESHLETS=1` asks for
+    /// it on AMD, and no other value does.
+    #[test]
+    fn the_mesh_lane_is_opt_in_on_amd() {
+        const NVIDIA: u32 = 0x10DE;
+        assert!(mesh_lane_default(NVIDIA, None));
+        assert!(mesh_lane_default(NVIDIA, Some("1")));
+        assert!(!mesh_lane_default(AMD, None));
+        assert!(!mesh_lane_default(AMD, Some("0")));
+        assert!(mesh_lane_default(AMD, Some("1")));
     }
 
     /// The native floor holds under an eighth of the binding, never under the web floor, and the
